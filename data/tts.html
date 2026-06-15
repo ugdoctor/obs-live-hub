@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>obs-live-hub TTS</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      background: transparent;
+      font-family: 'Segoe UI', 'Yu Gothic UI', 'Meiryo', sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <div id="tts-unlock" style="
+    position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+    z-index:9999;background:rgba(30,30,30,0.95);color:#fff;
+    padding:16px 32px;border-radius:10px;
+    font-size:18px;cursor:pointer;
+    border:1px solid rgba(255,255,255,0.25);
+    white-space:nowrap;
+  " onclick="(function(el){
+    try{var u=new SpeechSynthesisUtterance('');u.volume=0;window.speechSynthesis.speak(u);}catch(e){}
+    el.style.display='none';
+    document.getElementById('tts-active').style.display='block';
+  })(this)">&#9654; クリックして音声を有効化</div>
+
+  <div id="tts-active" style="
+    display:none;position:fixed;top:8px;right:8px;
+    z-index:9999;background:rgba(0,120,0,0.85);color:#fff;
+    padding:4px 12px;border-radius:4px;font-size:11px;
+  ">音声有効 ✓</div>
+
+  <script>
+    var WS_PORT = 8765;
+
+    var ttsSettings = {
+      enabled: false,
+      volume: 1.0,
+      rate: 1.0,
+      pitch: 1.0,
+      readUsername: true,
+      maxLength: 100,
+      twitch: true,
+      youtube: true
+    };
+
+    var ttsQueue      = [];
+    var ttsSpeaking   = false;
+    var ttsDictionary = []; // [{from, to}, ...]
+
+    function applyTts(s) {
+      var keys = ['enabled','volume','rate','pitch','readUsername','maxLength','twitch','youtube'];
+      keys.forEach(function(k) { if (s[k] !== undefined) ttsSettings[k] = s[k]; });
+      try { localStorage.setItem('ttsSpeechSettings', JSON.stringify(ttsSettings)); } catch(_) {}
+    }
+
+    function loadStoredTts() {
+      try {
+        var raw = localStorage.getItem('ttsSpeechSettings');
+        if (raw) applyTts(JSON.parse(raw));
+      } catch(_) {}
+    }
+
+    function applyDict(entries) {
+      ttsDictionary = entries || [];
+      try { localStorage.setItem('ttsDictionary', JSON.stringify(ttsDictionary)); } catch(_) {}
+    }
+
+    function loadStoredDict() {
+      try {
+        var raw = localStorage.getItem('ttsDictionary');
+        if (raw) ttsDictionary = JSON.parse(raw);
+      } catch(_) {}
+    }
+
+    function applyDictionary(text) {
+      var result = text;
+      ttsDictionary.forEach(function(entry) {
+        if (!entry.from) return;
+        var re = new RegExp(entry.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+        result = result.replace(re, entry.to || '');
+      });
+      return result;
+    }
+
+    function processTtsQueue() {
+      if (!ttsQueue.length) { ttsSpeaking = false; return; }
+      ttsSpeaking = true;
+      var item = ttsQueue.shift();
+      var userCfg = item.userCfg || {};
+      var u = new SpeechSynthesisUtterance(item.text);
+      u.volume = (userCfg.volume !== undefined) ? userCfg.volume : ttsSettings.volume;
+      u.rate   = (userCfg.rate   !== undefined) ? userCfg.rate   : ttsSettings.rate;
+      u.pitch  = (userCfg.pitch  !== undefined) ? userCfg.pitch  : ttsSettings.pitch;
+      u.onend = u.onerror = function() { processTtsQueue(); };
+      window.speechSynthesis.speak(u);
+    }
+
+    function loadUserSettings() {
+      try {
+        var raw = localStorage.getItem('olhUserSettings');
+        return raw ? JSON.parse(raw) : {};
+      } catch(_) { return {}; }
+    }
+
+    function getUserSettings(user) {
+      return loadUserSettings()[user] || {};
+    }
+
+    function queueTts(user, text, platform) {
+      if (!ttsSettings.enabled || !window.speechSynthesis) return;
+      if (platform === 'twitch'  && !ttsSettings.twitch)  return;
+      if (platform === 'youtube' && !ttsSettings.youtube) return;
+      if (ttsSettings.maxLength > 0 && text.length > ttsSettings.maxLength) return;
+      var userCfg = getUserSettings(user);
+      var userName = applyDictionary(user);
+      var commentText = applyDictionary(text);
+      var speak = ttsSettings.readUsername ? (userName + '、' + commentText) : commentText;
+      ttsQueue.push({ text: speak, userCfg: userCfg });
+      if (!ttsSpeaking) processTtsQueue();
+    }
+
+    function connect() {
+      var ws = new WebSocket('ws://127.0.0.1:' + WS_PORT);
+      ws.onopen  = function() {};
+      ws.onerror = function() {};
+      ws.onclose = function() { setTimeout(connect, 3000); };
+      ws.onmessage = function(e) {
+        try {
+          var data = JSON.parse(e.data);
+          if (data.type === 'tts') {
+            applyTts(data);
+          } else if (data.type === 'tts_dict') {
+            applyDict(data.entries);
+          } else if (data.type === 'comment') {
+            var text = data.text || '';
+            if (text.trim().startsWith('[olh]')) return;
+            var platform = ((data.platform || 'twitch') + '').toLowerCase();
+            queueTts(data.user || '', text, platform);
+          }
+          // error / error_clear / style / quota_* は無視
+        } catch(_) {}
+      };
+    }
+
+    loadStoredTts();
+    loadStoredDict();
+    connect();
+  </script>
+</body>
+</html>
