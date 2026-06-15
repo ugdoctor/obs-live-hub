@@ -30,17 +30,24 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <algorithm>
 
+#include <QApplication>
+#include <QDir>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QList>
 #include <QMap>
+#include <QMessageBox>
 #include <QPointer>
+#include <QProcess>
 #include <QWidget>
 
 #include "core/EventBus.hpp"
 #include "core/PlatformInterface.hpp"
 #include "core/PluginConfig.hpp"
+#include "modules/AivisEngine.hpp"
+#include "modules/AivisStyleCache.hpp"
 #include "modules/WsServer.hpp"
 #include "platforms/TwitchPlatform.hpp"
 #include "platforms/YouTubePlatform.hpp"
@@ -72,35 +79,52 @@ static QList<QPair<QString, QString>> s_voteChoices;
 static QMap<QString, QString> s_voteUserVote;
 static QPointer<VoteManagerDialog> s_voteDialog;
 
-// JSON 文字列を安全にエスケープして comment メッセージを返す
+static std::string escapeJsonString(const std::string &s)
+{
+	std::string r;
+	r.reserve(s.size() + 16);
+	for (unsigned char c : s) {
+		if (c == '"')       r += "\\\"";
+		else if (c == '\\') r += "\\\\";
+		else if (c == '\n') r += "\\n";
+		else if (c == '\r') r += "\\r";
+		else if (c >= 0x20) r += static_cast<char>(c);
+	}
+	return r;
+}
+
 static std::string makeCommentJson(const std::string &user, const std::string &text,
 				   const std::string &platform, const std::string &avatar = "")
 {
-	auto escape = [](const std::string &s) {
-		std::string r;
-		r.reserve(s.size() + 16);
-		for (unsigned char c : s) {
-			if (c == '"')
-				r += "\\\"";
-			else if (c == '\\')
-				r += "\\\\";
-			else if (c == '\n')
-				r += "\\n";
-			else if (c == '\r')
-				r += "\\r";
-			else if (c >= 0x20)
-				r += static_cast<char>(c);
-		}
-		return r;
-	};
 	return "{\"type\":\"comment\","
-	       "\"user\":\"" + escape(user) + "\","
-	       "\"text\":\"" + escape(text) + "\","
+	       "\"user\":\"" + escapeJsonString(user) + "\","
+	       "\"text\":\"" + escapeJsonString(text) + "\","
 	       "\"platform\":\"" + platform + "\","
-	       "\"avatar\":\"" + escape(avatar) + "\"}";
+	       "\"avatar\":\"" + escapeJsonString(avatar) + "\"}";
 }
 
-static void connectTwitchSignals(); // forward declaration
+static std::string makeSystemCommentJson(const std::string &text)
+{
+	return "{\"type\":\"comment\","
+	       "\"user\":\"obs-live-hub\","
+	       "\"text\":\"" + escapeJsonString(text) + "\","
+	       "\"platform\":\"system\","
+	       "\"avatar\":\"\"}";
+}
+
+static void connectTwitchSignals();   // forward declaration
+static void handleWsClientMessage(const QString &json); // forward declaration
+
+static void applyWsCallbacks(WsServer *srv)
+{
+	if (!srv)
+		return;
+	srv->setMessageCallback([](const std::string &json) {
+		const QString js = QString::fromStdString(json);
+		QMetaObject::invokeMethod(qApp, [js]() { handleWsClientMessage(js); },
+		                          Qt::QueuedConnection);
+	});
+}
 
 static void restartWsServer()
 {
@@ -112,6 +136,7 @@ static void restartWsServer()
 
 	const int port = PluginConfig::instance().wsPort;
 	s_wsServer = new WsServer(static_cast<uint16_t>(port));
+	applyWsCallbacks(s_wsServer);
 	if (!s_wsServer->start()) {
 		obs_log(LOG_WARNING, "WsServer: Failed to start on port %d", port);
 		delete s_wsServer;
@@ -442,7 +467,78 @@ static std::string makeTtsJson()
 	       "\"readUsername\":" + (cfg.ttsReadUsername ? "true" : "false") + "," +
 	       "\"maxLength\":" + std::to_string(cfg.ttsMaxLength) + "," +
 	       "\"twitch\":" + (cfg.ttsTwitch ? "true" : "false") + "," +
-	       "\"youtube\":" + (cfg.ttsYoutube ? "true" : "false") + "}";
+	       "\"youtube\":" + (cfg.ttsYoutube ? "true" : "false") + "," +
+	       "\"ttsEngine\":\"" + cfg.ttsEngine + "\"," +
+	       "\"aivisUrl\":\"" + cfg.aivisUrl + "\"," +
+	       "\"aivisStyleId\":" + std::to_string(cfg.aivisStyleId) + "}";
+}
+
+static void handleOlhEngineRequest(const QJsonObject &obj)
+{
+	const QString userId = obj["userId"].toString();
+	const QString engine = obj["engine"].toString();
+
+	QJsonObject res;
+	res["type"]   = QStringLiteral("resolve_engine_result");
+	res["userId"] = userId;
+
+	if (engine != "webspeech" && engine != "aivisspeech") {
+		res["ok"]    = false;
+		res["error"] = QStringLiteral("不明なエンジン: ") + engine;
+	} else {
+		res["ok"]     = true;
+		res["engine"] = engine;
+	}
+
+	if (s_wsServer)
+		s_wsServer->broadcast(
+			QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString());
+}
+
+static void handleResolveModel(const QJsonObject &obj)
+{
+	const QString userId    = obj["userId"].toString();
+	const QString modelName = obj["modelName"].toString();
+
+	QJsonObject res;
+	res["type"]   = QStringLiteral("resolve_model_result");
+	res["userId"] = userId;
+
+	if (AivisStyleCache::isEmpty()) {
+		res["ok"]    = false;
+		res["error"] = QStringLiteral(
+			"音声モデル一覧が未取得です。読み上げ設定を開いて更新してください。");
+	} else {
+		const AivisCachedStyle *style = AivisStyleCache::findByName(modelName);
+		if (!style) {
+			res["ok"]    = false;
+			res["error"] = QStringLiteral("モデルが見つかりません: ") + modelName;
+		} else {
+			res["ok"]          = true;
+			res["styleId"]     = static_cast<qint64>(style->styleId);
+			res["speakerName"] = style->speakerName;
+			res["styleName"]   = style->styleName;
+		}
+	}
+
+	if (s_wsServer)
+		s_wsServer->broadcast(
+			QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString());
+}
+
+static void handleWsClientMessage(const QString &json)
+{
+	const QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
+	if (!doc.isObject())
+		return;
+
+	const QJsonObject obj  = doc.object();
+	const QString     type = obj["type"].toString();
+
+	if (type == "olh_engine_request")
+		handleOlhEngineRequest(obj);
+	else if (type == "olh_model_request")
+		handleResolveModel(obj);
 }
 
 static void onOverlayStyleMenuClick(void * /* data */)
@@ -496,15 +592,53 @@ static void onOpenOverlayMenuClick(void * /* data */)
 #endif
 }
 
+#ifdef _WIN32
+static QString findChromePath()
+{
+	const char *envVars[] = {"PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"};
+	for (const char *env : envVars) {
+		char buf[MAX_PATH] = {};
+		if (GetEnvironmentVariableA(env, buf, MAX_PATH) == 0)
+			continue;
+		const QString candidate = QString::fromLocal8Bit(buf) +
+		                          "\\Google\\Chrome\\Application\\chrome.exe";
+		if (QFile::exists(candidate))
+			return candidate;
+	}
+	return {};
+}
+#endif
+
 static void onOpenTtsMenuClick(void * /* data */)
 {
 #ifdef _WIN32
 	char appdata[MAX_PATH] = {};
 	if (GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH) == 0)
 		return;
-	const std::string path =
+	const std::string ttsPathStd =
 		std::string(appdata) + "\\obs-studio\\plugins\\obs-live-hub\\tts.html";
-	ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+
+	if (PluginConfig::instance().ttsEngine == "aivisspeech") {
+		const QString chromePath = findChromePath();
+		if (chromePath.isEmpty()) {
+			auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+			QMessageBox::warning(
+				mainWindow, "Chromeが見つかりません",
+				"Chromeが見つかりません。\n"
+				"AivisSpeech使用時はChromeが必要です。\n"
+				"Chromeをインストールするか、手動でCORSを無効にして\n"
+				"tts.htmlを開いてください。");
+			return;
+		}
+		const QString ttsPath = QString::fromLocal8Bit(ttsPathStd.c_str());
+		QProcess::startDetached(chromePath,
+		                        {"--disable-web-security",
+		                         "--user-data-dir=" + QDir::tempPath() +
+		                                 "/obs-live-hub-chrome",
+		                         ttsPath});
+	} else {
+		ShellExecuteA(nullptr, "open", ttsPathStd.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+	}
 #endif
 }
 
@@ -717,6 +851,13 @@ static void onFrontendEvent(obs_frontend_event event, void * /* data */)
 		obs_log(LOG_INFO, "OBS finished loading — auto-connecting Twitch...");
 		reconnectTwitch();
 		broadcastTtsDict();
+		// AivisSpeech Engine 自動起動
+		if (PluginConfig::instance().aivisAutoStart &&
+		    !PluginConfig::instance().aivisEnginePath.empty()) {
+			obs_log(LOG_INFO, "AivisEngine: auto-starting...");
+			AivisEngine::start(
+				QString::fromStdString(PluginConfig::instance().aivisEnginePath));
+		}
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		if (s_youtube)
@@ -753,6 +894,7 @@ bool obs_module_load(void)
 
 	// WebSocket サーバー起動
 	s_wsServer = new WsServer(static_cast<uint16_t>(cfg.wsPort));
+	applyWsCallbacks(s_wsServer);
 	if (!s_wsServer->start()) {
 		obs_log(LOG_WARNING, "WsServer: Failed to start on port %d", cfg.wsPort);
 		delete s_wsServer;
@@ -804,6 +946,8 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
 	obs_frontend_remove_event_callback(onFrontendEvent, nullptr);
+
+	AivisEngine::stop();
 
 	s_eventBus.unsubscribe(s_twitchSubId);
 

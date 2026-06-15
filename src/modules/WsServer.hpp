@@ -2,6 +2,7 @@
 #ifdef _WIN32
 
 #include <atomic>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -26,6 +27,9 @@ public:
 	// JSON テキストを全 WebSocket クライアントにブロードキャスト (スレッドセーフ)
 	void broadcast(const std::string &jsonText);
 
+	// クライアントからのテキストフレームを受け取るコールバック（WsServerスレッドから呼ばれる）
+	void setMessageCallback(std::function<void(const std::string &)> cb);
+
 private:
 	void acceptLoop();
 	void clientLoop(SOCKET sock);
@@ -44,6 +48,8 @@ private:
 	std::thread acceptThread_;
 	std::mutex clientsMutex_;
 	std::vector<SOCKET> clients_;
+	std::function<void(const std::string &)> messageCallback_;
+	std::mutex callbackMutex_;
 };
 
 #endif // _WIN32

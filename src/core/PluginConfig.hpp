@@ -62,6 +62,18 @@ public:
 	bool ttsTwitch = true;
 	bool ttsYoutube = true;
 
+	// AivisSpeech 設定
+	std::string ttsEngine = "webspeech"; // "webspeech" or "aivisspeech"
+	std::string aivisUrl = "http://localhost:10101";
+	std::string aivisSpeakerUuid;
+	int64_t aivisStyleId = 0;
+	std::string aivisStyleName;
+	std::string aivisSpeakerName;
+
+	// AivisSpeech Engine 起動管理
+	std::string aivisEnginePath;
+	bool aivisAutoStart = false;
+
 	// アンケートパネル外観設定
 	std::string voteBgColor      = "#000000";
 	float       voteBgOpacity    = 0.88f;

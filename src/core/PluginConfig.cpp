@@ -199,6 +199,36 @@ void PluginConfig::load()
 	if (obs_data_has_user_value(data, "tts_youtube"))
 		ttsYoutube = obs_data_get_bool(data, "tts_youtube");
 
+	// AivisSpeech
+	if (obs_data_has_user_value(data, "tts_engine")) {
+		const char *s = obs_data_get_string(data, "tts_engine");
+		if (s && *s) ttsEngine = s;
+	}
+	if (obs_data_has_user_value(data, "aivis_url")) {
+		const char *s = obs_data_get_string(data, "aivis_url");
+		if (s && *s) aivisUrl = s;
+	}
+	if (obs_data_has_user_value(data, "aivis_speaker_uuid")) {
+		const char *s = obs_data_get_string(data, "aivis_speaker_uuid");
+		if (s) aivisSpeakerUuid = s;
+	}
+	if (obs_data_has_user_value(data, "aivis_style_id"))
+		aivisStyleId = obs_data_get_int(data, "aivis_style_id");
+	if (obs_data_has_user_value(data, "aivis_style_name")) {
+		const char *s = obs_data_get_string(data, "aivis_style_name");
+		if (s) aivisStyleName = s;
+	}
+	if (obs_data_has_user_value(data, "aivis_speaker_name")) {
+		const char *s = obs_data_get_string(data, "aivis_speaker_name");
+		if (s) aivisSpeakerName = s;
+	}
+	if (obs_data_has_user_value(data, "aivis_engine_path")) {
+		const char *s = obs_data_get_string(data, "aivis_engine_path");
+		if (s) aivisEnginePath = s;
+	}
+	if (obs_data_has_user_value(data, "aivis_auto_start"))
+		aivisAutoStart = obs_data_get_bool(data, "aivis_auto_start");
+
 	// 配信一括設定
 	if (obs_data_has_user_value(data, "stream_twitch_title")) {
 		const char *s = obs_data_get_string(data, "stream_twitch_title");
@@ -314,6 +344,16 @@ void PluginConfig::save()
 	obs_data_set_int(data, "tts_max_length", ttsMaxLength);
 	obs_data_set_bool(data, "tts_twitch", ttsTwitch);
 	obs_data_set_bool(data, "tts_youtube", ttsYoutube);
+
+	// AivisSpeech
+	obs_data_set_string(data, "tts_engine",          ttsEngine.c_str());
+	obs_data_set_string(data, "aivis_url",            aivisUrl.c_str());
+	obs_data_set_string(data, "aivis_speaker_uuid",   aivisSpeakerUuid.c_str());
+	obs_data_set_int   (data, "aivis_style_id",       aivisStyleId);
+	obs_data_set_string(data, "aivis_style_name",     aivisStyleName.c_str());
+	obs_data_set_string(data, "aivis_speaker_name",   aivisSpeakerName.c_str());
+	obs_data_set_string(data, "aivis_engine_path",    aivisEnginePath.c_str());
+	obs_data_set_bool  (data, "aivis_auto_start",     aivisAutoStart);
 
 	// 配信一括設定
 	obs_data_set_string(data, "stream_twitch_title",    streamTwitchTitle.c_str());

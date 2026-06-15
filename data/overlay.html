@@ -85,6 +85,8 @@
 
     .comment-card.platform-twitch  { border-left: 3px solid var(--twitch-color); }
     .comment-card.platform-youtube { border-left: 3px solid var(--youtube-color); }
+    .comment-card.platform-system  { border-left: 3px solid #666; opacity: 0.80; font-style: italic; }
+    .platform-system .platform-badge { background: #555; color: #ccc; }
 
     .card-header {
       display: flex;
@@ -261,6 +263,14 @@
           var v = parseFloat(val);
           if (!isNaN(v)) result.pitch = Math.min(1.3, Math.max(0.7, v));
         }
+        if (key === 'engine') {
+          var eng = val.toLowerCase();
+          if (eng === 'webspeech' || eng === 'web') result.engine = 'webspeech';
+          else if (eng === 'aivis' || eng === 'aivisspeech') result.engine = 'aivisspeech';
+        }
+        if (key === 'model') {
+          if (val.length > 0 && val.length <= 80) result.model = val;
+        }
       });
       return Object.keys(result).length ? result : null;
     }
@@ -274,6 +284,11 @@
 
     function saveUserSettings(settings) {
       try { localStorage.setItem('olhUserSettings', JSON.stringify(settings)); } catch(_) {}
+    }
+
+    function sendWs(obj) {
+      if (ws && ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify(obj));
     }
 
     function applyOlhCommand(user, cmd) {
@@ -292,6 +307,11 @@
       if (cmd.rate   !== undefined) settings[user].rate   = cmd.rate;
       if (cmd.pitch  !== undefined) settings[user].pitch  = cmd.pitch;
       saveUserSettings(settings);
+      // エンジン切り替え・モデル指定はプラグインに問い合わせ
+      if (cmd.engine !== undefined)
+        sendWs({ type: 'olh_engine_request', userId: user, engine: cmd.engine });
+      if (cmd.model !== undefined)
+        sendWs({ type: 'olh_model_request',  userId: user, modelName: cmd.model });
     }
 
     function getUserSettings(user) {
@@ -452,8 +472,10 @@
 
     // --- WebSocket 接続 -------------------------------------------------
 
+    var ws = null;
+
     function connect() {
-      var ws = new WebSocket('ws://127.0.0.1:' + WS_PORT);
+      ws = new WebSocket('ws://127.0.0.1:' + WS_PORT);
 
       ws.onopen = function() {
         showDebugToast('[debug] WebSocket connected :' + WS_PORT);
@@ -483,6 +505,22 @@
           } else if (data.type === 'error_clear') {
             delete activeErrors[data.code];
             showErrorBanner();
+          } else if (data.type === 'resolve_engine_result') {
+            if (data.ok) {
+              var s = loadUserSettings();
+              if (!s[data.userId]) s[data.userId] = {};
+              s[data.userId].engine = data.engine;
+              saveUserSettings(s);
+            }
+          } else if (data.type === 'resolve_model_result') {
+            if (data.ok) {
+              var s = loadUserSettings();
+              if (!s[data.userId]) s[data.userId] = {};
+              s[data.userId].styleId     = data.styleId;
+              s[data.userId].speakerName = data.speakerName;
+              s[data.userId].styleName   = data.styleName;
+              saveUserSettings(s);
+            }
           } else if (data.type === 'comment') {
             addComment(data);
           } else if (data.type === 'vote_start') {
@@ -503,14 +541,20 @@
     function addComment(data) {
       if (!data.user && !data.text) return;
 
-      var cmd = parseOlhCommand(data.text || '');
-      if (cmd) {
-        applyOlhCommand(data.user, cmd);
-        return;
+      var platform = ((data.platform || 'twitch') + '').toLowerCase();
+
+      // [olh] コマンドはシステムコメント以外でのみ処理
+      if (platform !== 'system') {
+        var cmd = parseOlhCommand(data.text || '');
+        if (cmd) {
+          applyOlhCommand(data.user, cmd);
+          return;
+        }
       }
 
-      var platform   = ((data.platform || 'twitch') + '').toLowerCase();
-      var badgeLabel = platform === 'youtube' ? 'YouTube' : 'Twitch';
+      var badgeLabel = platform === 'youtube' ? 'YouTube'
+                     : platform === 'system'  ? 'OBS'
+                     : 'Twitch';
 
       var iconWrap = document.createElement('div');
       iconWrap.className = 'icon-wrap';

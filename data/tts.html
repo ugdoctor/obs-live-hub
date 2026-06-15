@@ -35,6 +35,10 @@
   <script>
     var WS_PORT = 8765;
 
+    var ttsEngine    = 'webspeech'; // 'webspeech' or 'aivisspeech'
+    var aivisUrl     = 'http://localhost:10101';
+    var aivisStyleId = 0;
+
     var ttsSettings = {
       enabled: false,
       volume: 1.0,
@@ -53,13 +57,29 @@
     function applyTts(s) {
       var keys = ['enabled','volume','rate','pitch','readUsername','maxLength','twitch','youtube'];
       keys.forEach(function(k) { if (s[k] !== undefined) ttsSettings[k] = s[k]; });
-      try { localStorage.setItem('ttsSpeechSettings', JSON.stringify(ttsSettings)); } catch(_) {}
+      if (s.ttsEngine    !== undefined) ttsEngine    = s.ttsEngine;
+      if (s.aivisUrl     !== undefined) aivisUrl     = s.aivisUrl;
+      if (s.aivisStyleId !== undefined) aivisStyleId = s.aivisStyleId;
+      try { localStorage.setItem('ttsSpeechSettings', JSON.stringify({
+        settings: ttsSettings, ttsEngine: ttsEngine,
+        aivisUrl: aivisUrl, aivisStyleId: aivisStyleId
+      })); } catch(_) {}
     }
 
     function loadStoredTts() {
       try {
         var raw = localStorage.getItem('ttsSpeechSettings');
-        if (raw) applyTts(JSON.parse(raw));
+        if (!raw) return;
+        var obj = JSON.parse(raw);
+        // 旧フォーマット（settings キーなし）との互換
+        if (obj.settings) {
+          applyTts(obj.settings);
+          if (obj.ttsEngine    !== undefined) ttsEngine    = obj.ttsEngine;
+          if (obj.aivisUrl     !== undefined) aivisUrl     = obj.aivisUrl;
+          if (obj.aivisStyleId !== undefined) aivisStyleId = obj.aivisStyleId;
+        } else {
+          applyTts(obj);
+        }
       } catch(_) {}
     }
 
@@ -85,17 +105,66 @@
       return result;
     }
 
+    // ── AivisSpeech 音声合成 ──────────────────────────────────
+    async function speakWithAivis(text, styleId) {
+      console.log('[AivisSpeech] speaking:', text, 'styleId:', styleId);
+      var sid = (styleId !== undefined && styleId !== null) ? styleId : aivisStyleId;
+      try {
+        var queryRes = await fetch(
+          aivisUrl + '/audio_query?text=' + encodeURIComponent(text) +
+          '&speaker=' + sid,
+          { method: 'POST' }
+        );
+        if (!queryRes.ok) throw new Error('audio_query failed: ' + queryRes.status);
+        var query = await queryRes.json();
+
+        query.speedScale  = ttsSettings.rate   || 1.0;
+        query.volumeScale = ttsSettings.volume || 1.0;
+        query.pitchScale  = ttsSettings.pitch ? (ttsSettings.pitch - 1.0) * 0.2 : 0.0;
+
+        var synthRes = await fetch(
+          aivisUrl + '/synthesis?speaker=' + sid,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(query)
+          }
+        );
+        if (!synthRes.ok) throw new Error('synthesis failed: ' + synthRes.status);
+        var blob     = await synthRes.blob();
+        var audioUrl = URL.createObjectURL(blob);
+
+        var audio = new Audio(audioUrl);
+        audio.volume = ttsSettings.volume || 1.0;
+        audio.onended = function() { URL.revokeObjectURL(audioUrl); processTtsQueue(); };
+        audio.onerror = function() { URL.revokeObjectURL(audioUrl); processTtsQueue(); };
+        audio.play();
+      } catch(e) {
+        console.error('AivisSpeech error:', e);
+        processTtsQueue();
+      }
+    }
+
+    // ── キュー処理 ───────────────────────────────────────────
     function processTtsQueue() {
       if (!ttsQueue.length) { ttsSpeaking = false; return; }
       ttsSpeaking = true;
-      var item = ttsQueue.shift();
-      var userCfg = item.userCfg || {};
-      var u = new SpeechSynthesisUtterance(item.text);
-      u.volume = (userCfg.volume !== undefined) ? userCfg.volume : ttsSettings.volume;
-      u.rate   = (userCfg.rate   !== undefined) ? userCfg.rate   : ttsSettings.rate;
-      u.pitch  = (userCfg.pitch  !== undefined) ? userCfg.pitch  : ttsSettings.pitch;
-      u.onend = u.onerror = function() { processTtsQueue(); };
-      window.speechSynthesis.speak(u);
+      var item    = ttsQueue.shift();
+
+      var effectiveEngine  = item.engine  || ttsEngine;
+      var effectiveStyleId = (item.styleId !== undefined) ? item.styleId : aivisStyleId;
+
+      if (effectiveEngine === 'aivisspeech') {
+        speakWithAivis(item.text, effectiveStyleId);
+      } else {
+        var userCfg = item.userCfg || {};
+        var u = new SpeechSynthesisUtterance(item.text);
+        u.volume = (userCfg.volume !== undefined) ? userCfg.volume : ttsSettings.volume;
+        u.rate   = (userCfg.rate   !== undefined) ? userCfg.rate   : ttsSettings.rate;
+        u.pitch  = (userCfg.pitch  !== undefined) ? userCfg.pitch  : ttsSettings.pitch;
+        u.onend = u.onerror = function() { processTtsQueue(); };
+        window.speechSynthesis.speak(u);
+      }
     }
 
     function loadUserSettings() {
@@ -105,20 +174,28 @@
       } catch(_) { return {}; }
     }
 
+    function saveUserSettings(settings) {
+      try { localStorage.setItem('olhUserSettings', JSON.stringify(settings)); } catch(_) {}
+    }
+
     function getUserSettings(user) {
       return loadUserSettings()[user] || {};
     }
 
     function queueTts(user, text, platform) {
-      if (!ttsSettings.enabled || !window.speechSynthesis) return;
+      if (!ttsSettings.enabled) return;
+      if (platform === 'system') return;
       if (platform === 'twitch'  && !ttsSettings.twitch)  return;
       if (platform === 'youtube' && !ttsSettings.youtube) return;
       if (ttsSettings.maxLength > 0 && text.length > ttsSettings.maxLength) return;
-      var userCfg = getUserSettings(user);
-      var userName = applyDictionary(user);
+      var userCfg        = getUserSettings(user);
+      var effectiveEngine  = userCfg.engine  || ttsEngine;
+      var effectiveStyleId = (userCfg.styleId !== undefined) ? userCfg.styleId : aivisStyleId;
+      if (effectiveEngine === 'webspeech' && !window.speechSynthesis) return;
+      var userName    = applyDictionary(user);
       var commentText = applyDictionary(text);
       var speak = ttsSettings.readUsername ? (userName + '、' + commentText) : commentText;
-      ttsQueue.push({ text: speak, userCfg: userCfg });
+      ttsQueue.push({ text: speak, engine: effectiveEngine, styleId: effectiveStyleId, userCfg: userCfg });
       if (!ttsSpeaking) processTtsQueue();
     }
 
@@ -134,13 +211,28 @@
             applyTts(data);
           } else if (data.type === 'tts_dict') {
             applyDict(data.entries);
+          } else if (data.type === 'resolve_engine_result') {
+            if (data.ok) {
+              var s = loadUserSettings();
+              if (!s[data.userId]) s[data.userId] = {};
+              s[data.userId].engine = data.engine;
+              saveUserSettings(s);
+            }
+          } else if (data.type === 'resolve_model_result') {
+            if (data.ok) {
+              var s = loadUserSettings();
+              if (!s[data.userId]) s[data.userId] = {};
+              s[data.userId].styleId     = data.styleId;
+              s[data.userId].speakerName = data.speakerName;
+              s[data.userId].styleName   = data.styleName;
+              saveUserSettings(s);
+            }
           } else if (data.type === 'comment') {
             var text = data.text || '';
             if (text.trim().startsWith('[olh]')) return;
             var platform = ((data.platform || 'twitch') + '').toLowerCase();
             queueTts(data.user || '', text, platform);
           }
-          // error / error_clear / style / quota_* は無視
         } catch(_) {}
       };
     }

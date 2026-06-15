@@ -346,6 +346,12 @@ void WsServer::acceptLoop()
 	}
 }
 
+void WsServer::setMessageCallback(std::function<void(const std::string &)> cb)
+{
+	std::lock_guard<std::mutex> lock(callbackMutex_);
+	messageCallback_ = std::move(cb);
+}
+
 void WsServer::clientLoop(SOCKET sock)
 {
 	++activeClients_;
@@ -363,25 +369,73 @@ void WsServer::clientLoop(SOCKET sock)
 	}
 	obs_log(LOG_INFO, "[%s] Client connected (total: %zu)", WSTAG, clients_.size());
 
-	char buf[256];
-	while (running_.load()) {
+	std::vector<uint8_t> rxBuf;
+	rxBuf.reserve(4096);
+	bool shouldClose = false;
+
+	while (running_.load() && !shouldClose) {
 		fd_set fds;
 		FD_ZERO(&fds);
 		FD_SET(sock, &fds);
 		timeval tv{1, 0};
 		const int sel = select(0, &fds, nullptr, nullptr, &tv);
 		if (sel < 0)
-			break; // stop() でソケットが閉じられた
-		if (sel == 0)
-			continue; // タイムアウト — running_ を再チェック
-
-		const int n = recv(sock, buf, sizeof(buf), 0);
-		if (n <= 0)
-			break; // 切断 or shutdown() による EOF
-
-		// WebSocket Close フレーム (opcode 0x8)
-		if (n >= 2 && (buf[0] & 0x0F) == 0x08)
 			break;
+		if (sel == 0)
+			continue;
+
+		char tmp[4096];
+		const int n = recv(sock, tmp, sizeof(tmp), 0);
+		if (n <= 0)
+			break;
+
+		rxBuf.insert(rxBuf.end(), tmp, tmp + n);
+
+		// 完全なフレームをパース
+		while (!shouldClose && rxBuf.size() >= 2) {
+			const uint8_t b0      = rxBuf[0];
+			const uint8_t b1      = rxBuf[1];
+			const uint8_t opcode  = b0 & 0x0F;
+			const bool    masked  = (b1 & 0x80) != 0;
+			uint64_t      payloadLen = b1 & 0x7F;
+
+			size_t headerSize = 2;
+			if (payloadLen == 126) {
+				if (rxBuf.size() < 4) break;
+				payloadLen = (static_cast<uint64_t>(rxBuf[2]) << 8) | rxBuf[3];
+				headerSize = 4;
+			} else if (payloadLen == 127) {
+				if (rxBuf.size() < 10) break;
+				payloadLen = 0;
+				for (int i = 0; i < 8; ++i)
+					payloadLen = (payloadLen << 8) | rxBuf[2 + i];
+				headerSize = 10;
+			}
+			if (masked)
+				headerSize += 4;
+
+			if (rxBuf.size() < headerSize + payloadLen)
+				break; // フレーム未完成 — 次のrecv待ち
+
+			if (opcode == 0x08) { // Close
+				shouldClose = true;
+			} else if (opcode == 0x01 && masked) { // Text フレーム（クライアント→サーバーは常にマスク）
+				const uint8_t *maskKey = rxBuf.data() + (headerSize - 4);
+				std::string text(payloadLen, '\0');
+				for (uint64_t i = 0; i < payloadLen; ++i)
+					text[i] = static_cast<char>(rxBuf[headerSize + i] ^ maskKey[i % 4]);
+
+				std::function<void(const std::string &)> cb;
+				{
+					std::lock_guard<std::mutex> lock(callbackMutex_);
+					cb = messageCallback_;
+				}
+				if (cb)
+					cb(text);
+			}
+			rxBuf.erase(rxBuf.begin(),
+			            rxBuf.begin() + headerSize + static_cast<size_t>(payloadLen));
+		}
 	}
 
 	{
