@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>obs-live-hub デバッグ</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #0a0a0a;
+  color: #e0e0e0;
+  font-family: 'Consolas','Monaco','Courier New',monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  min-height: 100vh;
+  padding: 8px;
+}
+.header {
+  color: #555;
+  font-size: 11px;
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #1c1c1c;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.ws-badge {
+  font-weight: bold;
+  padding: 1px 6px;
+  border-radius: 2px;
+  font-size: 10px;
+}
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.panel {
+  border: 1px solid #1e1e1e;
+  background: #0d0d0d;
+  padding: 8px 10px;
+  border-radius: 2px;
+}
+.panel.col-span {
+  grid-column: 1 / -1;
+}
+.panel-title {
+  color: #555;
+  font-size: 10px;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin-bottom: 6px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid #181818;
+}
+.row { margin-bottom: 2px; }
+.lbl { color: #444; }
+.ok  { color: #4caf50; }
+.err { color: #ef5350; }
+.wrn { color: #ffa726; }
+.dim { color: #555; }
+.log-wrap {
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 11px;
+}
+.log-wrap::-webkit-scrollbar { width: 3px; }
+.log-wrap::-webkit-scrollbar-track { background: #111; }
+.log-wrap::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 2px; }
+.log-line { color: #888; padding: 1px 0; white-space: pre-wrap; word-break: break-all; }
+.log-line .ts   { color: #3a3a3a; }
+.t-comment { color: #66bb6a; }
+.t-tts     { color: #ffa726; }
+.t-vote    { color: #ab47bc; }
+.t-error   { color: #ef5350; }
+.t-clear   { color: #4caf50; }
+.t-other   { color: #5c8fa6; }
+.t-quota   { color: #ffa726; }
+/* コメント詳細パネル用 */
+.cd-section {
+  color: #3a5a6a;
+  font-size: 11px;
+  margin: 6px 0 2px 0;
+  padding-top: 5px;
+  border-top: 1px solid #1a1a1a;
+}
+.cd-section:first-of-type { border-top: none; padding-top: 0; margin-top: 2px; }
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <span>obs-live-hub DEBUG &nbsp;<span class="dim" id="updated"></span></span>
+  <span class="ws-badge dim" id="ws-badge">● ...</span>
+</div>
+
+<div class="grid">
+
+  <!-- 接続状態パネル -->
+  <div class="panel col-span" id="panel-connection">
+    <div class="panel-title">接続状態</div>
+    <div class="row"><span class="lbl">■ Twitch:    </span><span id="twitch-st" class="dim">不明</span></div>
+    <div class="row"><span class="lbl">■ YouTube:   </span><span id="yt-st" class="dim">不明</span></div>
+    <div class="row"><span class="lbl">■ WebSocket: </span><span id="ws-st" class="dim">切断</span></div>
+  </div>
+
+  <!-- TTS設定パネル -->
+  <div class="panel" id="panel-tts">
+    <div class="panel-title">TTS設定</div>
+    <div class="row"><span class="lbl">エンジン:           </span><span id="tts-engine" class="dim">-</span></div>
+    <div class="row"><span class="lbl">話者ID:             </span><span id="tts-style" class="dim">-</span></div>
+    <div class="row"><span class="lbl">音量: </span><span id="tts-vol" class="dim">-</span><span class="lbl"> / 速度: </span><span id="tts-rate" class="dim">-</span><span class="lbl"> / ピッチ: </span><span id="tts-pitch" class="dim">-</span></div>
+    <div class="row"><span class="lbl">Twitch: </span><span id="tts-tw" class="dim">-</span><span class="lbl"> / YouTube: </span><span id="tts-yt" class="dim">-</span></div>
+    <div class="row"><span class="lbl">最大文字数:         </span><span id="tts-maxlen" class="dim">-</span></div>
+    <div class="row"><span class="lbl">ユーザー名読み上げ: </span><span id="tts-username" class="dim">-</span></div>
+  </div>
+
+  <!-- クォータパネル -->
+  <div class="panel" id="panel-quota">
+    <div class="panel-title">YouTube クォータ</div>
+    <div class="row"><span class="lbl">消費済み: </span><span id="q-used" class="dim">不明</span><span class="lbl"> / 10,000 ユニット</span></div>
+    <div class="row"><span class="lbl">残り:     </span><span id="q-rem" class="dim">不明</span><span class="lbl"> ユニット</span></div>
+    <div class="row"><span class="lbl">取得間隔: </span><span id="q-interval" class="dim">-</span></div>
+    <div class="row"><span class="lbl">リセット: </span><span class="dim">UTC 00:00</span></div>
+    <div class="row"><span class="lbl">状態:     </span><span id="q-status" class="dim">-</span></div>
+  </div>
+
+  <!-- 投票状態パネル -->
+  <div class="panel col-span" id="panel-vote">
+    <div class="panel-title">投票状態</div>
+    <div class="row"><span class="lbl">状態:   </span><span id="v-status" class="dim">未開始</span></div>
+    <div class="row"><span class="lbl">質問:   </span><span id="v-question" class="dim">-</span></div>
+    <div class="row"><span class="lbl">形式:   </span><span id="v-mode" class="dim">-</span></div>
+    <div class="row"><span class="lbl">投票数: </span><span id="v-total" class="dim">0</span><span class="lbl"> 票</span></div>
+  </div>
+
+  <!-- ブロードキャストログ -->
+  <div class="panel col-span" id="panel-log">
+    <div class="panel-title">ブロードキャストログ <span class="dim" style="font-weight:normal;text-transform:none;letter-spacing:0">(最新50件 / 新しい順)</span></div>
+    <div class="log-wrap" id="log"></div>
+  </div>
+
+  <!-- 最新コメント詳細パネル -->
+  <div class="panel col-span" id="panel-comment-detail">
+    <div class="panel-title">最新コメント詳細 <span class="dim" style="font-weight:normal;text-transform:none;letter-spacing:0">(最新1件)</span></div>
+
+    <div class="row"><span class="lbl">受信時刻:         </span><span id="cd-time" class="dim">-</span></div>
+    <div class="row"><span class="lbl">ユーザー名:       </span><span id="cd-user" class="dim">-</span></div>
+    <div class="row"><span class="lbl">プラットフォーム: </span><span id="cd-platform" class="dim">-</span></div>
+
+    <div class="cd-section">■ コメント内容</div>
+    <div class="row"><span class="lbl">原文テキスト: </span><span id="cd-text" class="dim">-</span></div>
+    <div class="row"><span class="lbl">辞書置換後:   </span><span id="cd-dict" class="dim">-</span></div>
+
+    <div class="cd-section">■ テキスト表示設定（overlay.html）</div>
+    <div class="row"><span class="lbl">コメント文字色: </span><span id="cd-color" class="dim">-</span></div>
+    <div class="row"><span class="lbl">ユーザー名色:   </span><span id="cd-name-color" class="dim">-</span></div>
+    <div class="row"><span class="lbl">カード背景色:   </span><span id="cd-panel-color" class="dim">-</span></div>
+
+    <div class="cd-section">■ 音声再生設定（tts.html）</div>
+    <div class="row"><span class="lbl">TTSエンジン:      </span><span id="cd-engine" class="dim">-</span></div>
+    <div class="row"><span class="lbl">話者スタイルID:   </span><span id="cd-style-id" class="dim">-</span></div>
+    <div class="row"><span class="lbl">音量:             </span><span id="cd-volume" class="dim">-</span></div>
+    <div class="row"><span class="lbl">速度:             </span><span id="cd-rate" class="dim">-</span></div>
+    <div class="row"><span class="lbl">ピッチ:           </span><span id="cd-pitch" class="dim">-</span></div>
+    <div class="row"><span class="lbl">読み上げテキスト: </span><span id="cd-read-text" class="dim">-</span></div>
+
+    <div class="cd-section">■ [olh]ユーザー設定</div>
+    <div class="row"><span class="lbl">engine:  </span><span id="cd-olh-engine" class="dim">（未設定）</span></div>
+    <div class="row"><span class="lbl">model:   </span><span id="cd-olh-model" class="dim">（未設定）</span></div>
+    <div class="row"><span class="lbl">color:   </span><span id="cd-olh-color" class="dim">（未設定）</span></div>
+    <div class="row"><span class="lbl">name:    </span><span id="cd-olh-name" class="dim">（未設定）</span></div>
+    <div class="row"><span class="lbl">panel:   </span><span id="cd-olh-panel" class="dim">（未設定）</span></div>
+    <div class="row"><span class="lbl">volume:  </span><span id="cd-olh-volume" class="dim">（未設定）</span></div>
+    <div class="row"><span class="lbl">rate:    </span><span id="cd-olh-rate" class="dim">（未設定）</span></div>
+    <div class="row"><span class="lbl">pitch:   </span><span id="cd-olh-pitch" class="dim">（未設定）</span></div>
+  </div>
+
+</div>
+
+<script>
+'use strict';
+
+var WS_URL = 'ws://127.0.0.1:8765';
+var MAX_LOG = 50;
+var RECONNECT_MS = 3000;
+
+var ws = null;
+var twitchSt = 'unknown';
+var ytSt     = 'unknown';
+var pollInterval = parseInt(localStorage.getItem('dbg_poll_interval') || '5', 10);
+
+// 最新コメント詳細用の状態
+var lastComment = null;
+var ttsSettings = {
+  engine: 'webspeech', aivisStyleId: 0,
+  volume: 1.0, rate: 1.0, pitch: 1.0,
+  readUsername: true, maxLength: 100
+};
+var ttsDictionary = [];
+
+/* ---- パネル可視性 ---- */
+var PANEL_KEYS = ['connection','tts','quota','vote','log','comment-detail'];
+
+function loadVisibility() {
+  PANEL_KEYS.forEach(function(k) {
+    var stored = localStorage.getItem('dbg_show_' + k);
+    var show   = stored === null ? true : stored === 'true';
+    var el     = document.getElementById('panel-' + k);
+    if (el) el.classList.toggle('hidden', !show);
+  });
+}
+
+function applyDebugConfig(d) {
+  var map = {
+    showConnection:    'connection',
+    showTts:           'tts',
+    showQuota:         'quota',
+    showVote:          'vote',
+    showLog:           'log',
+    showCommentDetail: 'comment-detail'
+  };
+  Object.keys(map).forEach(function(k) {
+    if (d[k] === undefined) return;
+    var key  = map[k];
+    var show = !!d[k];
+    localStorage.setItem('dbg_show_' + key, show ? 'true' : 'false');
+    var el = document.getElementById('panel-' + key);
+    if (el) el.classList.toggle('hidden', !show);
+  });
+  if (d.pollInterval !== undefined) {
+    pollInterval = d.pollInterval;
+    localStorage.setItem('dbg_poll_interval', String(pollInterval));
+    refreshQInterval();
+    if (ytSt === 'ok') setYt('ok');
+  }
+}
+
+function refreshQInterval() {
+  setText('q-interval', pollInterval + '秒');
+}
+
+/* ---- WebSocket ---- */
+function connect() {
+  setWs('connecting');
+  try { ws = new WebSocket(WS_URL); } catch(e) {
+    setWs('error');
+    setTimeout(connect, RECONNECT_MS);
+    return;
+  }
+  ws.onopen    = function() { setWs('open'); };
+  ws.onclose   = function() { setWs('closed'); setTimeout(connect, RECONNECT_MS); };
+  ws.onerror   = function() { setWs('error'); };
+  ws.onmessage = function(ev) {
+    try { onMsg(JSON.parse(ev.data)); } catch(e) {}
+    touch();
+  };
+}
+
+function setWs(state) {
+  var badge = document.getElementById('ws-badge');
+  var wsEl  = document.getElementById('ws-st');
+  var map = {
+    connecting: ['● 接続中...', 'dim', '接続中...',       'dim'],
+    open:       ['● 接続済み',  'ok',  '接続済み',         'ok'],
+    closed:     ['● 切断',      'err', '切断（再接続中）', 'err'],
+    error:      ['● エラー',    'err', 'エラー',           'err']
+  };
+  var v = map[state] || map.connecting;
+  if (badge) { badge.textContent = v[0]; badge.className = 'ws-badge ' + v[1]; }
+  if (wsEl)  { wsEl.textContent  = v[2]; wsEl.className  = v[3]; }
+}
+
+function touch() {
+  var el = document.getElementById('updated');
+  if (el) el.textContent = new Date().toTimeString().slice(0,8);
+}
+
+/* ---- メッセージ処理 ---- */
+function onMsg(d) {
+  addLog(d);
+  switch (d.type) {
+    case 'tts':
+      updateTts(d);
+      // lastComment があれば詳細パネルも再描画（エンジン情報更新のため）
+      if (lastComment) updateCommentPanel(lastComment);
+      break;
+    case 'tts_dict':
+      applyDict(d.entries);
+      if (lastComment) updateCommentPanel(lastComment);
+      break;
+    case 'error':        onError(d);    break;
+    case 'error_clear':  onClear(d);    break;
+    case 'quota_warning':  onQWarn(d);  break;
+    case 'quota_exceeded': onQOver();   break;
+    case 'vote_start':
+    case 'vote_update':
+    case 'vote_end':     updateVote(d); break;
+    case 'debug_config': applyDebugConfig(d); break;
+    case 'comment':
+      if (d.platform !== 'system') {
+        if (d.platform === 'youtube' && ytSt !== 'quota' && ytSt !== 'auth_fail') setYt('ok');
+        if (d.platform === 'twitch'  && twitchSt !== 'auth_fail')                 setTw('ok');
+        lastComment = d;
+        updateCommentPanel(d);
+      }
+      break;
+  }
+}
+
+/* ---- TTS パネル ---- */
+function updateTts(d) {
+  // ttsSettings を更新
+  if (d.ttsEngine    !== undefined) ttsSettings.engine       = d.ttsEngine;
+  if (d.aivisStyleId !== undefined) ttsSettings.aivisStyleId = d.aivisStyleId;
+  if (d.volume       !== undefined) ttsSettings.volume       = d.volume;
+  if (d.rate         !== undefined) ttsSettings.rate         = d.rate;
+  if (d.pitch        !== undefined) ttsSettings.pitch        = d.pitch;
+  if (d.readUsername !== undefined) ttsSettings.readUsername = d.readUsername;
+  if (d.maxLength    !== undefined) ttsSettings.maxLength    = d.maxLength;
+
+  // パネル更新
+  var aivis = d.ttsEngine === 'aivisspeech';
+  setText('tts-engine', aivis ? 'AivisSpeech' : 'WebSpeech');
+  setText('tts-style',  aivis ? String(d.aivisStyleId != null ? d.aivisStyleId : '-') : '-');
+  setText('tts-vol',    fmtNum(d.volume));
+  setText('tts-rate',   fmtNum(d.rate));
+  setText('tts-pitch',  fmtNum(d.pitch));
+  setOnOff('tts-tw',       d.twitch);
+  setOnOff('tts-yt',       d.youtube);
+  setText('tts-maxlen',    d.maxLength != null ? String(d.maxLength) : '-');
+  setOnOff('tts-username', d.readUsername);
+}
+
+function fmtNum(v) { return v != null ? String(v) : '-'; }
+function setOnOff(id, val) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = val ? 'ON' : 'OFF';
+  el.className   = val ? 'ok' : 'dim';
+}
+
+/* ---- 辞書 ---- */
+function applyDict(entries) {
+  ttsDictionary = entries || [];
+}
+
+function applyDictionary(text) {
+  var result = text;
+  ttsDictionary.forEach(function(entry) {
+    if (!entry.from) return;
+    var re = new RegExp(entry.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    result = result.replace(re, entry.to || '');
+  });
+  return result;
+}
+
+/* ---- olhUserSettings ---- */
+function getUserSettings(user) {
+  try {
+    var raw = localStorage.getItem('olhUserSettings');
+    return raw ? (JSON.parse(raw)[user] || {}) : {};
+  } catch(_) { return {}; }
+}
+
+/* ---- 最新コメント詳細パネル ---- */
+function updateCommentPanel(data) {
+  var user     = data.user     || '';
+  var text     = data.text     || '';
+  var platform = data.platform || '';
+  var ts       = new Date().toTimeString().slice(0, 8);
+  var userCfg  = getUserSettings(user);
+
+  // 辞書置換
+  var dictText    = applyDictionary(text);
+  var dictChanged = dictText !== text;
+
+  // 読み上げテキスト（tts.html と同じロジック）
+  var userNameDict = applyDictionary(user);
+  var readText = ttsSettings.readUsername
+    ? userNameDict + '、' + dictText
+    : dictText;
+
+  // エンジン（userCfg.engine → 配信者設定）
+  var engine       = userCfg.engine || ttsSettings.engine || 'webspeech';
+  var engineCustom = !!userCfg.engine;
+
+  // スタイルID（tts.html: userCfg.styleId → aivisStyleId）
+  var styleId       = (userCfg.styleId !== undefined && userCfg.styleId !== null)
+    ? userCfg.styleId : ttsSettings.aivisStyleId;
+  var styleCustom   = (userCfg.styleId !== undefined && userCfg.styleId !== null);
+
+  // 音量/速度/ピッチ
+  var volume = (userCfg.volume !== undefined) ? userCfg.volume : ttsSettings.volume;
+  var rate   = (userCfg.rate   !== undefined) ? userCfg.rate   : ttsSettings.rate;
+  var pitch  = (userCfg.pitch  !== undefined) ? userCfg.pitch  : ttsSettings.pitch;
+
+  // 基本情報
+  setText('cd-time',     ts);
+  setText('cd-user',     user || '-');
+  setText('cd-platform', platform || '-');
+
+  // コメント内容
+  setText('cd-text', text || '-');
+  var dictEl = document.getElementById('cd-dict');
+  if (dictEl) {
+    if (text === '') {
+      dictEl.textContent = '-'; dictEl.className = 'dim';
+    } else if (dictChanged) {
+      dictEl.textContent = dictText; dictEl.className = 'ok';
+    } else {
+      dictEl.textContent = text + '（変化なし）'; dictEl.className = 'dim';
+    }
+  }
+
+  // テキスト表示設定
+  setWithBadge('cd-color',       userCfg.color,  '#ffffff');
+  setWithBadge('cd-name-color',  userCfg.name,   '#e0e0e0');
+  setWithBadge('cd-panel-color', userCfg.panel,  'デフォルト');
+
+  // TTS設定
+  var engineLabel = engine === 'aivisspeech' ? 'AivisSpeech' : 'WebSpeech';
+  var engineEl = document.getElementById('cd-engine');
+  if (engineEl) {
+    engineEl.textContent = engineLabel + (engineCustom ? '（カスタム）' : '（デフォルト）');
+    engineEl.className   = engineCustom ? 'ok' : 'dim';
+  }
+
+  var styleEl = document.getElementById('cd-style-id');
+  if (styleEl) {
+    if (engine === 'aivisspeech') {
+      styleEl.textContent = String(styleId) + (styleCustom ? '（カスタム）' : '（デフォルト）');
+      styleEl.className   = styleCustom ? 'ok' : 'dim';
+    } else {
+      styleEl.textContent = '-'; styleEl.className = 'dim';
+    }
+  }
+
+  setWithBadge2('cd-volume', userCfg.volume, ttsSettings.volume);
+  setWithBadge2('cd-rate',   userCfg.rate,   ttsSettings.rate);
+  setWithBadge2('cd-pitch',  userCfg.pitch,  ttsSettings.pitch);
+  setText('cd-read-text', readText || '-');
+
+  // [olh]ユーザー設定
+  setUserCfgVal('cd-olh-engine', userCfg.engine);
+  // model: speakerName / styleName の組み合わせ
+  var modelStr = null;
+  if (userCfg.speakerName || userCfg.styleName) {
+    modelStr = [userCfg.speakerName, userCfg.styleName].filter(Boolean).join(' / ');
+  }
+  setUserCfgVal('cd-olh-model',  modelStr);
+  setUserCfgVal('cd-olh-color',  userCfg.color);
+  setUserCfgVal('cd-olh-name',   userCfg.name);
+  setUserCfgVal('cd-olh-panel',  userCfg.panel);
+  setUserCfgVal('cd-olh-volume', userCfg.volume !== undefined ? String(userCfg.volume) : null);
+  setUserCfgVal('cd-olh-rate',   userCfg.rate   !== undefined ? String(userCfg.rate)   : null);
+  setUserCfgVal('cd-olh-pitch',  userCfg.pitch  !== undefined ? String(userCfg.pitch)  : null);
+}
+
+// ユーザー設定あり: 値＋（カスタム）, なし: fallback＋（デフォルト）
+function setWithBadge(id, userVal, fallback) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var hasUser = userVal !== undefined && userVal !== null;
+  el.textContent = String(hasUser ? userVal : fallback) + (hasUser ? '（カスタム）' : '（デフォルト）');
+  el.className   = hasUser ? 'ok' : 'dim';
+}
+
+// 数値（音量/速度/ピッチ）用
+function setWithBadge2(id, userVal, defaultVal) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var hasUser = userVal !== undefined && userVal !== null;
+  var val = hasUser ? userVal : (defaultVal != null ? defaultVal : '-');
+  el.textContent = String(val) + (hasUser ? '（カスタム）' : '（デフォルト）');
+  el.className   = hasUser ? 'ok' : 'dim';
+}
+
+// [olh]設定: 値あり→値, なし→（未設定）
+function setUserCfgVal(id, val) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var hasVal = val !== undefined && val !== null;
+  el.textContent = hasVal ? String(val) : '（未設定）';
+  el.className   = hasVal ? 'ok' : 'dim';
+}
+
+/* ---- エラー / クリア ---- */
+function onError(d) {
+  var c = d.code || '';
+  if      (c === 'TWITCH_AUTH_FAILED')     setTw('auth_fail');
+  else if (c === 'TWITCH_CONNECTION_LOST') setTw('lost');
+  else if (c === 'YOUTUBE_AUTH_FAILED')    setYt('auth_fail');
+  else if (c === 'YOUTUBE_QUOTA_EXCEEDED') { setYt('quota'); onQOver(); }
+}
+function onClear(d) {
+  var c = d.code || '';
+  if      (c === 'TWITCH_AUTH_FAILED' || c === 'TWITCH_CONNECTION_LOST') setTw('ok');
+  else if (c === 'YOUTUBE_AUTH_FAILED' || c === 'YOUTUBE_QUOTA_EXCEEDED') setYt('ok');
+}
+
+function setTw(st) {
+  twitchSt = st;
+  var el = document.getElementById('twitch-st');
+  if (!el) return;
+  var map = {
+    ok:        ['接続中',           'ok'],
+    auth_fail: ['認証失敗',         'err'],
+    lost:      ['切断中（再接続中）','wrn'],
+    unknown:   ['不明',             'dim']
+  };
+  var v = map[st] || map.unknown;
+  el.textContent = v[0]; el.className = v[1];
+}
+function setYt(st) {
+  ytSt = st;
+  var el   = document.getElementById('yt-st');
+  var qsEl = document.getElementById('q-status');
+  if (!el) return;
+  if (st === 'ok') {
+    el.textContent = 'ポーリング中 (間隔: ' + pollInterval + '秒)'; el.className = 'ok';
+    if (qsEl) { qsEl.textContent = '正常'; qsEl.className = 'ok'; }
+  } else if (st === 'auth_fail') {
+    el.textContent = '認証失敗'; el.className = 'err';
+    if (qsEl) { qsEl.textContent = '認証エラー'; qsEl.className = 'err'; }
+  } else if (st === 'quota') {
+    el.textContent = '停止中（クォータ超過）'; el.className = 'err';
+    if (qsEl) { qsEl.textContent = 'クォータ超過'; qsEl.className = 'err'; }
+  } else {
+    el.textContent = '不明'; el.className = 'dim';
+  }
+}
+
+/* ---- クォータパネル ---- */
+function onQWarn(d) {
+  var rem = d.remainingMinutes;
+  if (rem != null && pollInterval > 0) {
+    var remUnits  = Math.round((rem / 60) * (3600 / pollInterval) * 5);
+    setQuotaValues(10000 - remUnits, remUnits, 'wrn');
+  }
+  var qsEl = document.getElementById('q-status');
+  if (qsEl) {
+    qsEl.textContent = 'クォータ警告 (残り約' + (rem != null ? rem : '?') + '分)';
+    qsEl.className   = 'wrn';
+  }
+}
+function onQOver() {
+  setQuotaValues(10000, 0, 'err');
+  var qsEl = document.getElementById('q-status');
+  if (qsEl) { qsEl.textContent = 'クォータ超過（UTC 0:00 にリセット）'; qsEl.className = 'err'; }
+}
+function setQuotaValues(used, rem, cls) {
+  var ue = document.getElementById('q-used');
+  var re = document.getElementById('q-rem');
+  if (ue) { ue.textContent = used.toLocaleString(); ue.className = cls; }
+  if (re) { re.textContent = rem.toLocaleString();  re.className = cls; }
+}
+
+/* ---- 投票パネル ---- */
+function updateVote(d) {
+  var stEl = document.getElementById('v-status');
+  var qEl  = document.getElementById('v-question');
+  var mEl  = document.getElementById('v-mode');
+  var tEl  = document.getElementById('v-total');
+  if (stEl) {
+    if      (d.type === 'vote_start') { stEl.textContent = '受付中'; stEl.className = 'ok'; }
+    else if (d.type === 'vote_end')   { stEl.textContent = '終了';   stEl.className = 'dim'; }
+    else {
+      var active = !!d.active;
+      stEl.textContent = active ? '受付中' : '終了';
+      stEl.className   = active ? 'ok' : 'dim';
+    }
+  }
+  if (qEl && d.question != null) qEl.textContent = d.question || '-';
+  if (mEl && d.mode     != null) mEl.textContent = d.mode === 'choice' ? '選択肢' : '自由記述';
+  if (tEl && d.total    != null) tEl.textContent = String(d.total);
+}
+
+/* ---- ログ ---- */
+function addLog(d) {
+  var type = d.type || 'unknown';
+  var ts   = new Date().toTimeString().slice(0,8);
+  var body = '';
+
+  if (type === 'comment') {
+    body = '<span class="t-comment">' + esc(type) + '</span>' +
+      ' | ' + esc(d.user || '') +
+      ' | ' + esc((d.text || '').slice(0, 60)) +
+      (d.platform ? ' <span class="dim">(' + esc(d.platform) + ')</span>' : '');
+  } else if (type === 'tts') {
+    body = '<span class="t-tts">' + esc(type) + '</span>' +
+      ' | engine=' + esc(d.ttsEngine || '') +
+      (d.ttsEngine === 'aivisspeech' ? ' styleId=' + esc(String(d.aivisStyleId != null ? d.aivisStyleId : '?')) : '');
+  } else if (type === 'tts_dict') {
+    body = '<span class="t-tts">' + esc(type) + '</span> | dictionary updated';
+  } else if (type === 'vote_start' || type === 'vote_update' || type === 'vote_end') {
+    body = '<span class="t-vote">' + esc(type) + '</span>' +
+      ' | total=' + (d.total != null ? d.total : '?') +
+      (d.question ? ' q=' + esc(d.question.slice(0, 24)) : '');
+  } else if (type === 'error') {
+    body = '<span class="t-error">' + esc(type) + '</span>' +
+      ' | ' + esc(d.code || '') + ': ' + esc((d.message || '').slice(0, 50));
+  } else if (type === 'error_clear') {
+    body = '<span class="t-clear">' + esc(type) + '</span> | ' + esc(d.code || '');
+  } else if (type === 'quota_warning') {
+    body = '<span class="t-quota">' + esc(type) + '</span>' +
+      ' | remainingMinutes=' + (d.remainingMinutes != null ? d.remainingMinutes : '?');
+  } else if (type === 'quota_exceeded') {
+    body = '<span class="t-error">' + esc(type) + '</span>';
+  } else if (type === 'style') {
+    body = '<span class="t-other">' + esc(type) + '</span> | overlay style updated';
+  } else if (type === 'debug_config') {
+    body = '<span class="t-other">' + esc(type) + '</span>';
+  } else {
+    body = '<span class="t-other">' + esc(type) + '</span>';
+  }
+
+  var container = document.getElementById('log');
+  if (!container) return;
+  var line = document.createElement('div');
+  line.className = 'log-line';
+  line.innerHTML = '<span class="ts">[' + ts + ']</span> ' + body;
+  container.insertBefore(line, container.firstChild);
+  while (container.children.length > MAX_LOG)
+    container.removeChild(container.lastChild);
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;');
+}
+function setText(id, val) {
+  var el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+/* ---- 初期化 ---- */
+loadVisibility();
+refreshQInterval();
+connect();
+</script>
+</body>
+</html>

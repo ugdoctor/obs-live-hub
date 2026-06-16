@@ -251,17 +251,18 @@
         if (key === 'panel') {
           result.panel = isSafePanelColor(val) ? val : null;
         }
-        if (key === 'volume') {
+        // WebSpeech パラメータ（overlay.html でクランプ）
+        if (key === 'webs_volume') {
           var v = parseFloat(val);
-          if (!isNaN(v)) result.volume = Math.min(1.0, Math.max(0.0, v));
+          if (!isNaN(v)) result.webs_volume = Math.min(1.0, Math.max(0.0, v));
         }
-        if (key === 'rate') {
+        if (key === 'webs_rate') {
           var v = parseFloat(val);
-          if (!isNaN(v)) result.rate = Math.min(1.5, Math.max(0.7, v));
+          if (!isNaN(v)) result.webs_rate = Math.min(1.5, Math.max(0.7, v));
         }
-        if (key === 'pitch') {
+        if (key === 'webs_pitch') {
           var v = parseFloat(val);
-          if (!isNaN(v)) result.pitch = Math.min(1.3, Math.max(0.7, v));
+          if (!isNaN(v)) result.webs_pitch = Math.min(1.3, Math.max(0.7, v));
         }
         if (key === 'engine') {
           var eng = val.toLowerCase();
@@ -270,6 +271,17 @@
         }
         if (key === 'model') {
           if (val.length > 0 && val.length <= 80) result.model = val;
+        }
+        // AivisSpeech パラメータ（数値チェックのみ、クランプはC++側）
+        if (key === 'aivis_speed' || key === 'aivis_pitch' || key === 'aivis_intonation' ||
+            key === 'aivis_volume' || key === 'aivis_emotion') {
+          var v = parseFloat(val);
+          if (isNaN(v)) {
+            if (!result._errors) result._errors = [];
+            result._errors.push(key);
+          } else {
+            result[key] = v;
+          }
         }
       });
       return Object.keys(result).length ? result : null;
@@ -300,18 +312,42 @@
       }
       var settings = loadUserSettings();
       if (!settings[user]) settings[user] = {};
-      if (cmd.color  !== undefined) settings[user].color  = cmd.color;
-      if (cmd.name   !== undefined) settings[user].name   = cmd.name;
-      if (cmd.panel  !== undefined) settings[user].panel  = cmd.panel;
-      if (cmd.volume !== undefined) settings[user].volume = cmd.volume;
-      if (cmd.rate   !== undefined) settings[user].rate   = cmd.rate;
-      if (cmd.pitch  !== undefined) settings[user].pitch  = cmd.pitch;
+      if (cmd.color       !== undefined) settings[user].color  = cmd.color;
+      if (cmd.name        !== undefined) settings[user].name   = cmd.name;
+      if (cmd.panel       !== undefined) settings[user].panel  = cmd.panel;
+      if (cmd.webs_volume !== undefined) settings[user].volume = cmd.webs_volume;
+      if (cmd.webs_rate   !== undefined) settings[user].rate   = cmd.webs_rate;
+      if (cmd.webs_pitch  !== undefined) settings[user].pitch  = cmd.webs_pitch;
       saveUserSettings(settings);
       // エンジン切り替え・モデル指定はプラグインに問い合わせ
       if (cmd.engine !== undefined)
         sendWs({ type: 'olh_engine_request', userId: user, engine: cmd.engine });
       if (cmd.model !== undefined)
         sendWs({ type: 'olh_model_request',  userId: user, modelName: cmd.model });
+      // WebSpeech パラメータ（C++経由で broadcast → tts.html へ）
+      var webSpeechMsg = { type: 'olh_webspeech_params_request', userId: user };
+      var hasWebSpeech = false;
+      if (cmd.webs_rate   !== undefined) { webSpeechMsg.rate   = cmd.webs_rate;   hasWebSpeech = true; }
+      if (cmd.webs_pitch  !== undefined) { webSpeechMsg.pitch  = cmd.webs_pitch;  hasWebSpeech = true; }
+      if (cmd.webs_volume !== undefined) { webSpeechMsg.volume = cmd.webs_volume; hasWebSpeech = true; }
+      if (hasWebSpeech) sendWs(webSpeechMsg);
+      // AivisSpeech パラメータ（C++ で上下限クランプ後 broadcast）
+      var aivisMsg = { type: 'olh_aivis_params_request', userId: user };
+      var hasAivis = false;
+      if (cmd.aivis_speed      !== undefined) { aivisMsg.speed        = cmd.aivis_speed;      hasAivis = true; }
+      if (cmd.aivis_pitch      !== undefined) { aivisMsg.pitch        = cmd.aivis_pitch;      hasAivis = true; }
+      if (cmd.aivis_intonation !== undefined) { aivisMsg.intonation   = cmd.aivis_intonation; hasAivis = true; }
+      if (cmd.aivis_volume     !== undefined) { aivisMsg.volume_scale = cmd.aivis_volume;     hasAivis = true; }
+      if (cmd.aivis_emotion    !== undefined) { aivisMsg.emotion      = cmd.aivis_emotion;    hasAivis = true; }
+      if (hasAivis) sendWs(aivisMsg);
+      // 数値不正エラーをシステムコメントで表示
+      if (cmd._errors && cmd._errors.length > 0) {
+        cmd._errors.forEach(function(key) {
+          addComment({ user: 'obs-live-hub',
+            text: user + 'さんへ：' + key + ' には数値を指定してください。',
+            platform: 'system' });
+        });
+      }
     }
 
     function getUserSettings(user) {
@@ -474,17 +510,22 @@
 
     var ws = null;
 
-    function connect() {
+    function connectWs() {
+      if (ws && (ws.readyState === WebSocket.CONNECTING ||
+                 ws.readyState === WebSocket.OPEN)) return;
+
       ws = new WebSocket('ws://127.0.0.1:' + WS_PORT);
+      var thisWs = ws;
 
       ws.onopen = function() {
         showDebugToast('[debug] WebSocket connected :' + WS_PORT);
       };
       ws.onerror = function() {
         showDebugToast('[debug] WebSocket error', 'rgba(180,0,0,0.88)');
+        if (ws === thisWs) ws = null;
       };
       ws.onclose = function() {
-        setTimeout(connect, 3000);
+        if (ws === thisWs) ws = null;
       };
       ws.onmessage = (e) => {
         try {
@@ -519,6 +560,7 @@
               s[data.userId].styleId     = data.styleId;
               s[data.userId].speakerName = data.speakerName;
               s[data.userId].styleName   = data.styleName;
+              if (data.engine) s[data.userId].engine = data.engine;
               saveUserSettings(s);
             }
           } else if (data.type === 'comment') {
@@ -603,7 +645,13 @@
     }
 
     loadStoredStyle();
-    connect();
+    connectWs();
+    setInterval(function() {
+      if (!ws || ws.readyState === WebSocket.CLOSED ||
+                 ws.readyState === WebSocket.CLOSING) {
+        connectWs();
+      }
+    }, 1000);
   </script>
 </body>
 </html>

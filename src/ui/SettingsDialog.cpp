@@ -67,6 +67,19 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent)
 		"注: トークン交換は WinHTTP (Windows SChannel) で行うため\n"
 		"Qt TLS エラーの影響を受けません。");
 
+	// ---- YouTube コメント取得間隔 ----
+	youtubePollIntervalSpinBox_ = new QSpinBox(this);
+	youtubePollIntervalSpinBox_->setRange(5, 120);
+	youtubePollIntervalSpinBox_->setValue(5);
+	youtubePollIntervalSpinBox_->setSuffix(" 秒");
+	youtubePollIntervalSpinBox_->setToolTip(
+		"YouTube Live Chat のコメント取得間隔です。\n"
+		"長くするとクォータ消費を抑えられますが、コメント表示が遅れます。");
+
+	youtubePollQuotaLabel_ = new QLabel(this);
+	youtubePollQuotaLabel_->setWordWrap(true);
+	youtubePollQuotaLabel_->setStyleSheet("color: gray; font-size: 10px;");
+
 	// ---- YouTube クォータ設定 ----
 	youtubeQuotaInfoLabel_ = new QLabel(this);
 	youtubeQuotaInfoLabel_->setWordWrap(true);
@@ -136,6 +149,8 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent)
 		note->setTextFormat(Qt::RichText);
 		layout_->addRow(note);
 	}
+	layout_->addRow("コメント取得間隔:", youtubePollIntervalSpinBox_);
+	layout_->addRow(youtubePollQuotaLabel_);
 	layout_->addRow(youtubeQuotaInfoLabel_);
 	layout_->addRow(youtubeIgnoreQuotaCheck_);
 	layout_->addRow("Twitch OAuth Token:", twitchOAuthEdit_);
@@ -159,6 +174,9 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent)
 
 	QObject::connect(buttonBox_, &QDialogButtonBox::accepted, this, &SettingsDialog::accept);
 	QObject::connect(buttonBox_, &QDialogButtonBox::rejected, this, &QDialog::reject);
+	QObject::connect(youtubePollIntervalSpinBox_,
+			 QOverload<int>::of(&QSpinBox::valueChanged),
+			 this, &SettingsDialog::onPollIntervalChanged);
 	QObject::connect(openOverlayBtn_, &QPushButton::clicked, this,
 			 &SettingsDialog::onOpenOverlay);
 	QObject::connect(googleAuthBtn_, &QPushButton::clicked, this,
@@ -191,6 +209,8 @@ void SettingsDialog::loadFromConfig()
 	youtubeClientIdEdit_->setText(QString::fromStdString(cfg.youtubeClientId));
 	youtubeClientSecretEdit_->setText(QString::fromStdString(cfg.youtubeClientSecret));
 	youtubeIgnoreQuotaCheck_->setChecked(cfg.youtubeIgnoreQuota);
+	youtubePollIntervalSpinBox_->setValue(cfg.youtubePollInterval);
+	onPollIntervalChanged(cfg.youtubePollInterval);
 	twitchOAuthEdit_->setText(QString::fromStdString(cfg.twitchOAuthToken));
 	twitchUsernameEdit_->setText(QString::fromStdString(cfg.twitchUsername));
 	twitchChannelEdit_->setText(QString::fromStdString(cfg.twitchChannel));
@@ -208,6 +228,7 @@ void SettingsDialog::saveToConfig()
 	cfg.youtubeClientId = youtubeClientIdEdit_->text().trimmed().toStdString();
 	cfg.youtubeClientSecret = youtubeClientSecretEdit_->text().trimmed().toStdString();
 	cfg.youtubeIgnoreQuota = youtubeIgnoreQuotaCheck_->isChecked();
+	cfg.youtubePollInterval = youtubePollIntervalSpinBox_->value();
 	cfg.twitchOAuthToken = twitchOAuthEdit_->text().toStdString();
 	cfg.twitchUsername = twitchUsernameEdit_->text().toLower().toStdString();
 	cfg.twitchChannel = twitchChannelEdit_->text().toLower().toStdString();
@@ -470,4 +491,24 @@ void SettingsDialog::onTwitchTokenReceived(const QString &token)
 
 	// plugin-main.cpp の reconnectTwitch() をトリガーする
 	emit twitchTokenUpdated();
+}
+
+void SettingsDialog::onPollIntervalChanged(int seconds)
+{
+	const double perHour = (3600.0 / seconds) * 5.0;
+	const double hoursToLimit = 10000.0 / perHour;
+
+	QString quotaText =
+		QString("取得間隔: %1秒 → 1時間あたり %2 ユニット消費\n")
+			.arg(seconds)
+			.arg(static_cast<int>(perHour));
+
+	if (hoursToLimit >= 24.0) {
+		quotaText += "1日の上限（10,000ユニット）まで 1日以上（クォータ内で配信可能）";
+	} else {
+		quotaText += QString("1日の上限（10,000ユニット）まで 約 %1 時間")
+				     .arg(hoursToLimit, 0, 'f', 1);
+	}
+
+	youtubePollQuotaLabel_->setText(quotaText);
 }

@@ -77,6 +77,7 @@ private:
 	QDateTime quotaResetTime_;
 	bool quotaWarningSent_ = false;
 
+	int pollIntervalMs() const; // PluginConfig から取得間隔（ms）を返す
 	static constexpr int DEFAULT_POLL_INTERVAL_MS = 5000;
 	static constexpr int DAILY_QUOTA_LIMIT = 10000;
 	static constexpr int UNITS_PER_CALL = 5;

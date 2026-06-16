@@ -30,6 +30,9 @@ public:
 	// クライアントからのテキストフレームを受け取るコールバック（WsServerスレッドから呼ばれる）
 	void setMessageCallback(std::function<void(const std::string &)> cb);
 
+	// 新規クライアント接続時コールバック（WsServerスレッドから呼ばれる）
+	void setConnectCallback(std::function<void()> cb);
+
 private:
 	void acceptLoop();
 	void clientLoop(SOCKET sock);
@@ -49,6 +52,7 @@ private:
 	std::mutex clientsMutex_;
 	std::vector<SOCKET> clients_;
 	std::function<void(const std::string &)> messageCallback_;
+	std::function<void()>                    connectCallback_;
 	std::mutex callbackMutex_;
 };
 

@@ -352,6 +352,12 @@ void WsServer::setMessageCallback(std::function<void(const std::string &)> cb)
 	messageCallback_ = std::move(cb);
 }
 
+void WsServer::setConnectCallback(std::function<void()> cb)
+{
+	std::lock_guard<std::mutex> lock(callbackMutex_);
+	connectCallback_ = std::move(cb);
+}
+
 void WsServer::clientLoop(SOCKET sock)
 {
 	++activeClients_;
@@ -368,6 +374,12 @@ void WsServer::clientLoop(SOCKET sock)
 		clients_.push_back(sock);
 	}
 	obs_log(LOG_INFO, "[%s] Client connected (total: %zu)", WSTAG, clients_.size());
+
+	{
+		std::lock_guard<std::mutex> lock(callbackMutex_);
+		if (connectCallback_)
+			connectCallback_();
+	}
 
 	std::vector<uint8_t> rxBuf;
 	rxBuf.reserve(4096);

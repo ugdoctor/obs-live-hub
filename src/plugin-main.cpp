@@ -37,7 +37,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QList>
+#include <QMainWindow>
 #include <QMap>
+#include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
 #include <QPointer>
 #include <QProcess>
@@ -52,6 +55,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "platforms/TwitchPlatform.hpp"
 #include "platforms/YouTubePlatform.hpp"
 #include "ui/CommentDock.hpp"
+#include "ui/AivisParamLimitDialog.hpp"
+#include "ui/DebugSettingsDialog.hpp"
 #include "ui/OverlayStyleDialog.hpp"
 #include "ui/SettingsDialog.hpp"
 #include "ui/StreamSettingsDialog.hpp"
@@ -112,8 +117,11 @@ static std::string makeSystemCommentJson(const std::string &text)
 	       "\"avatar\":\"\"}";
 }
 
-static void connectTwitchSignals();   // forward declaration
+static void connectTwitchSignals();               // forward declaration
 static void handleWsClientMessage(const QString &json); // forward declaration
+static std::string makeTtsJson();                 // forward declaration
+static void broadcastTtsDict();                   // forward declaration
+static void broadcastDebugConfig();               // forward declaration
 
 static void applyWsCallbacks(WsServer *srv)
 {
@@ -124,21 +132,38 @@ static void applyWsCallbacks(WsServer *srv)
 		QMetaObject::invokeMethod(qApp, [js]() { handleWsClientMessage(js); },
 		                          Qt::QueuedConnection);
 	});
+	srv->setConnectCallback([]() {
+		QMetaObject::invokeMethod(qApp, []() {
+			if (!s_wsServer)
+				return;
+			s_wsServer->broadcast(makeTtsJson());
+			s_wsServer->broadcast(TtsDictionaryDialog::makeDictJson());
+			broadcastDebugConfig();
+		}, Qt::QueuedConnection);
+	});
 }
 
 static void restartWsServer()
 {
+	const int newPort = PluginConfig::instance().wsPort;
+
+	// ポートが変わっていなければ再起動不要（既存クライアント接続を維持）
+	if (s_wsServer && s_wsServer->isRunning() &&
+	    static_cast<int>(s_wsServer->port()) == newPort) {
+		obs_log(LOG_INFO, "WsServer: port unchanged (%d), skipping restart", newPort);
+		return;
+	}
+
 	if (s_wsServer) {
 		s_wsServer->stop();
 		delete s_wsServer;
 		s_wsServer = nullptr;
 	}
 
-	const int port = PluginConfig::instance().wsPort;
-	s_wsServer = new WsServer(static_cast<uint16_t>(port));
+	s_wsServer = new WsServer(static_cast<uint16_t>(newPort));
 	applyWsCallbacks(s_wsServer);
 	if (!s_wsServer->start()) {
-		obs_log(LOG_WARNING, "WsServer: Failed to start on port %d", port);
+		obs_log(LOG_WARNING, "WsServer: Failed to start on port %d", newPort);
 		delete s_wsServer;
 		s_wsServer = nullptr;
 	}
@@ -473,6 +498,72 @@ static std::string makeTtsJson()
 	       "\"aivisStyleId\":" + std::to_string(cfg.aivisStyleId) + "}";
 }
 
+static void handleOlhAivisParamsRequest(const QJsonObject &obj)
+{
+	const QString userId = obj["userId"].toString();
+	if (userId.isEmpty())
+		return;
+
+	const auto &cfg = PluginConfig::instance();
+
+	auto clampD = [](double v, double lo, double hi) -> double {
+		return v < lo ? lo : (v > hi ? hi : v);
+	};
+
+	QJsonObject params;
+	if (obj.contains("speed") && obj["speed"].isDouble())
+		params["speedScale"] = clampD(obj["speed"].toDouble(),
+		                              cfg.aivisSpeedMin, cfg.aivisSpeedMax);
+	if (obj.contains("pitch") && obj["pitch"].isDouble())
+		params["pitchScale"] = clampD(obj["pitch"].toDouble(),
+		                              cfg.aivisPitchMin, cfg.aivisPitchMax);
+	if (obj.contains("intonation") && obj["intonation"].isDouble())
+		params["intonationScale"] = clampD(obj["intonation"].toDouble(),
+		                                   cfg.aivisIntonationMin, cfg.aivisIntonationMax);
+	if (obj.contains("volume_scale") && obj["volume_scale"].isDouble())
+		params["volumeScale"] = clampD(obj["volume_scale"].toDouble(),
+		                               cfg.aivisVolumeScaleMin, cfg.aivisVolumeScaleMax);
+	if (obj.contains("emotion") && obj["emotion"].isDouble())
+		params["tempoDynamicsScale"] = clampD(obj["emotion"].toDouble(),
+		                                      cfg.aivisEmotionMin, cfg.aivisEmotionMax);
+
+	if (params.isEmpty())
+		return;
+
+	QJsonObject res;
+	res["type"]        = QStringLiteral("olh_user_settings");
+	res["userId"]      = userId;
+	res["aivisParams"] = params;
+
+	if (s_wsServer)
+		s_wsServer->broadcast(
+			QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString());
+}
+
+static void handleOlhWebSpeechParamsRequest(const QJsonObject &obj)
+{
+	const QString userId = obj["userId"].toString();
+	if (userId.isEmpty())
+		return;
+
+	QJsonObject params;
+	if (obj.contains("rate")   && obj["rate"].isDouble())   params["rate"]   = obj["rate"].toDouble();
+	if (obj.contains("pitch")  && obj["pitch"].isDouble())  params["pitch"]  = obj["pitch"].toDouble();
+	if (obj.contains("volume") && obj["volume"].isDouble()) params["volume"] = obj["volume"].toDouble();
+
+	if (params.isEmpty())
+		return;
+
+	QJsonObject res;
+	res["type"]            = QStringLiteral("olh_user_settings");
+	res["userId"]          = userId;
+	res["webSpeechParams"] = params;
+
+	if (s_wsServer)
+		s_wsServer->broadcast(
+			QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString());
+}
+
 static void handleOlhEngineRequest(const QJsonObject &obj)
 {
 	const QString userId = obj["userId"].toString();
@@ -507,7 +598,7 @@ static void handleResolveModel(const QJsonObject &obj)
 	if (AivisStyleCache::isEmpty()) {
 		res["ok"]    = false;
 		res["error"] = QStringLiteral(
-			"音声モデル一覧が未取得です。読み上げ設定を開いて更新してください。");
+			"音声モデル一覧が未取得です。しばらく待ってから再試行してください。");
 	} else {
 		const AivisCachedStyle *style = AivisStyleCache::findByName(modelName);
 		if (!style) {
@@ -515,6 +606,7 @@ static void handleResolveModel(const QJsonObject &obj)
 			res["error"] = QStringLiteral("モデルが見つかりません: ") + modelName;
 		} else {
 			res["ok"]          = true;
+			res["engine"]      = QStringLiteral("aivisspeech");
 			res["styleId"]     = static_cast<qint64>(style->styleId);
 			res["speakerName"] = style->speakerName;
 			res["styleName"]   = style->styleName;
@@ -524,6 +616,17 @@ static void handleResolveModel(const QJsonObject &obj)
 	if (s_wsServer)
 		s_wsServer->broadcast(
 			QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString());
+
+	// モデル切り替え成功時に aivisParams をリセット
+	if (res["ok"].toBool()) {
+		QJsonObject resetMsg;
+		resetMsg["type"]        = QStringLiteral("olh_user_settings");
+		resetMsg["userId"]      = userId;
+		resetMsg["aivisParams"] = QJsonObject(); // 空 = リセット
+		if (s_wsServer)
+			s_wsServer->broadcast(
+				QJsonDocument(resetMsg).toJson(QJsonDocument::Compact).toStdString());
+	}
 }
 
 static void handleWsClientMessage(const QString &json)
@@ -539,6 +642,10 @@ static void handleWsClientMessage(const QString &json)
 		handleOlhEngineRequest(obj);
 	else if (type == "olh_model_request")
 		handleResolveModel(obj);
+	else if (type == "olh_aivis_params_request")
+		handleOlhAivisParamsRequest(obj);
+	else if (type == "olh_webspeech_params_request")
+		handleOlhWebSpeechParamsRequest(obj);
 }
 
 static void onOverlayStyleMenuClick(void * /* data */)
@@ -648,6 +755,50 @@ static void broadcastTtsDict()
 		s_wsServer->broadcast(TtsDictionaryDialog::makeDictJson());
 }
 
+static void broadcastDebugConfig()
+{
+	if (!s_wsServer)
+		return;
+	const auto &cfg = PluginConfig::instance();
+	QJsonObject obj;
+	obj["type"]           = QStringLiteral("debug_config");
+	obj["showConnection"] = cfg.debugShowConnection;
+	obj["showTts"]        = cfg.debugShowTts;
+	obj["showQuota"]      = cfg.debugShowQuota;
+	obj["showVote"]       = cfg.debugShowVote;
+	obj["showLog"]           = cfg.debugShowLog;
+	obj["showCommentDetail"] = cfg.debugShowCommentDetail;
+	obj["pollInterval"]      = cfg.youtubePollInterval;
+	s_wsServer->broadcast(QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString());
+}
+
+static void onOpenDebugMenuClick(void * /* data */)
+{
+#ifdef _WIN32
+	char appdata[MAX_PATH] = {};
+	if (GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH) == 0)
+		return;
+	const std::string path =
+		std::string(appdata) + "\\obs-studio\\plugins\\obs-live-hub\\debug.html";
+	ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#endif
+}
+
+static void onAivisParamLimitMenuClick(void * /* data */)
+{
+	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	AivisParamLimitDialog dlg(mainWindow);
+	dlg.exec();
+}
+
+static void onDebugSettingsMenuClick(void * /* data */)
+{
+	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	DebugSettingsDialog dlg(mainWindow);
+	if (dlg.exec() == QDialog::Accepted)
+		broadcastDebugConfig();
+}
+
 static void onTtsDictionaryMenuClick(void * /* data */)
 {
 	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
@@ -732,6 +883,70 @@ static void onVoteManagerMenuClick(void * /* data */)
 static void onReloadMenuClick(void * /* data */)
 {
 	reloadAndReconnect();
+}
+
+// ── サブメニュー構築 ────────────────────────────────────────────────────────
+// obs_frontend_add_tools_menu_item で追加したマーカー項目を QMenu で置き換える
+
+static const char *kHubMarker = "obs-live-hub\xe2\x80\x8b"; // zero-width space で一意化
+static void        obsHubMenuPlaceholder(void *) {}
+
+static void buildObsLiveHubMenu()
+{
+	auto *mainWin = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+	if (!mainWin)
+		return;
+
+	// マーカー QAction とそれが属するメニューを特定
+	QMenu   *toolsMenu = nullptr;
+	QAction *markerAct = nullptr;
+	const QString marker = QString::fromUtf8(kHubMarker);
+
+	for (QAction *act : mainWin->menuBar()->actions()) {
+		QMenu *m = act->menu();
+		if (!m)
+			continue;
+		for (QAction *item : m->actions()) {
+			if (item->text() == marker) {
+				toolsMenu = m;
+				markerAct = item;
+				break;
+			}
+		}
+		if (toolsMenu)
+			break;
+	}
+
+	if (!toolsMenu || !markerAct)
+		return;
+
+	auto *hubMenu = new QMenu("obs-live-hub", mainWin);
+
+	auto *connMenu = hubMenu->addMenu("接続・設定");
+	connMenu->addAction("設定",         []() { onSettingsMenuClick(nullptr); });
+	connMenu->addAction("リロード",     []() { onReloadMenuClick(nullptr); });
+	connMenu->addAction("配信一括設定", []() { onStreamSettingsMenuClick(nullptr); });
+
+	auto *ovMenu = hubMenu->addMenu("オーバーレイ");
+	ovMenu->addAction("オーバーレイ外観設定",        []() { onOverlayStyleMenuClick(nullptr); });
+	ovMenu->addAction("オーバーレイをブラウザで開く", []() { onOpenOverlayMenuClick(nullptr); });
+	ovMenu->addAction("TTS音声ページを開く",         []() { onOpenTtsMenuClick(nullptr); });
+
+	auto *ttsMenu = hubMenu->addMenu("読み上げ");
+	ttsMenu->addAction("読み上げ設定",          []() { onTtsSpeechMenuClick(nullptr); });
+	ttsMenu->addAction("読み上げ辞書",          []() { onTtsDictionaryMenuClick(nullptr); });
+	ttsMenu->addAction("AivisSpeechモデル制限", []() { onAivisParamLimitMenuClick(nullptr); });
+
+	auto *voteMenu = hubMenu->addMenu("アンケート");
+	voteMenu->addAction("アンケート管理", []() { onVoteManagerMenuClick(nullptr); });
+
+	auto *dbgMenu = hubMenu->addMenu("デバッグ");
+	dbgMenu->addAction("デバッグ設定",       []() { onDebugSettingsMenuClick(nullptr); });
+	dbgMenu->addAction("デバッグ表示を開く", []() { onOpenDebugMenuClick(nullptr); });
+
+	toolsMenu->insertMenu(markerAct, hubMenu);
+	toolsMenu->removeAction(markerAct);
+	delete markerAct;
 }
 
 #ifdef _WIN32
@@ -848,15 +1063,24 @@ static void onFrontendEvent(obs_frontend_event event, void * /* data */)
 {
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+		buildObsLiveHubMenu();
 		obs_log(LOG_INFO, "OBS finished loading — auto-connecting Twitch...");
 		reconnectTwitch();
 		broadcastTtsDict();
+		broadcastDebugConfig();
 		// AivisSpeech Engine 自動起動
 		if (PluginConfig::instance().aivisAutoStart &&
 		    !PluginConfig::instance().aivisEnginePath.empty()) {
 			obs_log(LOG_INFO, "AivisEngine: auto-starting...");
 			AivisEngine::start(
 				QString::fromStdString(PluginConfig::instance().aivisEnginePath));
+			// エンジン起動完了まで 1 秒ごとにリトライ（最大 30 秒）
+			AivisStyleCache::fetchAndCacheWithRetry(
+				QString::fromStdString(PluginConfig::instance().aivisUrl));
+		} else {
+			// エンジンが既に起動中の場合は即時取得を試みる
+			AivisStyleCache::fetchAndCacheAsync(
+				QString::fromStdString(PluginConfig::instance().aivisUrl));
 		}
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
@@ -883,6 +1107,7 @@ bool obs_module_load(void)
 #ifdef _WIN32
 	ensureHtmlFileInAppData(L"overlay.html");
 	ensureHtmlFileInAppData(L"tts.html");
+	ensureHtmlFileInAppData(L"debug.html");
 #endif
 
 	PluginConfig::instance().load();
@@ -930,15 +1155,8 @@ bool obs_module_load(void)
 	});
 
 	obs_frontend_add_event_callback(onFrontendEvent, nullptr);
-	obs_frontend_add_tools_menu_item("obs-live-hub 設定", onSettingsMenuClick, nullptr);
-	obs_frontend_add_tools_menu_item("obs-live-hub 配信一括設定", onStreamSettingsMenuClick, nullptr);
-	obs_frontend_add_tools_menu_item("obs-live-hub アンケート管理", onVoteManagerMenuClick, nullptr);
-	obs_frontend_add_tools_menu_item("obs-live-hub オーバーレイ外観設定", onOverlayStyleMenuClick, nullptr);
-	obs_frontend_add_tools_menu_item("obs-live-hub 読み上げ設定", onTtsSpeechMenuClick, nullptr);
-	obs_frontend_add_tools_menu_item("obs-live-hub 読み上げ辞書", onTtsDictionaryMenuClick, nullptr);
-	obs_frontend_add_tools_menu_item("obs-live-hub オーバーレイをブラウザで開く", onOpenOverlayMenuClick, nullptr);
-	obs_frontend_add_tools_menu_item("obs-live-hub TTS音声ページを開く", onOpenTtsMenuClick, nullptr);
-	obs_frontend_add_tools_menu_item("obs-live-hub リロード", onReloadMenuClick, nullptr);
+	// サブメニュー挿入位置を確保するマーカー（FINISHED_LOADING で buildObsLiveHubMenu が置換）
+	obs_frontend_add_tools_menu_item(kHubMarker, obsHubMenuPlaceholder, nullptr);
 
 	return true;
 }

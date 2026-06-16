@@ -53,6 +53,11 @@ void PluginConfig::load()
 			static_cast<int64_t>(obs_data_get_int(data, "youtube_token_expiry"));
 	if (obs_data_has_user_value(data, "youtube_ignore_quota"))
 		youtubeIgnoreQuota = obs_data_get_bool(data, "youtube_ignore_quota");
+	if (obs_data_has_user_value(data, "youtube_poll_interval")) {
+		youtubePollInterval = static_cast<int>(obs_data_get_int(data, "youtube_poll_interval"));
+		if (youtubePollInterval < 5 || youtubePollInterval > 120)
+			youtubePollInterval = 5;
+	}
 
 	// Twitch
 	twitchOAuthToken = obs_data_get_string(data, "twitch_oauth_token");
@@ -229,6 +234,42 @@ void PluginConfig::load()
 	if (obs_data_has_user_value(data, "aivis_auto_start"))
 		aivisAutoStart = obs_data_get_bool(data, "aivis_auto_start");
 
+	// AivisSpeech [olh] パラメータ上下限
+	if (obs_data_has_user_value(data, "aivis_speed_min"))
+		aivisSpeedMin = static_cast<float>(obs_data_get_double(data, "aivis_speed_min"));
+	if (obs_data_has_user_value(data, "aivis_speed_max"))
+		aivisSpeedMax = static_cast<float>(obs_data_get_double(data, "aivis_speed_max"));
+	if (obs_data_has_user_value(data, "aivis_pitch_min"))
+		aivisPitchMin = static_cast<float>(obs_data_get_double(data, "aivis_pitch_min"));
+	if (obs_data_has_user_value(data, "aivis_pitch_max"))
+		aivisPitchMax = static_cast<float>(obs_data_get_double(data, "aivis_pitch_max"));
+	if (obs_data_has_user_value(data, "aivis_intonation_min"))
+		aivisIntonationMin = static_cast<float>(obs_data_get_double(data, "aivis_intonation_min"));
+	if (obs_data_has_user_value(data, "aivis_intonation_max"))
+		aivisIntonationMax = static_cast<float>(obs_data_get_double(data, "aivis_intonation_max"));
+	if (obs_data_has_user_value(data, "aivis_volume_scale_min"))
+		aivisVolumeScaleMin = static_cast<float>(obs_data_get_double(data, "aivis_volume_scale_min"));
+	if (obs_data_has_user_value(data, "aivis_volume_scale_max"))
+		aivisVolumeScaleMax = static_cast<float>(obs_data_get_double(data, "aivis_volume_scale_max"));
+	if (obs_data_has_user_value(data, "aivis_emotion_min"))
+		aivisEmotionMin = static_cast<float>(obs_data_get_double(data, "aivis_emotion_min"));
+	if (obs_data_has_user_value(data, "aivis_emotion_max"))
+		aivisEmotionMax = static_cast<float>(obs_data_get_double(data, "aivis_emotion_max"));
+
+	// デバッグパネル表示設定
+	if (obs_data_has_user_value(data, "debug_show_connection"))
+		debugShowConnection = obs_data_get_bool(data, "debug_show_connection");
+	if (obs_data_has_user_value(data, "debug_show_tts"))
+		debugShowTts = obs_data_get_bool(data, "debug_show_tts");
+	if (obs_data_has_user_value(data, "debug_show_quota"))
+		debugShowQuota = obs_data_get_bool(data, "debug_show_quota");
+	if (obs_data_has_user_value(data, "debug_show_vote"))
+		debugShowVote = obs_data_get_bool(data, "debug_show_vote");
+	if (obs_data_has_user_value(data, "debug_show_log"))
+		debugShowLog = obs_data_get_bool(data, "debug_show_log");
+	if (obs_data_has_user_value(data, "debug_show_comment_detail"))
+		debugShowCommentDetail = obs_data_get_bool(data, "debug_show_comment_detail");
+
 	// 配信一括設定
 	if (obs_data_has_user_value(data, "stream_twitch_title")) {
 		const char *s = obs_data_get_string(data, "stream_twitch_title");
@@ -294,6 +335,7 @@ void PluginConfig::save()
 	obs_data_set_string(data, "youtube_access_token", youtubeAccessToken.c_str());
 	obs_data_set_int(data, "youtube_token_expiry", static_cast<long long>(youtubeTokenExpiry));
 	obs_data_set_bool(data, "youtube_ignore_quota", youtubeIgnoreQuota);
+	obs_data_set_int(data, "youtube_poll_interval", youtubePollInterval);
 
 	// Twitch
 	obs_data_set_string(data, "twitch_oauth_token", twitchOAuthToken.c_str());
@@ -354,6 +396,26 @@ void PluginConfig::save()
 	obs_data_set_string(data, "aivis_speaker_name",   aivisSpeakerName.c_str());
 	obs_data_set_string(data, "aivis_engine_path",    aivisEnginePath.c_str());
 	obs_data_set_bool  (data, "aivis_auto_start",     aivisAutoStart);
+
+	// AivisSpeech [olh] パラメータ上下限
+	obs_data_set_double(data, "aivis_speed_min",        static_cast<double>(aivisSpeedMin));
+	obs_data_set_double(data, "aivis_speed_max",        static_cast<double>(aivisSpeedMax));
+	obs_data_set_double(data, "aivis_pitch_min",        static_cast<double>(aivisPitchMin));
+	obs_data_set_double(data, "aivis_pitch_max",        static_cast<double>(aivisPitchMax));
+	obs_data_set_double(data, "aivis_intonation_min",   static_cast<double>(aivisIntonationMin));
+	obs_data_set_double(data, "aivis_intonation_max",   static_cast<double>(aivisIntonationMax));
+	obs_data_set_double(data, "aivis_volume_scale_min", static_cast<double>(aivisVolumeScaleMin));
+	obs_data_set_double(data, "aivis_volume_scale_max", static_cast<double>(aivisVolumeScaleMax));
+	obs_data_set_double(data, "aivis_emotion_min",      static_cast<double>(aivisEmotionMin));
+	obs_data_set_double(data, "aivis_emotion_max",      static_cast<double>(aivisEmotionMax));
+
+	// デバッグパネル表示設定
+	obs_data_set_bool(data, "debug_show_connection", debugShowConnection);
+	obs_data_set_bool(data, "debug_show_tts",        debugShowTts);
+	obs_data_set_bool(data, "debug_show_quota",      debugShowQuota);
+	obs_data_set_bool(data, "debug_show_vote",       debugShowVote);
+	obs_data_set_bool(data, "debug_show_log",            debugShowLog);
+	obs_data_set_bool(data, "debug_show_comment_detail", debugShowCommentDetail);
 
 	// 配信一括設定
 	obs_data_set_string(data, "stream_twitch_title",    streamTwitchTitle.c_str());

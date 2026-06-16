@@ -63,6 +63,10 @@ target_sources(
     src/ui/TtsDictionaryDialog.hpp
     src/ui/TtsSpeechDialog.cpp
     src/ui/TtsSpeechDialog.hpp
+    src/ui/DebugSettingsDialog.cpp
+    src/ui/DebugSettingsDialog.hpp
+    src/ui/AivisParamLimitDialog.cpp
+    src/ui/AivisParamLimitDialog.hpp
     src/modules/WsServer.cpp
     src/modules/WsServer.hpp
     src/modules/AivisEngine.cpp

@@ -26,6 +26,7 @@ public:
 	std::string youtubeAccessToken;
 	int64_t youtubeTokenExpiry = 0; // UNIX タイムスタンプ（秒）。0 = 不明
 	bool youtubeIgnoreQuota = false;
+	int youtubePollInterval = 5; // コメント取得間隔（秒）
 
 	// Twitch
 	std::string twitchOAuthToken;
@@ -74,6 +75,18 @@ public:
 	std::string aivisEnginePath;
 	bool aivisAutoStart = false;
 
+	// AivisSpeech [olh] コマンド パラメータ上下限
+	float aivisSpeedMin        =  0.5f;
+	float aivisSpeedMax        =  2.0f;
+	float aivisPitchMin        = -0.15f;
+	float aivisPitchMax        =  0.15f;
+	float aivisIntonationMin   =  0.0f;
+	float aivisIntonationMax   =  2.0f;
+	float aivisVolumeScaleMin  =  0.0f;
+	float aivisVolumeScaleMax  =  2.0f;
+	float aivisEmotionMin      =  0.0f;
+	float aivisEmotionMax      =  2.0f;
+
 	// アンケートパネル外観設定
 	std::string voteBgColor      = "#000000";
 	float       voteBgOpacity    = 0.88f;
@@ -90,6 +103,14 @@ public:
 	int voteResultSize   = 12;
 	int voteTotalSize    = 11;
 	int voteStatusSize   = 11;
+
+	// デバッグパネル表示設定
+	bool debugShowConnection     = true;
+	bool debugShowTts            = true;
+	bool debugShowQuota          = true;
+	bool debugShowVote           = true;
+	bool debugShowLog            = true;
+	bool debugShowCommentDetail  = true;
 
 	// 配信一括設定（StreamSettingsDialog）
 	std::string streamTwitchTitle;

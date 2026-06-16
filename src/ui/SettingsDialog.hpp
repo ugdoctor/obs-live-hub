@@ -23,6 +23,7 @@ private slots:
 	void accept() override;
 	void onOpenOverlay();
 	void onGoogleAuthClicked();
+	void onPollIntervalChanged(int seconds);
 	// OAuth コールバックサーバーから code を受け取る（メインスレッドで呼ぶこと）
 	void onOAuthCodeReceived(const QString &code);
 	void onTwitchAuthClicked();
@@ -46,6 +47,9 @@ private:
 	QLineEdit *youtubeClientSecretEdit_;
 	QLabel *googleAuthStatusLabel_;
 	QPushButton *googleAuthBtn_;
+	// コメント取得間隔設定
+	QSpinBox *youtubePollIntervalSpinBox_;
+	QLabel *youtubePollQuotaLabel_;
 	// クォータ設定
 	QLabel *youtubeQuotaInfoLabel_;
 	QCheckBox *youtubeIgnoreQuotaCheck_;

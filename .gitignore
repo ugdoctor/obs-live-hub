@@ -15,6 +15,8 @@
 !CMakePresets.json
 !LICENSE
 !README.md
+!CLAUDE.md
+!STATUS.md
 !config.json.example
 
 # Exclude configuration files (contain API keys / tokens)

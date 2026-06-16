@@ -106,9 +106,10 @@
     }
 
     // ── AivisSpeech 音声合成 ──────────────────────────────────
-    async function speakWithAivis(text, styleId) {
+    async function speakWithAivis(text, styleId, aivisParams) {
       console.log('[AivisSpeech] speaking:', text, 'styleId:', styleId);
       var sid = (styleId !== undefined && styleId !== null) ? styleId : aivisStyleId;
+      var ap  = aivisParams || {};
       try {
         var queryRes = await fetch(
           aivisUrl + '/audio_query?text=' + encodeURIComponent(text) +
@@ -118,9 +119,12 @@
         if (!queryRes.ok) throw new Error('audio_query failed: ' + queryRes.status);
         var query = await queryRes.json();
 
-        query.speedScale  = ttsSettings.rate   || 1.0;
-        query.volumeScale = ttsSettings.volume || 1.0;
-        query.pitchScale  = ttsSettings.pitch ? (ttsSettings.pitch - 1.0) * 0.2 : 0.0;
+        // グローバル設定をベースに、ユーザー個別の aivisParams で上書き
+        query.speedScale  = ap.speedScale  !== undefined ? ap.speedScale  : (ttsSettings.rate   || 1.0);
+        query.volumeScale = ap.volumeScale !== undefined ? ap.volumeScale : (ttsSettings.volume || 1.0);
+        query.pitchScale  = ap.pitchScale  !== undefined ? ap.pitchScale  : (ttsSettings.pitch ? (ttsSettings.pitch - 1.0) * 0.2 : 0.0);
+        if (ap.intonationScale    !== undefined) query.intonationScale    = ap.intonationScale;
+        if (ap.tempoDynamicsScale !== undefined) query.tempoDynamicsScale = ap.tempoDynamicsScale;
 
         var synthRes = await fetch(
           aivisUrl + '/synthesis?speaker=' + sid,
@@ -155,7 +159,8 @@
       var effectiveStyleId = (item.styleId !== undefined) ? item.styleId : aivisStyleId;
 
       if (effectiveEngine === 'aivisspeech') {
-        speakWithAivis(item.text, effectiveStyleId);
+        speakWithAivis(item.text, effectiveStyleId,
+                       (item.userCfg && item.userCfg.aivisParams) ? item.userCfg.aivisParams : {});
       } else {
         var userCfg = item.userCfg || {};
         var u = new SpeechSynthesisUtterance(item.text);
@@ -192,18 +197,26 @@
       var effectiveEngine  = userCfg.engine  || ttsEngine;
       var effectiveStyleId = (userCfg.styleId !== undefined) ? userCfg.styleId : aivisStyleId;
       if (effectiveEngine === 'webspeech' && !window.speechSynthesis) return;
-      var userName    = applyDictionary(user);
+      // YouTube の表示名先頭の @ は読み上げ時に除去する
+      var ttsUser = (platform === 'youtube' && user.charAt(0) === '@') ? user.slice(1) : user;
+      var userName    = applyDictionary(ttsUser);
       var commentText = applyDictionary(text);
       var speak = ttsSettings.readUsername ? (userName + '、' + commentText) : commentText;
       ttsQueue.push({ text: speak, engine: effectiveEngine, styleId: effectiveStyleId, userCfg: userCfg });
       if (!ttsSpeaking) processTtsQueue();
     }
 
-    function connect() {
-      var ws = new WebSocket('ws://127.0.0.1:' + WS_PORT);
+    var ws = null;
+
+    function connectWs() {
+      if (ws && (ws.readyState === WebSocket.CONNECTING ||
+                 ws.readyState === WebSocket.OPEN)) return;
+
+      ws = new WebSocket('ws://127.0.0.1:' + WS_PORT);
+      var thisWs = ws;
       ws.onopen  = function() {};
-      ws.onerror = function() {};
-      ws.onclose = function() { setTimeout(connect, 3000); };
+      ws.onerror = function() { if (ws === thisWs) ws = null; };
+      ws.onclose = function() { if (ws === thisWs) ws = null; };
       ws.onmessage = function(e) {
         try {
           var data = JSON.parse(e.data);
@@ -225,6 +238,27 @@
               s[data.userId].styleId     = data.styleId;
               s[data.userId].speakerName = data.speakerName;
               s[data.userId].styleName   = data.styleName;
+              if (data.engine) s[data.userId].engine = data.engine;
+              saveUserSettings(s);
+            }
+          } else if (data.type === 'olh_user_settings') {
+            if (data.userId) {
+              var s = loadUserSettings();
+              if (!s[data.userId]) s[data.userId] = {};
+              if (data.aivisParams !== undefined) {
+                if (Object.keys(data.aivisParams).length === 0) {
+                  delete s[data.userId].aivisParams; // モデル切り替え時リセット
+                } else {
+                  s[data.userId].aivisParams = Object.assign(
+                    s[data.userId].aivisParams || {}, data.aivisParams);
+                }
+              }
+              if (data.webSpeechParams !== undefined) {
+                var wp = data.webSpeechParams;
+                if (wp.rate   !== undefined) s[data.userId].rate   = wp.rate;
+                if (wp.pitch  !== undefined) s[data.userId].pitch  = wp.pitch;
+                if (wp.volume !== undefined) s[data.userId].volume = wp.volume;
+              }
               saveUserSettings(s);
             }
           } else if (data.type === 'comment') {
@@ -239,7 +273,13 @@
 
     loadStoredTts();
     loadStoredDict();
-    connect();
+    connectWs();
+    setInterval(function() {
+      if (!ws || ws.readyState === WebSocket.CLOSED ||
+                 ws.readyState === WebSocket.CLOSING) {
+        connectWs();
+      }
+    }, 1000);
   </script>
 </body>
 </html>

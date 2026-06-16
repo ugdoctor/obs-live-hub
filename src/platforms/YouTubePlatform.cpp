@@ -419,13 +419,22 @@ void YouTubePlatform::onVideoInfoResult(bool ok, int statusCode, const std::stri
 	startPolling();
 }
 
+// ---- ポーリング間隔取得 ----
+
+int YouTubePlatform::pollIntervalMs() const
+{
+	const int sec = qMax(5, PluginConfig::instance().youtubePollInterval);
+	return sec * 1000;
+}
+
 // ---- ポーリング開始 ----
 
 void YouTubePlatform::startPolling()
 {
 	connected_ = true;
-	obs_log(LOG_INFO, "[%s] ポーリング開始（間隔: %d ms）", TAG, DEFAULT_POLL_INTERVAL_MS);
-	pollTimer_->start(DEFAULT_POLL_INTERVAL_MS);
+	const int ms = pollIntervalMs();
+	obs_log(LOG_INFO, "[%s] ポーリング開始（間隔: %d ms）", TAG, ms);
+	pollTimer_->start(ms);
 }
 
 // ---- クォータ消費チェック ----
@@ -574,7 +583,7 @@ void YouTubePlatform::onMessagesResult(bool ok, int statusCode, const std::strin
 		obs_log(LOG_WARNING, "[%s] WinHTTP GET エラー（liveChatMessages.list）: %s", TAG,
 			error.c_str());
 		if (connected_)
-			pollTimer_->start(DEFAULT_POLL_INTERVAL_MS);
+			pollTimer_->start(pollIntervalMs());
 		return;
 	}
 
@@ -593,7 +602,7 @@ void YouTubePlatform::onMessagesResult(bool ok, int statusCode, const std::strin
 			return;
 		}
 		if (connected_)
-			pollTimer_->start(DEFAULT_POLL_INTERVAL_MS);
+			pollTimer_->start(pollIntervalMs());
 		return;
 	}
 
@@ -605,12 +614,13 @@ void YouTubePlatform::onMessagesResult(bool ok, int statusCode, const std::strin
 			emit authFailed();
 		}
 		if (connected_)
-			pollTimer_->start(DEFAULT_POLL_INTERVAL_MS);
+			pollTimer_->start(pollIntervalMs());
 		return;
 	}
 
-	// API 指定のポーリング間隔を遵守（クォータ節約・Google 規約準拠）
-	const int interval = root["pollingIntervalMillis"].toInt(DEFAULT_POLL_INTERVAL_MS);
+	// API 指定のポーリング間隔とユーザー設定値の大きい方を採用（Google 規約準拠）
+	const int configMs = pollIntervalMs();
+	const int interval = qMax(configMs, root["pollingIntervalMillis"].toInt(configMs));
 	nextPageToken_ = root["nextPageToken"].toString();
 
 	if (authErrorActive_) {

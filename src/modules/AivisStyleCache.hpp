@@ -14,4 +14,8 @@ namespace AivisStyleCache {
 	void                     set(const QVector<AivisCachedStyle> &styles);
 	const AivisCachedStyle  *findByName(const QString &name); // 部分一致、最初のヒットを返す
 	bool                     isEmpty();
+	// 1 回だけ /speakers を取得してキャッシュ更新（バックグラウンド）
+	void                     fetchAndCacheAsync(const QString &aivisUrl);
+	// エンジン起動後用: 1 秒ごとにリトライ、最大 maxSeconds 秒
+	void                     fetchAndCacheWithRetry(const QString &aivisUrl, int maxSeconds = 30);
 }
