@@ -62,6 +62,7 @@ public:
 	int ttsMaxLength = 100;
 	bool ttsTwitch = true;
 	bool ttsYoutube = true;
+	bool ttsCheckEngineConnection = true;
 
 	// VOICEVOX互換エンジン設定
 	// ttsEngine: webspeech / aivisspeech / sharevox / lmroid / itvoice

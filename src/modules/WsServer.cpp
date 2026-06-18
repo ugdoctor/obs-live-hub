@@ -329,21 +329,30 @@ void WsServer::broadcast(const std::string &jsonText)
 
 void WsServer::acceptLoop()
 {
+	obs_log(LOG_INFO, "[%s] acceptLoop() started, listenSock_=%d",
+	        WSTAG, static_cast<int>(listenSock_));
+
 	while (running_.load()) {
 		fd_set fds;
 		FD_ZERO(&fds);
 		FD_SET(listenSock_, &fds);
-		timeval tv{1, 0};
+		timeval tv{1, 0}; // select タイムアウト 1 秒
 		if (select(0, &fds, nullptr, nullptr, &tv) <= 0)
 			continue;
 
 		SOCKET client = accept(listenSock_, nullptr, nullptr);
-		if (client == INVALID_SOCKET)
+		if (client == INVALID_SOCKET) {
+			obs_log(LOG_WARNING,
+			        "[%s] accept() returned INVALID_SOCKET, WSA=%d",
+			        WSTAG, WSAGetLastError());
 			continue;
+		}
 
 		obs_log(LOG_INFO, "[%s] Incoming connection, starting handshake", WSTAG);
 		std::thread([this, client]() { clientLoop(client); }).detach();
 	}
+
+	obs_log(LOG_INFO, "[%s] acceptLoop() exiting", WSTAG);
 }
 
 void WsServer::setMessageCallback(std::function<void(const std::string &)> cb)

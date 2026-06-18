@@ -26,4 +26,8 @@ void stopAll();
 // エンジン名 → 状態マップを返す（UI 参照用）
 std::map<std::string, EngineStatus> getAllStatuses();
 
+// 有効化エンジンの接続状態を再確認する（プロセス起動なし、非同期）
+// ダイアログのUIリフレッシュ用途で呼ぶ
+void refreshAll();
+
 } // namespace EngineManager

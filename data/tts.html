@@ -116,20 +116,24 @@
     }
 
     // ── VOICEVOX互換エンジン 音声合成 ─────────────────────────
-    async function speakWithAivis(text, styleId, aivisParams) {
-      console.log('[VOICEVOX] speaking:', text, 'styleId:', styleId);
+    // baseUrl: コメントごとのエンジンURL（未指定時はグローバル aivisUrl にフォールバック）
+    // masterVolume: HTML Audio 要素の音量（未指定時は ttsSettings.volume）
+    async function speakWithAivis(text, styleId, baseUrl, aivisParams, masterVolume) {
+      var url = baseUrl || aivisUrl;
       var sid = (styleId !== undefined && styleId !== null) ? styleId : aivisStyleId;
       var ap  = aivisParams || {};
+      var vol = (masterVolume !== undefined) ? masterVolume : (ttsSettings.volume || 1.0);
+      console.log('[VOICEVOX] speaking:', text, 'engine:', url, 'styleId:', sid);
       try {
         var queryRes = await fetch(
-          aivisUrl + '/audio_query?text=' + encodeURIComponent(text) +
+          url + '/audio_query?text=' + encodeURIComponent(text) +
           '&speaker=' + sid,
           { method: 'POST' }
         );
         if (!queryRes.ok) throw new Error('audio_query failed: ' + queryRes.status);
         var query = await queryRes.json();
 
-        // グローバル設定をベースに、ユーザー個別の aivisParams で上書き
+        // コメントごとの aivis パラメータを適用（未設定時はグローバル設定値）
         query.speedScale  = ap.speedScale  !== undefined ? ap.speedScale  : (ttsSettings.rate   || 1.0);
         query.volumeScale = ap.volumeScale !== undefined ? ap.volumeScale : (ttsSettings.volume || 1.0);
         query.pitchScale  = ap.pitchScale  !== undefined ? ap.pitchScale  : (ttsSettings.pitch ? (ttsSettings.pitch - 1.0) * 0.2 : 0.0);
@@ -137,7 +141,7 @@
         if (ap.tempoDynamicsScale !== undefined) query.tempoDynamicsScale = ap.tempoDynamicsScale;
 
         var synthRes = await fetch(
-          aivisUrl + '/synthesis?speaker=' + sid,
+          url + '/synthesis?speaker=' + sid,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -149,7 +153,7 @@
         var audioUrl = URL.createObjectURL(blob);
 
         var audio = new Audio(audioUrl);
-        audio.volume = ttsSettings.volume || 1.0;
+        audio.volume = vol;
         audio.onended = function() { URL.revokeObjectURL(audioUrl); processTtsQueue(); };
         audio.onerror = function() { URL.revokeObjectURL(audioUrl); processTtsQueue(); };
         audio.play();
@@ -163,35 +167,43 @@
     function processTtsQueue() {
       if (!ttsQueue.length) { ttsSpeaking = false; return; }
       ttsSpeaking = true;
-      var item    = ttsQueue.shift();
+      var item = ttsQueue.shift();
+      // コメントに埋め込まれた tts 情報を使う（なければグローバル設定にフォールバック）
+      var info = item.ttsInfo || {};
 
-      var effectiveEngine  = item.engine  || ttsEngine;
-      var effectiveStyleId = (item.styleId !== undefined) ? item.styleId : aivisStyleId;
+      var effectiveEngine    = info.engine    || ttsEngine;
+      var effectiveBaseUrl   = info.baseUrl   || aivisUrl;
+      var effectiveStyleId   = (info.styleId  !== undefined) ? info.styleId  : aivisStyleId;
+      var effectiveBouyomiVoice = (info.bouyomiVoice !== undefined) ? info.bouyomiVoice : bouyomiVoice;
 
       if (effectiveEngine === 'bouyomi') {
         // 棒読みちゃんはC++経由でHTTP GETを送るだけ。棒読みちゃん自体が再生キューを管理するため即座に次へ
-        var bp = (item.userCfg && item.userCfg.bouyomiParams) ? item.userCfg.bouyomiParams : {};
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({
             type:   'bouyomi_speak',
             text:   item.text,
-            voice:  bouyomiVoice,
-            volume: bp.volume !== undefined ? bp.volume : -1,
-            speed:  bp.speed  !== undefined ? bp.speed  : -1,
-            tone:   bp.tone   !== undefined ? bp.tone   : -1
+            voice:  effectiveBouyomiVoice,
+            volume: info.bouyomiVolume !== undefined ? info.bouyomiVolume : -1,
+            speed:  info.bouyomiSpeed  !== undefined ? info.bouyomiSpeed  : -1,
+            tone:   info.bouyomiTone   !== undefined ? info.bouyomiTone   : -1
           }));
         }
         ttsSpeaking = false;
         setTimeout(processTtsQueue, 0);
       } else if (isVoicevoxEngine(effectiveEngine)) {
-        speakWithAivis(item.text, effectiveStyleId,
-                       (item.userCfg && item.userCfg.aivisParams) ? item.userCfg.aivisParams : {});
+        // コメントの aivis パラメータを aivisParams 形式に変換
+        var ap = {};
+        if (info.aivisSpeed      !== undefined) ap.speedScale         = info.aivisSpeed;
+        if (info.aivisPitch      !== undefined) ap.pitchScale         = info.aivisPitch;
+        if (info.aivisIntonation !== undefined) ap.intonationScale    = info.aivisIntonation;
+        if (info.aivisVolume     !== undefined) ap.volumeScale        = info.aivisVolume;
+        if (info.aivisEmotion    !== undefined) ap.tempoDynamicsScale = info.aivisEmotion;
+        speakWithAivis(item.text, effectiveStyleId, effectiveBaseUrl, ap, info.volume);
       } else {
-        var userCfg = item.userCfg || {};
         var u = new SpeechSynthesisUtterance(item.text);
-        u.volume = (userCfg.volume !== undefined) ? userCfg.volume : ttsSettings.volume;
-        u.rate   = (userCfg.rate   !== undefined) ? userCfg.rate   : ttsSettings.rate;
-        u.pitch  = (userCfg.pitch  !== undefined) ? userCfg.pitch  : ttsSettings.pitch;
+        u.volume = (info.volume !== undefined) ? info.volume : ttsSettings.volume;
+        u.rate   = (info.rate   !== undefined) ? info.rate   : ttsSettings.rate;
+        u.pitch  = (info.pitch  !== undefined) ? info.pitch  : ttsSettings.pitch;
         u.onend = u.onerror = function() { processTtsQueue(); };
         window.speechSynthesis.speak(u);
       }
@@ -212,22 +224,22 @@
       return loadUserSettings()[user] || {};
     }
 
-    function queueTts(user, text, platform) {
+    // ttsInfo: commentメッセージの "tts" オブジェクト（C++側が埋め込み済み）
+    function queueTts(user, text, platform, ttsInfo) {
       if (!ttsSettings.enabled) return;
       if (platform === 'system') return;
       if (platform === 'twitch'  && !ttsSettings.twitch)  return;
       if (platform === 'youtube' && !ttsSettings.youtube) return;
       if (ttsSettings.maxLength > 0 && text.length > ttsSettings.maxLength) return;
-      var userCfg        = getUserSettings(user);
-      var effectiveEngine  = userCfg.engine  || ttsEngine;
-      var effectiveStyleId = (userCfg.styleId !== undefined) ? userCfg.styleId : aivisStyleId;
+      var info = ttsInfo || {};
+      var effectiveEngine = info.engine || ttsEngine;
       if (effectiveEngine === 'webspeech' && !window.speechSynthesis) return;
       // YouTube の表示名先頭の @ は読み上げ時に除去する
       var ttsUser = (platform === 'youtube' && user.charAt(0) === '@') ? user.slice(1) : user;
       var userName    = applyDictionary(ttsUser);
       var commentText = applyDictionary(text);
       var speak = ttsSettings.readUsername ? (userName + '、' + commentText) : commentText;
-      ttsQueue.push({ text: speak, engine: effectiveEngine, styleId: effectiveStyleId, userCfg: userCfg });
+      ttsQueue.push({ text: speak, ttsInfo: info });
       if (!ttsSpeaking) processTtsQueue();
     }
 
@@ -297,7 +309,7 @@
             var text = data.text || '';
             if (text.trim().startsWith('[olh]')) return;
             var platform = ((data.platform || 'twitch') + '').toLowerCase();
-            queueTts(data.user || '', text, platform);
+            queueTts(data.user || '', text, platform, data.tts || null);
           }
         } catch(_) {}
       };

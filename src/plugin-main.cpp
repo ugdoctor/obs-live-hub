@@ -114,13 +114,18 @@ static std::string escapeJsonString(const std::string &s)
 }
 
 static std::string makeCommentJson(const std::string &user, const std::string &text,
-				   const std::string &platform, const std::string &avatar = "")
+				   const std::string &platform, const std::string &avatar = "",
+				   const std::string &ttsJson = "")
 {
-	return "{\"type\":\"comment\","
-	       "\"user\":\"" + escapeJsonString(user) + "\","
-	       "\"text\":\"" + escapeJsonString(text) + "\","
-	       "\"platform\":\"" + platform + "\","
-	       "\"avatar\":\"" + escapeJsonString(avatar) + "\"}";
+	std::string r = "{\"type\":\"comment\","
+	                "\"user\":\"" + escapeJsonString(user) + "\","
+	                "\"text\":\"" + escapeJsonString(text) + "\","
+	                "\"platform\":\"" + platform + "\","
+	                "\"avatar\":\"" + escapeJsonString(avatar) + "\"";
+	if (!ttsJson.empty())
+		r += ",\"tts\":" + ttsJson;
+	r += "}";
+	return r;
 }
 
 static std::string makeSystemCommentJson(const std::string &text)
@@ -130,6 +135,82 @@ static std::string makeSystemCommentJson(const std::string &text)
 	       "\"text\":\"" + escapeJsonString(text) + "\","
 	       "\"platform\":\"system\","
 	       "\"avatar\":\"\"}";
+}
+
+// ── 発言者 TTS 情報の解決 ──────────────────────────────────────────────────
+
+static std::string engineBaseUrl(const std::string &engine)
+{
+	const auto &cfg = PluginConfig::instance();
+	if (engine == "aivisspeech") return cfg.aivisUrl;
+	if (engine == "sharevox")    return cfg.sharevoxUrl;
+	if (engine == "lmroid")      return cfg.lmroidUrl;
+	if (engine == "itvoice")     return cfg.itvoiceUrl;
+	return {};
+}
+
+static bool isEngineConnected(const std::string &engine)
+{
+	if (engine == "webspeech")
+		return true;
+	const auto statuses = EngineManager::getAllStatuses();
+	const auto it       = statuses.find(engine);
+	return it != statuses.end() &&
+	       it->second.state == EngineManager::EngineState::Connected;
+}
+
+// 発言者の TTS 設定を解決して "tts" オブジェクト JSON を返す
+static std::string buildCommentTtsJson(const QString &userId, const QString &platform)
+{
+	const auto &cfg      = PluginConfig::instance();
+	const auto  viewerOpt = ViewerTtsSettings::instance().get(userId, platform);
+
+	// エンジン決定：個人設定 → グローバル設定 → webspeech フォールバック
+	std::string engine = (viewerOpt && !viewerOpt->engine.empty())
+	                         ? viewerOpt->engine
+	                         : cfg.ttsEngine;
+	if (cfg.ttsCheckEngineConnection && !isEngineConnected(engine))
+		engine = "webspeech";
+
+	const int64_t styleId         = viewerOpt ? viewerOpt->styleId         : cfg.aivisStyleId;
+	const float   rate            = viewerOpt ? viewerOpt->rate             : cfg.ttsRate;
+	const float   pitch           = viewerOpt ? viewerOpt->pitch            : cfg.ttsPitch;
+	const float   volume          = viewerOpt ? viewerOpt->volume           : cfg.ttsVolume;
+	const int     bouyomiVoice    = viewerOpt ? viewerOpt->bouyomiVoice     : cfg.bouyomiVoice;
+	const float   aivisSpeed      = viewerOpt ? viewerOpt->aivisSpeed       : 1.0f;
+	const float   aivisPitch      = viewerOpt ? viewerOpt->aivisPitch       : 0.0f;
+	const float   aivisIntonation = viewerOpt ? viewerOpt->aivisIntonation  : 1.0f;
+	const float   aivisVolume     = viewerOpt ? viewerOpt->aivisVolume      : 1.0f;
+	const float   aivisEmotion    = viewerOpt ? viewerOpt->aivisEmotion     : 1.0f;
+	const int     bouyomiVolume   = viewerOpt ? viewerOpt->bouyomiVolume    : -1;
+	const int     bouyomiSpeed    = viewerOpt ? viewerOpt->bouyomiSpeed     : -1;
+	const int     bouyomiTone     = viewerOpt ? viewerOpt->bouyomiTone      : -1;
+
+	auto f = [](float v) -> std::string {
+		char buf[16];
+		snprintf(buf, sizeof(buf), "%.2f", static_cast<double>(v));
+		for (char *p = buf; *p; ++p)
+			if (*p == ',') *p = '.';
+		return buf;
+	};
+
+	return std::string("{") +
+	       "\"engine\":\"" + engine + "\"," +
+	       "\"baseUrl\":\"" + escapeJsonString(engineBaseUrl(engine)) + "\"," +
+	       "\"styleId\":" + std::to_string(styleId) + "," +
+	       "\"rate\":" + f(rate) + "," +
+	       "\"pitch\":" + f(pitch) + "," +
+	       "\"volume\":" + f(volume) + "," +
+	       "\"bouyomiVoice\":" + std::to_string(bouyomiVoice) + "," +
+	       "\"aivisSpeed\":" + f(aivisSpeed) + "," +
+	       "\"aivisPitch\":" + f(aivisPitch) + "," +
+	       "\"aivisIntonation\":" + f(aivisIntonation) + "," +
+	       "\"aivisVolume\":" + f(aivisVolume) + "," +
+	       "\"aivisEmotion\":" + f(aivisEmotion) + "," +
+	       "\"bouyomiVolume\":" + std::to_string(bouyomiVolume) + "," +
+	       "\"bouyomiSpeed\":" + std::to_string(bouyomiSpeed) + "," +
+	       "\"bouyomiTone\":" + std::to_string(bouyomiTone) +
+	       "}";
 }
 
 static void connectTwitchSignals();               // forward declaration
@@ -370,9 +451,10 @@ static void connectYouTubeSignals()
 		[](const QString &author, const QString &message, const QString &avatarUrl) {
 			recordUserPlatform(author, QStringLiteral("youtube"));
 			if (s_wsServer)
-				s_wsServer->broadcast(makeCommentJson(author.toStdString(),
-								      message.toStdString(), "youtube",
-								      avatarUrl.toStdString()));
+				s_wsServer->broadcast(makeCommentJson(
+					author.toStdString(), message.toStdString(), "youtube",
+					avatarUrl.toStdString(),
+					buildCommentTtsJson(author, QStringLiteral("youtube"))));
 			processVoteComment(author, message);
 			if (s_effectManager) {
 				s_effectManager->onComment(message, author);
@@ -1572,8 +1654,10 @@ bool obs_module_load(void)
 						  Q_ARG(QString, QString::fromStdString(ev.authorName)),
 						  Q_ARG(QString, QString::fromStdString(ev.message)));
 		if (s_wsServer)
-			s_wsServer->broadcast(
-				makeCommentJson(ev.authorName, ev.message, "twitch", ev.avatarUrl));
+			s_wsServer->broadcast(makeCommentJson(
+				ev.authorName, ev.message, "twitch", ev.avatarUrl,
+				buildCommentTtsJson(QString::fromStdString(ev.authorName),
+				                    QStringLiteral("twitch"))));
 		const QString msg        = QString::fromStdString(ev.message);
 		const QString authorName = QString::fromStdString(ev.authorName);
 		recordUserPlatform(authorName, QStringLiteral("twitch"));

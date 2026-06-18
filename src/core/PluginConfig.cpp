@@ -203,6 +203,8 @@ void PluginConfig::load()
 		ttsTwitch = obs_data_get_bool(data, "tts_twitch");
 	if (obs_data_has_user_value(data, "tts_youtube"))
 		ttsYoutube = obs_data_get_bool(data, "tts_youtube");
+	if (obs_data_has_user_value(data, "tts_check_engine_connection"))
+		ttsCheckEngineConnection = obs_data_get_bool(data, "tts_check_engine_connection");
 
 	// AivisSpeech
 	if (obs_data_has_user_value(data, "tts_engine")) {
@@ -521,6 +523,7 @@ void PluginConfig::save()
 	obs_data_set_int(data, "tts_max_length", ttsMaxLength);
 	obs_data_set_bool(data, "tts_twitch", ttsTwitch);
 	obs_data_set_bool(data, "tts_youtube", ttsYoutube);
+	obs_data_set_bool(data, "tts_check_engine_connection", ttsCheckEngineConnection);
 
 	// AivisSpeech
 	obs_data_set_string(data, "tts_engine",          ttsEngine.c_str());
