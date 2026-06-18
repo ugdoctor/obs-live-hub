@@ -1,6 +1,19 @@
 /*
 obs-live-hub
 Copyright (C) 2026 ugdoctor
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along
+with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 #include "EngineManager.hpp"
@@ -304,4 +317,41 @@ void EngineManager::stopAll()
 std::map<std::string, EngineManager::EngineStatus> EngineManager::getAllStatuses()
 {
 	return s_statuses;
+}
+
+void EngineManager::refreshAll()
+{
+	const auto &cfg = PluginConfig::instance();
+
+	struct Entry {
+		std::string name;
+		bool        enabled;
+		std::string url;
+	};
+	const std::vector<Entry> engines = {
+		{"aivisspeech", cfg.aivisspeechEnabled, cfg.aivisUrl},
+		{"sharevox",    cfg.sharevoxEnabled,    cfg.sharevoxUrl},
+		{"lmroid",      cfg.lmroidEnabled,      cfg.lmroidUrl},
+		{"itvoice",     cfg.itvoiceEnabled,     cfg.itvoiceUrl},
+	};
+
+	const std::string activeEngine = cfg.ttsEngine;
+
+	for (const auto &e : engines) {
+		if (!e.enabled)
+			continue;
+
+		{
+			EngineStatus st;
+			st.state = EngineState::Starting;
+			applyStatus(e.name, st);
+		}
+		launchSpeakerCheck(e.name, e.url, (e.name == activeEngine), /*withRetry=*/false);
+	}
+
+	if (cfg.bouyomiEnabled) {
+		EngineStatus st;
+		st.state = EngineState::Connected;
+		applyStatus("bouyomi", st);
+	}
 }
