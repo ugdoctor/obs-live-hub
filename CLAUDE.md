@@ -17,38 +17,72 @@ OBS Studio用の拡張可能なライブ配信支援プラグイン。
 # Developer PowerShell for VS で実行
 cd D:\git\obs_plugin_commentViewer\obs-comment-viewer
 
-# 初回・設定変更時
+# --- プリセット使用（推奨） ---
+cmake --preset windows-x64
+cmake --build --preset windows-x64
+# 生成物: build_x64/RelWithDebInfo/obs-live-hub.dll
+
+# --- 手動指定（代替） ---
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-
-# ビルド
 cmake --build build --config RelWithDebInfo
-
-# 生成物
-# build/RelWithDebInfo/plugintemplate-for-obs.dll
+# 生成物: build/RelWithDebInfo/obs-live-hub.dll
 ```
 
 ## プロジェクト構成
 ```
 obs-comment-viewer/
-├── CLAUDE.md          # このファイル（仕様・方針）
-├── STATUS.md          # 現在のタスク・次にやること
-├── CLAUDE_LOG.md      # 開発履歴（追記のみ）
-├── CMakeLists.txt     # ビルド設定
-├── buildspec.json     # OBSバージョン指定
+├── CLAUDE.md               # このファイル（仕様・方針）
+├── STATUS.md               # 現在のタスク・次にやること
+├── CLAUDE_LOG.md           # 開発履歴（追記のみ）
+├── CMakeLists.txt          # ビルド設定
+├── CMakePresets.json       # CMake プリセット（windows-x64 等）
+├── buildspec.json          # OBS バージョン指定
+├── config.json.example     # 設定ファイルサンプル（本番は config.json にリネーム）
+├── data/                   # デプロイ HTML リソース（起動時に %APPDATA% へ自動コピー）
+│   ├── locale/en-US.ini
+│   ├── overlay.html        # コメントオーバーレイ ★実装参照はこちら
+│   ├── tts.html            # TTS 読み上げ用
+│   ├── effect.html         # エフェクト表示用
+│   └── debug.html          # デバッグ用
 └── src/
-    ├── plugin-main.cpp         # エントリーポイント
-    ├── core/                   # コアエンジン
-    │   ├── EventBus.hpp        # モジュール間イベント通信
-    │   ├── PluginConfig.hpp    # 設定管理
-    │   └── PlatformInterface.hpp # プラットフォーム抽象レイヤー
-    ├── platforms/              # 各配信プラットフォーム
-    │   ├── YouTubePlatform.hpp
-    │   └── TwitchPlatform.hpp
-    ├── ui/                     # Qt6 UIコンポーネント
-    │   ├── CommentDock.hpp     # コメントビューワードック
-    │   └── SettingsDialog.hpp  # 設定ダイアログ
-    └── modules/                # 拡張モジュール（将来）
-        └── (AIFilter, StreamInfo, ExternalBridge...)
+    ├── plugin-main.cpp         # エントリーポイント・WebSocket ハンドラ群
+    ├── plugin-main.c           # OBS モジュール宣言スタブ（テンプレート由来）
+    ├── core/
+    │   ├── EventBus.hpp        # モジュール間 Pub/Sub イベント通信
+    │   ├── PluginConfig.hpp/cpp # 全設定フィールド定義・JSON 永続化
+    │   └── PlatformInterface.hpp # プラットフォーム抽象インターフェース
+    ├── auth/                   # OAuth 認証フロー
+    │   ├── GoogleOAuth.hpp/cpp  # Google OAuth 2.0（YouTube 用）
+    │   └── TwitchOAuth.hpp/cpp  # Twitch OAuth Implicit Grant
+    ├── platforms/              # 配信プラットフォーム実装
+    │   ├── TlsSocket.hpp/cpp       # 純粋 TLS/TCP ソケット（Twitch IRC 用）
+    │   ├── TwitchPlatform.hpp/cpp  # Twitch IRC 接続・コメント取得
+    │   └── YouTubePlatform.hpp/cpp # YouTube Live API ポーリング
+    ├── modules/                # 機能モジュール
+    │   ├── AivisEngine.hpp/cpp     # VOICEVOX 互換 HTTP API ラッパー
+    │   ├── AivisStyleCache.hpp/cpp # 話者一覧キャッシュ（エンジン → スタイル名解決）
+    │   ├── BouyomiChanClient.hpp/cpp # 棒読みちゃん連携クライアント
+    │   ├── EffectManager.hpp/cpp   # エフェクト設定管理・発火制御
+    │   ├── EngineManager.hpp/cpp   # TTS エンジンライフサイクル管理（起動/接続確認）
+    │   ├── PointManager.hpp/cpp    # ポイントシステム管理・CSV 永続化
+    │   ├── ViewerTtsSettings.hpp/cpp # 視聴者別 TTS 設定・CSV 永続化
+    │   └── WsServer.hpp/cpp        # WebSocket サーバー（overlay.html / tts.html 連携）
+    ├── ui/                     # Qt6 UI コンポーネント
+    │   ├── AivisParamLimitDialog.hpp/cpp  # VOICEVOX 互換パラメータ上下限設定
+    │   ├── BouyomiParamLimitDialog.hpp/cpp # 棒読みちゃんパラメータ上下限設定
+    │   ├── CommentDock.hpp/cpp            # コメントビューワードック
+    │   ├── DebugSettingsDialog.hpp/cpp    # デバッグ設定
+    │   ├── EffectSettingsDialog.hpp/cpp   # エフェクト設定
+    │   ├── OverlayStyleDialog.hpp/cpp     # オーバーレイ外観カスタマイズ
+    │   ├── OverlayUtils.hpp/cpp           # overlay.html パス解決ユーティリティ
+    │   ├── PointSettingsDialog.hpp/cpp    # ポイントシステム設定
+    │   ├── SettingsDialog.hpp/cpp         # 接続設定・OAuth 認証フロー
+    │   ├── StreamSettingsDialog.hpp/cpp   # 配信情報一括設定（タイトル・カテゴリ等）
+    │   ├── TtsDictionaryDialog.hpp/cpp    # TTS 読み上げ辞書（CSV 管理）
+    │   ├── TtsSpeechDialog.hpp/cpp        # TTS エンジン設定・接続確認
+    │   └── VoteManagerDialog.hpp/cpp      # アンケート（投票）管理
+    └── overlay/
+        └── overlay.html        # ★旧バージョン。実装参照には data/overlay.html を使うこと
 ```
 
 ## アーキテクチャ方針
@@ -77,19 +111,34 @@ public:
 
 ## 開発フェーズ
 
-### Phase 1（現在）：コメントビューワー基盤
-- [ ] プロジェクト名・構成のリネーム
-- [ ] OBSドックパネルにコメントリスト表示（Qt6）
-- [ ] YouTubeLive コメント取得（API or WebSocket）
-- [ ] Twitch コメント取得（IRC or EventSub）
-- [ ] 基本フィルタリング（NGワード等）
-- [ ] 設定ダイアログ（APIキー・接続設定）
+### Phase 1：コメントビューワー基盤（ほぼ完了）
+- [x] プロジェクト名・構成のリネーム（obs-live-hub）
+- [x] OBS ドックパネルにコメントリスト表示（Qt6 CommentDock）
+- [x] YouTube Live コメント取得（Data API v3 ポーリング + OAuth 2.0）
+- [x] Twitch コメント取得（IRC over TLS + OAuth Implicit Grant）
+- [x] 設定ダイアログ（APIキー・OAuth 認証フロー）
+- [ ] 基本フィルタリング（NGワード等）— 未実装
 
-### Phase 2（将来）：拡張機能
-- [ ] 配信情報表示（視聴者数・経過時間）
-- [ ] AIによるコメント処理（要約・感情分析・NG判定）
-- [ ] 外部アプリ連携（WebSocket サーバー機能）
-- [ ] コメント演出（特定コメントのハイライト等）
+### 実装済み拡張機能
+
+| 機能 | 主要クラス | 備考 |
+|---|---|---|
+| TTS 読み上げ（複数エンジン同時対応） | `EngineManager` / `AivisEngine` / `BouyomiChanClient` | webspeech / aivisspeech / sharevox / lmroid / itvoice / bouyomi |
+| 視聴者別 TTS 個人設定 | `ViewerTtsSettings` | CSV 永続化、再起動後も維持 |
+| 視聴者コメントコマンド（`[olh]`） | `plugin-main.cpp` / `overlay.html` | 詳細は「視聴者コメントコマンド全集」セクション参照 |
+| WebSocket サーバー | `WsServer` | overlay.html / tts.html との双方向通信 |
+| エフェクトシステム | `EffectManager` / `EffectSettingsDialog` | `[olh] effect:XXX` トリガー対応 |
+| ポイントシステム | `PointManager` / `PointSettingsDialog` | 視聴者ポイント管理・CSV 永続化 |
+| アンケート（投票）システム | `VoteManagerDialog` | `!vote` コマンド対応（選択式・自由回答） |
+| 配信情報一括設定 | `StreamSettingsDialog` | タイトル・カテゴリ等を Twitch/YouTube へ同時設定 |
+| オーバーレイ外観カスタマイズ | `OverlayStyleDialog` | |
+| TTS 読み上げ辞書 | `TtsDictionaryDialog` | CSV 管理 |
+| TTS パラメータ制限設定 | `AivisParamLimitDialog` / `BouyomiParamLimitDialog` | 配信者がパラメータの上下限を設定 |
+
+### Phase 2（将来）：追加予定
+- [ ] NGワードフィルタリング
+- [ ] AI によるコメント処理（要約・感情分析・NG判定）
+- [ ] 配信情報表示（視聴者数・経過時間等）
 
 ## 重要な制約・注意事項
 - OBS APIはメインスレッドとの扱いに注意（UI更新はQtのシグナル経由）
@@ -112,3 +161,187 @@ C:\Program Files\obs-studio\obs-plugins\64bit\
 - obs-plugintemplate: https://github.com/obsproject/obs-plugintemplate
 - YouTube Live Streaming API: https://developers.google.com/youtube/v3/live
 - Twitch EventSub: https://dev.twitch.tv/docs/eventsub/
+
+---
+
+## 視聴者コメントコマンド全集
+
+> **運用ルール**
+> 視聴者コメントコマンドを追加・変更・削除した場合は、必ずこのセクションを
+> 同時に更新すること。実装とドキュメントの不一致を防ぐため、コマンド処理部分
+> （`data/overlay.html` の `parseOlhCommand` / `applyOlhCommand`、
+> `src/plugin-main.cpp` の `processEffectOlhCommand` / `processPointOlhCommand`）
+> を修正する際はこのセクションの該当箇所も確認・修正する。
+
+### 概要・アーキテクチャ
+
+視聴者がチャットに送る `[olh]` プレフィックスコマンドは 2 か所で処理される。
+
+| 処理場所 | ファイル | 対象コマンド |
+|---|---|---|
+| フロントエンド | `data/overlay.html` `parseOlhCommand` / `applyOlhCommand` | 表示設定・エンジン/モデル/パラメータ系 |
+| バックエンド (C++) | `src/plugin-main.cpp` `processEffectOlhCommand` / `processPointOlhCommand` | エフェクト・ポイント系 |
+
+**共通仕様:**
+- コマンドは `,` 区切りで複数指定可能: `[olh] engine:aivisspeech, model:ずんだもん`
+- `[olh]` コマンドは TTS では読み上げない（`tts.html` で先頭 `[olh]` を検出してスキップ）
+- 表示設定・エンジン/パラメータ系は `overlay.html` が処理し、コメントカードには表示されない
+- エフェクト・ポイント系は C++ で処理後もコメントカードとして表示される（`overlay.html` がパースしないため）
+- 個人設定は `ViewerTtsSettings`（CSV）に永続化される。OBS を再起動しても維持される
+
+---
+
+### 1. 表示設定系
+
+`overlay.html` のローカルストレージ（`olhUserSettings`）に保存。OKボタン不要、即時反映。
+
+| コマンド | 機能 | 値の形式・範囲 | 備考 |
+|---|---|---|---|
+| `[olh] reset` | 全個人設定をリセット | なし | ローカルストレージのみクリア。C++ ViewerTtsSettings（エンジン・スタイル・各TTSパラメータ）はリセットされないため、次回コメントのTTS設定は変わらない |
+| `[olh] color:XXX` | コメントテキスト色を変更 | CSS色値（名前・`#RRGGBB`・`rgb()`等） | 輝度 0.15 未満は拒否（暗すぎて読めない色）。不正値は無視 |
+| `[olh] name:XXX` | ユーザー名表示色を変更 | CSS色値 | 同上 |
+| `[olh] panel:XXX` | コメントカード背景色を変更 | CSS色値 | 輝度 0.05〜0.50 のみ有効（暗すぎ・明るすぎを排除） |
+
+---
+
+### 2. TTS エンジン切り替え
+
+`overlay.html` → WebSocket → C++ `handleOlhEngineRequest` → `ViewerTtsSettings` CSV に永続化。
+
+| コマンド | 切り替え先エンジン | 備考 |
+|---|---|---|
+| `[olh] engine:webspeech` | Web Speech API（ブラウザ内蔵） | `web` も同義 |
+| `[olh] engine:aivisspeech` | AivisSpeech (localhost:10101) | `aivis` も同義。切り替え後、先頭話者のstyleIdが自動設定される |
+| `[olh] engine:sharevox` | SHAREVOX (localhost:50025) | 同上 |
+| `[olh] engine:lmroid` | LMROID (localhost:49973) | 同上 |
+| `[olh] engine:itvoice` | ITVOICE (localhost:49540) | 同上 |
+| `[olh] engine:bouyomi` | 棒読みちゃん (localhost:50080) | 先頭話者の自動設定なし |
+
+**注意:** 不正なエンジン名（上記以外）はエラーなしで無視される。コメントがカードとして表示される。
+
+エンジンが有効化されていない場合、`ttsCheckEngineConnection`（読み上げ設定の「エンジン接続チェック」）が ON だと自動的に webspeech へフォールバックする。
+
+---
+
+### 3. モデル（話者/スタイル）切り替え
+
+VOICEVOX互換エンジン（aivisspeech / sharevox / lmroid / itvoice）専用。  
+`overlay.html` → WebSocket → C++ `handleResolveModel` → `ViewerTtsSettings` に styleId を永続化。
+
+| コマンド | 機能 | 値の形式 |
+|---|---|---|
+| `[olh] model:モデル名` | VOICEVOX互換エンジンの話者/スタイルを変更 | 話者名またはスタイル名（最大80文字）。`AivisStyleCache` で名前検索しstyleIdに解決 |
+
+- モデル切り替え成功時、aivis パラメータ（speed/pitch/intonation/volume/emotion）は自動リセットされる
+- 一致するモデルが見つからない場合、システムコメントでエラーを表示
+- AivisStyleCache が未取得の場合（エンジン起動直後など）もエラーを返す
+
+---
+
+### 4. Web Speech API パラメータ
+
+`overlay.html` でクランプ後、WebSocket → C++ `handleOlhWebSpeechParamsRequest` → `ViewerTtsSettings` に永続化。
+
+| コマンド | 機能 | 範囲 | デフォルト |
+|---|---|---|---|
+| `[olh] webs_volume:X.X` | 音量 | 0.0〜1.0 | 1.0 |
+| `[olh] webs_rate:X.X` | 速度 | 0.7〜1.5 | 1.0 |
+| `[olh] webs_pitch:X.X` | ピッチ | 0.7〜1.3 | 1.0 |
+
+- 範囲外の値は自動クランプ（エラーなし）
+- webspeech エンジン使用時のみ有効
+
+---
+
+### 5. AivisSpeech（VOICEVOX互換）パラメータ
+
+`overlay.html` で数値チェックのみ実施 → WebSocket → C++ `handleOlhAivisParamsRequest` でクランプ後 `ViewerTtsSettings` に永続化。
+
+**対応エンジン:** aivisspeech / sharevox / lmroid / itvoice（VOICEVOX互換全般）
+
+| コマンド | 機能 | デフォルト上下限 | UI設定ダイアログ |
+|---|---|---|---|
+| `[olh] aivis_speed:X.X` | 話速（speedScale） | 0.5〜2.0 | 読み上げ > AivisSpeechモデル制限 |
+| `[olh] aivis_pitch:X.X` | 音高（pitchScale） | -0.15〜0.15 | 同上 |
+| `[olh] aivis_intonation:X.X` | 抑揚（intonationScale） | 0.0〜2.0 | 同上 |
+| `[olh] aivis_volume:X.X` | 音量倍率（volumeScale） | 0.0〜2.0 | 同上 |
+| `[olh] aivis_emotion:X.X` | 感情表現/テンポダイナミクス（tempoDynamicsScale） | 0.0〜2.0 | 同上 |
+
+- 上下限はダイアログ「**読み上げ > AivisSpeechモデル制限**」で変更可能（実際の設定範囲: 0.01〜10.0）
+- 範囲外の値は配信者設定の上下限でクランプ（エラーなし）
+- 数値以外（文字列など）を指定した場合、システムコメントでエラーを表示: `XXXさんへ：aivis_speed には数値を指定してください。`
+
+---
+
+### 6. 棒読みちゃんパラメータ
+
+`overlay.html` で整数チェックのみ実施 → WebSocket → C++ `handleOlhBouyomiParamsRequest` でクランプ後 `ViewerTtsSettings` に永続化。
+
+**対応エンジン:** bouyomi のみ
+
+| コマンド | 機能 | デフォルト上下限 | -1 の意味 | UI設定ダイアログ |
+|---|---|---|---|---|
+| `[olh] bouyomi_volume:N` | 音量 | 0〜100 | 棒読みちゃんの現在設定を使用 | 読み上げ > 棒読みちゃんパラメータ制限 |
+| `[olh] bouyomi_speed:N` | 速度 | 50〜300 | 同上 | 同上 |
+| `[olh] bouyomi_tone:N` | 音程 | -100〜100 | 同上 | 同上 |
+
+- `-1` は常に許可（配信者の上下限設定に関係なく通過）
+- 上下限はダイアログ「**読み上げ > 棒読みちゃんパラメータ制限**」で変更可能（実際の設定範囲: volume 0〜100, speed 50〜300, tone -100〜100）
+- 数値以外を指定した場合、システムコメントでエラーを表示
+
+---
+
+### 7. エフェクトシステム
+
+C++ `processEffectOlhCommand` で処理。エフェクト設定（`obs-live-hub > エフェクト > エフェクト設定`）で `olh_command` トリガーを設定済みのエフェクトのみ発火する。
+
+| コマンド | 機能 | 備考 |
+|---|---|---|
+| `[olh] effect:エフェクト名` | 指定名のエフェクトを再生 | エフェクト設定で `triggerType: olh_command`, `triggerValue: effect:エフェクト名` が設定されていること |
+
+- キー比較は大文字小文字を区別しない（`[OLH] EFFECT:xxx` も有効）
+- 一致するエフェクトがなくても無視（エラーなし）
+- コメントカードとして表示される
+
+---
+
+### 8. ポイントシステム
+
+C++ `processPointOlhCommand` で処理。ポイントシステムが有効（`pointEnabled = true`）の場合のみ動作。
+
+| コマンド | 機能 | 備考 |
+|---|---|---|
+| `[olh] point_use:コマンド名` | ポイントアクションを実行 | ポイント設定で登録されたコマンド名を指定。ポイント不足時・クールダウン中はシステムコメントでエラーを表示 |
+| `[olh] point_check` | 現在のポイント残高を確認 | システムコメントで `XXXさんへ：現在のポイントはNptです` を表示 |
+
+- キー比較は大文字小文字を区別しない
+- コメントカードとして表示される
+
+---
+
+### 9. アンケート投票（`!vote` 系）
+
+`[olh]` プレフィックスではなく `!vote ` プレフィックス。C++ `processVoteComment` で処理。
+
+| コマンド | 機能 | 備考 |
+|---|---|---|
+| `!vote 選択肢` | アンケートに投票 | アンケート開催中（`s_voteActive = true`）の場合のみ有効。選択式は `A/B/C...`、自由回答は任意文字列 |
+
+- 大文字小文字を区別しない（`!Vote A` も有効）
+- 同一ユーザーが再投票した場合は上書き
+
+---
+
+### 実装上の注意事項（既知の制限・想定外の挙動）
+
+1. **`[olh] reset` は C++ 側をリセットしない**  
+   `overlay.html` のローカルストレージ（表示設定・webspeech params）のみクリア。エンジン設定・styleId・aivis/bouyomiパラメータ（ViewerTtsSettings CSV）はリセットされない。
+
+2. **不正なエンジン名はコメントとして表示される**  
+   `[olh] engine:invalid_name` のように対応エンジン名以外を指定した場合、エラーなしで通常コメントカードとして表示される。
+
+3. **`src/overlay/overlay.html` は旧バージョン**  
+   `src/overlay/overlay.html` は古いバージョン（webspeech params が `volume/rate/pitch`）。実際にデプロイされるのは `data/overlay.html`（`webs_volume/webs_rate/webs_pitch`）。コマンド実装は `data/overlay.html` を参照すること。
+
+4. **AivisSpeech パラメータは VOICEVOX互換エンジン全般に適用される**  
+   コマンド名が `aivis_*` だが、sharevox / lmroid / itvoice でも同じ VOICEVOX API パラメータとして使用される。
