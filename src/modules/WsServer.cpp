@@ -332,13 +332,25 @@ void WsServer::acceptLoop()
 	obs_log(LOG_INFO, "[%s] acceptLoop() started, listenSock_=%d",
 	        WSTAG, static_cast<int>(listenSock_));
 
+	int loopCount = 0;
 	while (running_.load()) {
 		fd_set fds;
 		FD_ZERO(&fds);
 		FD_SET(listenSock_, &fds);
 		timeval tv{1, 0}; // select タイムアウト 1 秒
-		if (select(0, &fds, nullptr, nullptr, &tv) <= 0)
+		const int sel = select(0, &fds, nullptr, nullptr, &tv);
+
+		++loopCount;
+		if (loopCount % 10 == 0 && sel < 0)
+			obs_log(LOG_INFO,
+			        "[%s] tick #%d: select()=%d (error) WSA=%d sock=%d",
+			        WSTAG, loopCount, sel, WSAGetLastError(),
+			        static_cast<int>(listenSock_));
+
+		if (sel <= 0)
 			continue;
+
+		obs_log(LOG_INFO, "[%s] select()=%d (readable), calling accept()", WSTAG, sel);
 
 		SOCKET client = accept(listenSock_, nullptr, nullptr);
 		if (client == INVALID_SOCKET) {
