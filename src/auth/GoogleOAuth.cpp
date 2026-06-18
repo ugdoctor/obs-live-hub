@@ -232,10 +232,11 @@ static GoogleTokenResult doWinHttpPost(const std::string &body)
 	WinHttpCloseHandle(hConnect);
 	WinHttpCloseHandle(hSession);
 
-	// レスポンス本文をログ（全バイト数 + 先頭 500 文字）
-	obs_log(LOG_INFO, "[%s] Response body (%zu bytes, %d read loops): %.*s", TAG,
-		responseBody.size(), readLoops, static_cast<int>(responseBody.size()),
-		responseBody.c_str());
+	// レスポンス概要のみログ（トークン値はログに出さない）
+	obs_log(LOG_INFO, "[%s] Response body (%zu bytes, %d read loops): has_access_token=%s has_refresh_token=%s",
+		TAG, responseBody.size(), readLoops,
+		(responseBody.find("\"access_token\"") != std::string::npos) ? "true" : "false",
+		(responseBody.find("\"refresh_token\"") != std::string::npos) ? "true" : "false");
 
 	// JSON パース
 	result.error = jsonStr(responseBody, "error");
