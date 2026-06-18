@@ -125,12 +125,50 @@ static bool winHttpGetJson(const QString &baseUrl, const wchar_t *path, QByteArr
 #endif // _WIN32
 
 // ──────────────────────────────────────────────────────────────
+// エンジン選択インデックスと設定キーの対応
+//   0: webspeech
+//   1: aivisspeech
+//   2: sharevox
+//   3: lmroid
+//   4: itvoice
+// ──────────────────────────────────────────────────────────────
+static const struct {
+	const char *id;
+	const char *label;
+	const char *defaultUrl;
+	const char *pathPlaceholder;
+} kEngines[] = {
+	{ "webspeech",   "Web Speech API（ブラウザ）",  "",                       "" },
+	{ "aivisspeech", "AivisSpeech（ローカル）",      "http://localhost:10101", "AivisSpeech-Engine\\run.exe のパス" },
+	{ "sharevox",    "SHAREVOX（ローカル）",          "http://localhost:50025", "SHAREVOX\\run.exe のパス（任意）" },
+	{ "lmroid",      "LMROID（ローカル）",            "http://localhost:49973", "LMROID\\run.exe のパス（任意）" },
+	{ "itvoice",     "ITVOICE（ローカル）",           "http://localhost:49540", "ITVOICE\\run.exe のパス（任意）" },
+	{ "bouyomi",     "棒読みちゃん（ローカル）",      "",                       "" },
+};
+
+// 棒読みちゃん標準 voice 番号一覧（AquesTalk 同梱声）
+static const struct { int num; const char *label; } kBouyomiVoices[] = {
+	{  0, "0: 自動 (デフォルト声)" },
+	{  1, "1: 女性1 (AquesTalk)" },
+	{  2, "2: 女性2 (AquesTalk)" },
+	{  3, "3: 中性  (AquesTalk)" },
+	{  4, "4: 男性1 (AquesTalk)" },
+	{  5, "5: 中性2 (AquesTalk)" },
+	{  6, "6: ロボット (AquesTalk)" },
+	{  7, "7: 機械1 (AquesTalk)" },
+	{  8, "8: 機械2 (AquesTalk)" },
+	{  9, "9: 女性3 (AquesTalk)" },
+	{ 10, "10: 女性4 (AquesTalk)" },
+	{ -1, "-1: 前回と同じ" },
+};
+
+// ──────────────────────────────────────────────────────────────
 // TtsSpeechDialog
 // ──────────────────────────────────────────────────────────────
 TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 {
 	setWindowTitle("obs-live-hub 読み上げ設定");
-	setMinimumWidth(460);
+	setMinimumWidth(480);
 
 	// ── 共通 TTS 設定 ──
 	enabledCheck_ = new QCheckBox("読み上げを有効にする", this);
@@ -162,15 +200,14 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 
 	// ── TTSエンジン選択 ──
 	engineCombo_ = new QComboBox(this);
-	engineCombo_->addItem("Web Speech API（ブラウザ）");
-	engineCombo_->addItem("AivisSpeech（ローカル）");
+	for (const auto &e : kEngines)
+		engineCombo_->addItem(e.label);
 
-	// ── AivisSpeech 設定グループ ──
-	aivisGroup_ = new QGroupBox("AivisSpeech 設定", this);
+	// ── VOICEVOX互換エンジン設定グループ ──
+	aivisGroup_ = new QGroupBox("VOICEVOX互換エンジン設定", this);
 
 	// ── エンジン制御 ──
 	enginePathEdit_  = new QLineEdit(aivisGroup_);
-	enginePathEdit_->setPlaceholderText("AivisSpeech-Engine\\run.exe のパス");
 	browseEngineBtn_ = new QPushButton("参照...", aivisGroup_);
 	browseEngineBtn_->setFixedWidth(64);
 
@@ -197,7 +234,6 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 
 	// ── 接続・音声設定 ──
 	aivisUrlEdit_ = new QLineEdit(aivisGroup_);
-	aivisUrlEdit_->setPlaceholderText("http://localhost:10101");
 
 	speakerCombo_ = new QComboBox(aivisGroup_);
 	styleCombo_   = new QComboBox(aivisGroup_);
@@ -209,21 +245,87 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 	speakerH->addWidget(speakerCombo_, 1);
 	speakerH->addWidget(refreshBtn_);
 
-	auto *ttsNote = new QLabel(
-		"<small>※AivisSpeech使用時はTTS音声ページをChromeで開いてください</small>",
+	auto *voicevoxNote = new QLabel(
+		"<small>※VOICEVOX互換エンジン使用時はTTS音声ページをChromeで開いてください<br>"
+		"※手動起動の場合は <code>--allow_origin \"*\"</code> または "
+		"<code>--cors_policy_mode all</code> オプションを付けて起動してください</small>",
 		aivisGroup_);
-	ttsNote->setWordWrap(true);
+	voicevoxNote->setWordWrap(true);
 
 	auto *aivisForm = new QFormLayout(aivisGroup_);
 	aivisForm->setSpacing(6);
 	aivisForm->addRow("エンジンパス:", pathRow);
 	aivisForm->addRow("エンジン状態:", ctrlRow);
 	aivisForm->addRow("",             autoStartCheck_);
-	aivisForm->addRow(new QFrame(aivisGroup_)); // 区切り線代わりのスペース
+	aivisForm->addRow(new QFrame(aivisGroup_));
 	aivisForm->addRow("URL:",         aivisUrlEdit_);
 	aivisForm->addRow("話者:",        speakerRow);
 	aivisForm->addRow("スタイル:",    styleCombo_);
-	aivisForm->addRow("",             ttsNote);
+	aivisForm->addRow("",             voicevoxNote);
+
+	// ── 棒読みちゃん設定グループ ──
+	bouyomiGroup_ = new QGroupBox("棒読みちゃん設定", this);
+
+	bouyomiHostEdit_ = new QLineEdit(bouyomiGroup_);
+	bouyomiHostEdit_->setPlaceholderText("localhost");
+
+	bouyomiPortSpin_ = new QSpinBox(bouyomiGroup_);
+	bouyomiPortSpin_->setRange(1, 65535);
+	bouyomiPortSpin_->setValue(50080);
+
+	bouyomiVoiceCombo_ = new QComboBox(bouyomiGroup_);
+	for (const auto &v : kBouyomiVoices)
+		bouyomiVoiceCombo_->addItem(v.label);
+	bouyomiVoiceCombo_->addItem("その他 (直接入力)");
+
+	bouyomiVoiceSpin_ = new QSpinBox(bouyomiGroup_);
+	bouyomiVoiceSpin_->setRange(-1, 10000);
+	bouyomiVoiceSpin_->setSpecialValueText("-1 (前回と同じ)");
+	bouyomiVoiceSpin_->setPrefix("voice: ");
+
+	auto *voiceRow = new QWidget(bouyomiGroup_);
+	auto *voiceH   = new QHBoxLayout(voiceRow);
+	voiceH->setContentsMargins(0, 0, 0, 0);
+	voiceH->addWidget(bouyomiVoiceCombo_, 1);
+	voiceH->addWidget(bouyomiVoiceSpin_);
+
+	auto *bouyomiNote = new QLabel(
+		"<small>※声番号は棒読みちゃんの「声質」タブの並び順（追加ソフトで番号がずれる場合あり）</small>",
+		bouyomiGroup_);
+	bouyomiNote->setWordWrap(true);
+
+	auto *bouyomiForm = new QFormLayout(bouyomiGroup_);
+	bouyomiForm->setSpacing(6);
+	bouyomiForm->addRow("ホスト:",   bouyomiHostEdit_);
+	bouyomiForm->addRow("ポート:",   bouyomiPortSpin_);
+	bouyomiForm->addRow("声の種類:", voiceRow);
+	bouyomiForm->addRow("",          bouyomiNote);
+
+	// コンボ変更 → スピンボックスに反映
+	QObject::connect(bouyomiVoiceCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+	                 this, [this](int idx) {
+		// 最後の項目は「その他」なので kBouyomiVoices の範囲外
+		const int n = static_cast<int>(sizeof(kBouyomiVoices) / sizeof(kBouyomiVoices[0]));
+		if (idx >= 0 && idx < n) {
+			QSignalBlocker bl(bouyomiVoiceSpin_);
+			bouyomiVoiceSpin_->setValue(kBouyomiVoices[idx].num);
+		}
+	});
+
+	// スピンボックス変更 → 対応するコンボ項目を選択（なければ「その他」）
+	QObject::connect(bouyomiVoiceSpin_, QOverload<int>::of(&QSpinBox::valueChanged),
+	                 this, [this](int v) {
+		const int n = static_cast<int>(sizeof(kBouyomiVoices) / sizeof(kBouyomiVoices[0]));
+		for (int i = 0; i < n; ++i) {
+			if (kBouyomiVoices[i].num == v) {
+				QSignalBlocker bl(bouyomiVoiceCombo_);
+				bouyomiVoiceCombo_->setCurrentIndex(i);
+				return;
+			}
+		}
+		QSignalBlocker bl(bouyomiVoiceCombo_);
+		bouyomiVoiceCombo_->setCurrentIndex(n); // 「その他」
+	});
 
 	// ── ボタンボックス ──
 	buttonBox_ = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
@@ -249,6 +351,7 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 	form->addRow("",            youtubeCheck_);
 	form->addRow("TTSエンジン:", engineCombo_);
 	form->addRow(aivisGroup_);
+	form->addRow(bouyomiGroup_);
 	form->addRow(buttonBox_);
 
 	// ── シグナル接続 ──
@@ -267,18 +370,13 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 
 	QObject::connect(browseEngineBtn_, &QPushButton::clicked, this, [this]() {
 		const QString path = QFileDialog::getOpenFileName(
-			this, "AivisSpeech Engine 実行ファイルを選択",
+			this, "エンジン実行ファイルを選択",
 			enginePathEdit_->text(), "実行ファイル (*.exe)");
 		if (!path.isEmpty())
 			enginePathEdit_->setText(path);
 	});
 
 	QObject::connect(startEngineBtn_, &QPushButton::clicked, this, [this]() {
-		QMessageBox::information(
-			this, "AivisSpeech Engine 起動",
-			"AivisSpeechアプリが既に起動している場合は、\n"
-			"アプリ側のエンジンが使用されます。\n"
-			"重複起動は不要です。");
 		const QString path = enginePathEdit_->text().trimmed();
 		if (path.isEmpty()) {
 			QMessageBox::warning(this, "エラー",
@@ -302,7 +400,6 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 	connect(buttonBox_, &QDialogButtonBox::accepted, this, &TtsSpeechDialog::accept);
 	connect(buttonBox_, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
-	// エンジン状態をポーリング（500ms）
 	auto *statusTimer = new QTimer(this);
 	connect(statusTimer, &QTimer::timeout, this, &TtsSpeechDialog::updateEngineStatus);
 	statusTimer->start(500);
@@ -315,7 +412,73 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 // ──────────────────────────────────────────────────────────────
 void TtsSpeechDialog::onEngineChanged(int index)
 {
-	aivisGroup_->setVisible(index == 1);
+	const bool voicevox  = (index >= 1 && index <= 4);
+	const bool isBouyomi = (index == 5);
+	aivisGroup_->setVisible(voicevox);
+	bouyomiGroup_->setVisible(isBouyomi);
+
+	if (isBouyomi) {
+		const auto &cfg = PluginConfig::instance();
+		bouyomiHostEdit_->setText(QString::fromStdString(cfg.bouyomiHost));
+		bouyomiPortSpin_->setValue(cfg.bouyomiPort);
+		// voice スピンを設定すると valueChanged → combo も連動する
+		bouyomiVoiceSpin_->setValue(cfg.bouyomiVoice);
+		adjustSize();
+		return;
+	}
+
+	if (!voicevox) {
+		adjustSize();
+		return;
+	}
+
+	// グループタイトル・プレースホルダーを更新
+	const auto &e = kEngines[index];
+	aivisGroup_->setTitle(QString(e.label));
+	enginePathEdit_->setPlaceholderText(e.pathPlaceholder);
+	aivisUrlEdit_->setPlaceholderText(e.defaultUrl);
+
+	// 設定値をエンジンに合わせてロード
+	const auto &cfg = PluginConfig::instance();
+
+	auto loadEngineValues = [&](const std::string &url, const std::string &path, bool autoS) {
+		aivisUrlEdit_->setText(QString::fromStdString(url));
+		enginePathEdit_->setText(QString::fromStdString(path));
+		autoStartCheck_->setChecked(autoS);
+	};
+
+	if (index == 1) { // aivisspeech
+		QString enginePath = QString::fromStdString(cfg.aivisEnginePath);
+#ifdef _WIN32
+		if (enginePath.isEmpty()) {
+			DWORD needed = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
+			if (needed > 0) {
+				std::wstring localAppData(needed - 1, L'\0');
+				GetEnvironmentVariableW(L"LOCALAPPDATA", &localAppData[0], needed);
+				const QString candidate =
+					QString::fromStdWString(localAppData) +
+					"\\Programs\\AivisSpeech\\AivisSpeech-Engine\\run.exe";
+				if (QFile::exists(candidate))
+					enginePath = candidate;
+			}
+		}
+#endif
+		aivisUrlEdit_->setText(QString::fromStdString(cfg.aivisUrl));
+		enginePathEdit_->setText(enginePath);
+		autoStartCheck_->setChecked(cfg.aivisAutoStart);
+	} else if (index == 2) { // sharevox
+		loadEngineValues(cfg.sharevoxUrl, cfg.sharevoxEnginePath, cfg.sharevoxAutoStart);
+	} else if (index == 3) { // lmroid
+		loadEngineValues(cfg.lmroidUrl, cfg.lmroidEnginePath, cfg.lmroidAutoStart);
+	} else if (index == 4) { // itvoice
+		loadEngineValues(cfg.itvoiceUrl, cfg.itvoiceEnginePath, cfg.itvoiceAutoStart);
+	}
+
+	// 話者リストをクリア（エンジン変更時は再取得が必要）
+	speakerCombo_->clear();
+	styleCombo_->clear();
+	speakers_.clear();
+
 	adjustSize();
 }
 
@@ -378,7 +541,7 @@ void TtsSpeechDialog::onRefreshSpeakersClicked()
 				return;
 			if (!ok) {
 				self->speakerCombo_->addItem(
-					"取得失敗（AivisSpeech Engineが起動中か確認）");
+					"取得失敗（エンジンが起動中か確認してください）");
 				self->refreshBtn_->setEnabled(true);
 				return;
 			}
@@ -455,32 +618,17 @@ void TtsSpeechDialog::loadFromConfig()
 	twitchCheck_->setChecked(cfg.ttsTwitch);
 	youtubeCheck_->setChecked(cfg.ttsYoutube);
 
-	const int engineIdx = (cfg.ttsEngine == "aivisspeech") ? 1 : 0;
+	// エンジン選択（onEngineChanged が URL/パス/autostart をロードする）
+	int engineIdx = 0;
+	if      (cfg.ttsEngine == "aivisspeech") engineIdx = 1;
+	else if (cfg.ttsEngine == "sharevox")    engineIdx = 2;
+	else if (cfg.ttsEngine == "lmroid")      engineIdx = 3;
+	else if (cfg.ttsEngine == "itvoice")     engineIdx = 4;
+	else if (cfg.ttsEngine == "bouyomi")     engineIdx = 5;
 	engineCombo_->setCurrentIndex(engineIdx);
-	aivisGroup_->setVisible(engineIdx == 1);
+	// setCurrentIndex が onEngineChanged をトリガーし URL/path/autostart がセットされる
 
-	// エンジンパス（保存値 → デフォルトパス → 空）
-	QString enginePath = QString::fromStdString(cfg.aivisEnginePath);
-#ifdef _WIN32
-	if (enginePath.isEmpty()) {
-		DWORD needed = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
-		if (needed > 0) {
-			std::wstring localAppData(needed - 1, L'\0');
-			GetEnvironmentVariableW(L"LOCALAPPDATA", &localAppData[0], needed);
-			const QString candidate =
-				QString::fromStdWString(localAppData) +
-				"\\Programs\\AivisSpeech\\AivisSpeech-Engine\\run.exe";
-			if (QFile::exists(candidate))
-				enginePath = candidate;
-		}
-	}
-#endif
-	enginePathEdit_->setText(enginePath);
-	autoStartCheck_->setChecked(cfg.aivisAutoStart);
-
-	aivisUrlEdit_->setText(QString::fromStdString(cfg.aivisUrl));
-
-	// 保存済み話者名をプレースホルダーとして表示（更新前の参考情報）
+	// 保存済み話者名をプレースホルダーとして表示
 	if (!cfg.aivisSpeakerName.empty()) {
 		const QString hint = QString("（保存済み: %1 / %2）")
 		                         .arg(QString::fromStdString(cfg.aivisSpeakerName),
@@ -503,21 +651,51 @@ void TtsSpeechDialog::saveToConfig()
 	cfg.ttsTwitch       = twitchCheck_->isChecked();
 	cfg.ttsYoutube      = youtubeCheck_->isChecked();
 
-	cfg.ttsEngine       = (engineCombo_->currentIndex() == 1) ? "aivisspeech" : "webspeech";
-	cfg.aivisUrl        = aivisUrlEdit_->text().trimmed().toStdString();
-	cfg.aivisEnginePath = enginePathEdit_->text().trimmed().toStdString();
-	cfg.aivisAutoStart  = autoStartCheck_->isChecked();
+	const int    idx  = engineCombo_->currentIndex();
+	const QString url  = aivisUrlEdit_->text().trimmed();
+	const QString path = enginePathEdit_->text().trimmed();
+	const bool   autoS = autoStartCheck_->isChecked();
 
-	const int spIdx = speakerCombo_->currentIndex();
-	if (spIdx >= 0 && spIdx < speakers_.size()) {
-		const auto &sp       = speakers_[spIdx];
-		cfg.aivisSpeakerUuid = sp.uuid.toStdString();
-		cfg.aivisSpeakerName = sp.name.toStdString();
+	if (idx == 5) { // bouyomi
+		cfg.ttsEngine      = "bouyomi";
+		cfg.bouyomiHost    = bouyomiHostEdit_->text().trimmed().toStdString();
+		if (cfg.bouyomiHost.empty()) cfg.bouyomiHost = "localhost";
+		cfg.bouyomiPort    = bouyomiPortSpin_->value();
+		cfg.bouyomiVoice   = bouyomiVoiceSpin_->value();
+	} else if (idx == 0) {
+		cfg.ttsEngine = "webspeech";
+	} else {
+		cfg.ttsEngine = kEngines[idx].id;
+		if (idx == 1) {
+			cfg.aivisUrl        = url.toStdString();
+			cfg.aivisEnginePath = path.toStdString();
+			cfg.aivisAutoStart  = autoS;
+		} else if (idx == 2) {
+			cfg.sharevoxUrl         = url.toStdString();
+			cfg.sharevoxEnginePath  = path.toStdString();
+			cfg.sharevoxAutoStart   = autoS;
+		} else if (idx == 3) {
+			cfg.lmroidUrl         = url.toStdString();
+			cfg.lmroidEnginePath  = path.toStdString();
+			cfg.lmroidAutoStart   = autoS;
+		} else if (idx == 4) {
+			cfg.itvoiceUrl         = url.toStdString();
+			cfg.itvoiceEnginePath  = path.toStdString();
+			cfg.itvoiceAutoStart   = autoS;
+		}
 
-		const int stIdx = styleCombo_->currentIndex();
-		if (stIdx >= 0 && stIdx < sp.styles.size()) {
-			cfg.aivisStyleId   = sp.styles[stIdx].id;
-			cfg.aivisStyleName = sp.styles[stIdx].name.toStdString();
+		// 話者・スタイルを保存（全VOICEVOX互換エンジン共通フィールド）
+		const int spIdx = speakerCombo_->currentIndex();
+		if (spIdx >= 0 && spIdx < speakers_.size()) {
+			const auto &sp       = speakers_[spIdx];
+			cfg.aivisSpeakerUuid = sp.uuid.toStdString();
+			cfg.aivisSpeakerName = sp.name.toStdString();
+
+			const int stIdx = styleCombo_->currentIndex();
+			if (stIdx >= 0 && stIdx < sp.styles.size()) {
+				cfg.aivisStyleId   = sp.styles[stIdx].id;
+				cfg.aivisStyleName = sp.styles[stIdx].name.toStdString();
+			}
 		}
 	}
 	cfg.save();

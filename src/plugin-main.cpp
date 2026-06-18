@@ -40,6 +40,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QMainWindow>
 #include <QMap>
 #include <QMenu>
+#include <QMutex>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPointer>
@@ -51,18 +52,26 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "core/PluginConfig.hpp"
 #include "modules/AivisEngine.hpp"
 #include "modules/AivisStyleCache.hpp"
+#include "modules/EngineManager.hpp"
+#include "modules/BouyomiChanClient.hpp"
+#include "modules/ViewerTtsSettings.hpp"
 #include "modules/WsServer.hpp"
 #include "platforms/TwitchPlatform.hpp"
 #include "platforms/YouTubePlatform.hpp"
 #include "ui/CommentDock.hpp"
 #include "ui/AivisParamLimitDialog.hpp"
+#include "ui/BouyomiParamLimitDialog.hpp"
 #include "ui/DebugSettingsDialog.hpp"
+#include "ui/EffectSettingsDialog.hpp"
 #include "ui/OverlayStyleDialog.hpp"
 #include "ui/SettingsDialog.hpp"
 #include "ui/StreamSettingsDialog.hpp"
 #include "ui/TtsDictionaryDialog.hpp"
 #include "ui/VoteManagerDialog.hpp"
 #include "ui/TtsSpeechDialog.hpp"
+#include "modules/EffectManager.hpp"
+#include "modules/PointManager.hpp"
+#include "ui/PointSettingsDialog.hpp"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -71,6 +80,12 @@ static CommentDock *s_dock = nullptr;
 static YouTubePlatform *s_youtube = nullptr;
 static TwitchPlatform *s_twitch = nullptr;
 static WsServer *s_wsServer = nullptr;
+static EffectManager *s_effectManager = nullptr;
+static PointManager *s_pointManager = nullptr;
+
+// userId → platform マップ（overlay.html の WS メッセージにはプラットフォームが含まれないため）
+static QMutex              s_userPlatformMutex;
+static QMap<QString, QString> s_userPlatformMap;
 
 // EventBus は Twitch → UI の橋渡し。YouTube は Qt シグナルを直接使う。
 static EventBus<CommentEvent> s_eventBus;
@@ -122,6 +137,22 @@ static void handleWsClientMessage(const QString &json); // forward declaration
 static std::string makeTtsJson();                 // forward declaration
 static void broadcastTtsDict();                   // forward declaration
 static void broadcastDebugConfig();               // forward declaration
+static void processEffectOlhCommand(const QString &message, const QString &user = {}); // forward declaration
+static void processPointOlhCommand(const QString &userId, const QString &platform,
+                                   const QString &displayName,
+                                   const QString &message); // forward declaration
+
+static void recordUserPlatform(const QString &userId, const QString &platform)
+{
+	QMutexLocker lk(&s_userPlatformMutex);
+	s_userPlatformMap.insert(userId, platform);
+}
+
+static QString platformForUser(const QString &userId)
+{
+	QMutexLocker lk(&s_userPlatformMutex);
+	return s_userPlatformMap.value(userId);
+}
 
 static void applyWsCallbacks(WsServer *srv)
 {
@@ -337,11 +368,21 @@ static void connectYouTubeSignals()
 	QObject::connect(
 		s_youtube, &YouTubePlatform::commentReceived,
 		[](const QString &author, const QString &message, const QString &avatarUrl) {
+			recordUserPlatform(author, QStringLiteral("youtube"));
 			if (s_wsServer)
 				s_wsServer->broadcast(makeCommentJson(author.toStdString(),
 								      message.toStdString(), "youtube",
 								      avatarUrl.toStdString()));
 			processVoteComment(author, message);
+			if (s_effectManager) {
+				s_effectManager->onComment(message, author);
+				processEffectOlhCommand(message, author);
+			}
+			if (s_pointManager) {
+				s_pointManager->onComment(author, QStringLiteral("youtube"));
+				processPointOlhCommand(author, QStringLiteral("youtube"),
+				                       author, message);
+			}
 		});
 
 	QObject::connect(s_youtube, &YouTubePlatform::quotaWarning, [](int remainingMinutes) {
@@ -494,8 +535,9 @@ static std::string makeTtsJson()
 	       "\"twitch\":" + (cfg.ttsTwitch ? "true" : "false") + "," +
 	       "\"youtube\":" + (cfg.ttsYoutube ? "true" : "false") + "," +
 	       "\"ttsEngine\":\"" + cfg.ttsEngine + "\"," +
-	       "\"aivisUrl\":\"" + cfg.aivisUrl + "\"," +
-	       "\"aivisStyleId\":" + std::to_string(cfg.aivisStyleId) + "}";
+	       "\"aivisUrl\":\"" + cfg.activeVoicevoxUrl() + "\"," +
+	       "\"aivisStyleId\":" + std::to_string(cfg.aivisStyleId) + "," +
+	       "\"bouyomiVoice\":" + std::to_string(cfg.bouyomiVoice) + "}";
 }
 
 static void handleOlhAivisParamsRequest(const QJsonObject &obj)
@@ -538,6 +580,100 @@ static void handleOlhAivisParamsRequest(const QJsonObject &obj)
 	if (s_wsServer)
 		s_wsServer->broadcast(
 			QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString());
+
+	// ViewerTtsSettings に書き込み
+	{
+		const QString platform = platformForUser(userId);
+		auto entry = ViewerTtsSettings::instance().get(userId, platform)
+		                 .value_or(ViewerTtsEntry{});
+		if (params.contains("speedScale"))
+			entry.aivisSpeed      = static_cast<float>(params["speedScale"].toDouble());
+		if (params.contains("pitchScale"))
+			entry.aivisPitch      = static_cast<float>(params["pitchScale"].toDouble());
+		if (params.contains("intonationScale"))
+			entry.aivisIntonation = static_cast<float>(params["intonationScale"].toDouble());
+		if (params.contains("volumeScale"))
+			entry.aivisVolume     = static_cast<float>(params["volumeScale"].toDouble());
+		if (params.contains("tempoDynamicsScale"))
+			entry.aivisEmotion    = static_cast<float>(params["tempoDynamicsScale"].toDouble());
+		ViewerTtsSettings::instance().set(userId, platform, entry);
+		obs_log(LOG_INFO, "[ViewerTtsSettings] updated: user=%s platform=%s aivis params",
+		        userId.toUtf8().constData(), platform.toUtf8().constData());
+	}
+}
+
+// 棒読みちゃん [olh] パラメータリクエスト（C++ で上下限クランプ後 broadcast）
+static void handleOlhBouyomiParamsRequest(const QJsonObject &obj)
+{
+	const QString userId = obj["userId"].toString();
+	if (userId.isEmpty())
+		return;
+
+	const auto &cfg = PluginConfig::instance();
+
+	auto clampI = [](int v, int lo, int hi) -> int {
+		return v < lo ? lo : (v > hi ? hi : v);
+	};
+
+	QJsonObject params;
+	bool        has = false;
+
+	// -1 は「棒読みちゃんの現在設定を使う」として常に許可
+	if (obj.contains("volume") && obj["volume"].isDouble()) {
+		const int v   = obj["volume"].toInt();
+		params["volume"] = (v == -1) ? -1 : clampI(v, cfg.bouyomiVolumeMin, cfg.bouyomiVolumeMax);
+		has = true;
+	}
+	if (obj.contains("speed") && obj["speed"].isDouble()) {
+		const int v   = obj["speed"].toInt();
+		params["speed"] = (v == -1) ? -1 : clampI(v, cfg.bouyomiSpeedMin, cfg.bouyomiSpeedMax);
+		has = true;
+	}
+	if (obj.contains("tone") && obj["tone"].isDouble()) {
+		const int v   = obj["tone"].toInt();
+		params["tone"] = (v == -1) ? -1 : clampI(v, cfg.bouyomiToneMin, cfg.bouyomiToneMax);
+		has = true;
+	}
+
+	if (!has)
+		return;
+
+	if (s_wsServer) {
+		QJsonObject res;
+		res["type"]          = QStringLiteral("olh_user_settings");
+		res["userId"]        = userId;
+		res["bouyomiParams"] = params;
+		s_wsServer->broadcast(QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString());
+	}
+
+	// ViewerTtsSettings に書き込み
+	{
+		const QString platform = platformForUser(userId);
+		auto entry = ViewerTtsSettings::instance().get(userId, platform)
+		                 .value_or(ViewerTtsEntry{});
+		if (params.contains("volume")) entry.bouyomiVolume = params["volume"].toInt();
+		if (params.contains("speed"))  entry.bouyomiSpeed  = params["speed"].toInt();
+		if (params.contains("tone"))   entry.bouyomiTone   = params["tone"].toInt();
+		ViewerTtsSettings::instance().set(userId, platform, entry);
+		obs_log(LOG_INFO, "[ViewerTtsSettings] updated: user=%s platform=%s bouyomi params",
+		        userId.toUtf8().constData(), platform.toUtf8().constData());
+	}
+}
+
+// 棒読みちゃん読み上げリクエスト（tts.html → C++ → 棒読みちゃん HTTP GET）
+static void handleBouyomiSpeakRequest(const QJsonObject &obj)
+{
+	const QString text   = obj["text"].toString();
+	if (text.isEmpty())
+		return;
+	const int voice  = obj.contains("voice")  ? obj["voice"].toInt(0)  : 0;
+	const int volume = obj.contains("volume") ? obj["volume"].toInt(-1) : -1;
+	const int speed  = obj.contains("speed")  ? obj["speed"].toInt(-1)  : -1;
+	const int tone   = obj.contains("tone")   ? obj["tone"].toInt(-1)   : -1;
+
+	const auto &cfg = PluginConfig::instance();
+	BouyomiChanClient::talk(QString::fromStdString(cfg.bouyomiHost), cfg.bouyomiPort,
+	                        text, voice, volume, speed, tone);
 }
 
 static void handleOlhWebSpeechParamsRequest(const QJsonObject &obj)
@@ -562,6 +698,35 @@ static void handleOlhWebSpeechParamsRequest(const QJsonObject &obj)
 	if (s_wsServer)
 		s_wsServer->broadcast(
 			QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString());
+
+	// ViewerTtsSettings に書き込み
+	{
+		const QString platform = platformForUser(userId);
+		auto entry = ViewerTtsSettings::instance().get(userId, platform)
+		                 .value_or(ViewerTtsEntry{});
+		if (params.contains("rate"))   entry.rate   = static_cast<float>(params["rate"].toDouble());
+		if (params.contains("pitch"))  entry.pitch  = static_cast<float>(params["pitch"].toDouble());
+		if (params.contains("volume")) entry.volume = static_cast<float>(params["volume"].toDouble());
+		ViewerTtsSettings::instance().set(userId, platform, entry);
+		obs_log(LOG_INFO, "[ViewerTtsSettings] updated: user=%s platform=%s webspeech params",
+		        userId.toUtf8().constData(), platform.toUtf8().constData());
+	}
+}
+
+static bool isVoicevoxEngineId(const QString &engine)
+{
+	return engine == "aivisspeech" || engine == "sharevox" ||
+	       engine == "lmroid"      || engine == "itvoice";
+}
+
+static QString voicevoxUrlForEngine(const QString &engine)
+{
+	const auto &cfg = PluginConfig::instance();
+	if (engine == "aivisspeech") return QString::fromStdString(cfg.aivisUrl);
+	if (engine == "sharevox")    return QString::fromStdString(cfg.sharevoxUrl);
+	if (engine == "lmroid")      return QString::fromStdString(cfg.lmroidUrl);
+	if (engine == "itvoice")     return QString::fromStdString(cfg.itvoiceUrl);
+	return {};
 }
 
 static void handleOlhEngineRequest(const QJsonObject &obj)
@@ -573,7 +738,10 @@ static void handleOlhEngineRequest(const QJsonObject &obj)
 	res["type"]   = QStringLiteral("resolve_engine_result");
 	res["userId"] = userId;
 
-	if (engine != "webspeech" && engine != "aivisspeech") {
+	const bool valid = engine == "webspeech"   || engine == "aivisspeech" ||
+	                   engine == "sharevox"    || engine == "lmroid" ||
+	                   engine == "itvoice"     || engine == "bouyomi";
+	if (!valid) {
 		res["ok"]    = false;
 		res["error"] = QStringLiteral("不明なエンジン: ") + engine;
 	} else {
@@ -584,17 +752,67 @@ static void handleOlhEngineRequest(const QJsonObject &obj)
 	if (s_wsServer)
 		s_wsServer->broadcast(
 			QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString());
+
+	// ViewerTtsSettings に engine を書き込み
+	if (res["ok"].toBool()) {
+		const QString platform = platformForUser(userId);
+		auto entry = ViewerTtsSettings::instance().get(userId, platform)
+		                 .value_or(ViewerTtsEntry{});
+		entry.engine  = engine.toStdString();
+		entry.styleId = 0;
+		ViewerTtsSettings::instance().set(userId, platform, entry);
+		obs_log(LOG_INFO, "[ViewerTtsSettings] updated: user=%s platform=%s engine=%s",
+		        userId.toUtf8().constData(),
+		        platform.toUtf8().constData(),
+		        entry.engine.c_str());
+	}
+
+	// VOICEVOX互換エンジンに切り替わった場合、先頭話者を resolve_model_result で通知
+	if (res["ok"].toBool() && isVoicevoxEngineId(engine)) {
+		const QString url      = voicevoxUrlForEngine(engine);
+		const QString platform = platformForUser(userId);
+		AivisStyleCache::fetchAndCacheAsyncWithResult(url,
+			[userId, engine, platform](bool ok, int64_t styleId,
+			                           const QString &spName, const QString &stName) {
+				if (!ok || !s_wsServer)
+					return;
+				// 先頭話者の styleId を個人設定に書き込み
+				auto entry = ViewerTtsSettings::instance().get(userId, platform)
+				                 .value_or(ViewerTtsEntry{});
+				entry.styleId = styleId;
+				ViewerTtsSettings::instance().set(userId, platform, entry);
+
+				QJsonObject r;
+				r["type"]        = QStringLiteral("resolve_model_result");
+				r["userId"]      = userId;
+				r["ok"]          = true;
+				r["engine"]      = engine;
+				r["styleId"]     = static_cast<qint64>(styleId);
+				r["speakerName"] = spName;
+				r["styleName"]   = stName;
+				s_wsServer->broadcast(
+					QJsonDocument(r).toJson(QJsonDocument::Compact).toStdString());
+			});
+	}
 }
 
 static void handleResolveModel(const QJsonObject &obj)
 {
 	const QString userId    = obj["userId"].toString();
 	const QString modelName = obj["modelName"].toString();
+	const QString platform  = platformForUser(userId);
+
+	// 視聴者個人のエンジン設定を参照（未設定ならグローバル設定を使用）
+	const auto    viewerOpt    = ViewerTtsSettings::instance().get(userId, platform);
+	const QString viewerEngine = (viewerOpt && !viewerOpt->engine.empty())
+	                                 ? QString::fromStdString(viewerOpt->engine)
+	                                 : QString::fromStdString(PluginConfig::instance().ttsEngine);
 
 	QJsonObject res;
 	res["type"]   = QStringLiteral("resolve_model_result");
 	res["userId"] = userId;
 
+	int64_t resolvedStyleId = 0;
 	if (AivisStyleCache::isEmpty()) {
 		res["ok"]    = false;
 		res["error"] = QStringLiteral(
@@ -605,8 +823,9 @@ static void handleResolveModel(const QJsonObject &obj)
 			res["ok"]    = false;
 			res["error"] = QStringLiteral("モデルが見つかりません: ") + modelName;
 		} else {
+			resolvedStyleId    = style->styleId;
 			res["ok"]          = true;
-			res["engine"]      = QStringLiteral("aivisspeech");
+			res["engine"]      = viewerEngine;
 			res["styleId"]     = static_cast<qint64>(style->styleId);
 			res["speakerName"] = style->speakerName;
 			res["styleName"]   = style->styleName;
@@ -617,8 +836,16 @@ static void handleResolveModel(const QJsonObject &obj)
 		s_wsServer->broadcast(
 			QJsonDocument(res).toJson(QJsonDocument::Compact).toStdString());
 
-	// モデル切り替え成功時に aivisParams をリセット
+	// モデル切り替え成功時に ViewerTtsSettings に styleId を書き込み
 	if (res["ok"].toBool()) {
+		auto entry = viewerOpt.value_or(ViewerTtsEntry{});
+		entry.styleId = resolvedStyleId;
+		ViewerTtsSettings::instance().set(userId, platform, entry);
+		obs_log(LOG_INFO, "[ViewerTtsSettings] updated: user=%s platform=%s styleId=%lld",
+		        userId.toUtf8().constData(),
+		        platform.toUtf8().constData(),
+		        static_cast<long long>(resolvedStyleId));
+
 		QJsonObject resetMsg;
 		resetMsg["type"]        = QStringLiteral("olh_user_settings");
 		resetMsg["userId"]      = userId;
@@ -646,6 +873,10 @@ static void handleWsClientMessage(const QString &json)
 		handleOlhAivisParamsRequest(obj);
 	else if (type == "olh_webspeech_params_request")
 		handleOlhWebSpeechParamsRequest(obj);
+	else if (type == "olh_bouyomi_params_request")
+		handleOlhBouyomiParamsRequest(obj);
+	else if (type == "bouyomi_speak")
+		handleBouyomiSpeakRequest(obj);
 }
 
 static void onOverlayStyleMenuClick(void * /* data */)
@@ -725,14 +956,14 @@ static void onOpenTtsMenuClick(void * /* data */)
 	const std::string ttsPathStd =
 		std::string(appdata) + "\\obs-studio\\plugins\\obs-live-hub\\tts.html";
 
-	if (PluginConfig::instance().ttsEngine == "aivisspeech") {
+	if (PluginConfig::instance().isVoicevoxCompatible()) {
 		const QString chromePath = findChromePath();
 		if (chromePath.isEmpty()) {
 			auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
 			QMessageBox::warning(
 				mainWindow, "Chromeが見つかりません",
 				"Chromeが見つかりません。\n"
-				"AivisSpeech使用時はChromeが必要です。\n"
+				"VOICEVOX互換エンジン使用時はChromeが必要です。\n"
 				"Chromeをインストールするか、手動でCORSを無効にして\n"
 				"tts.htmlを開いてください。");
 			return;
@@ -768,6 +999,8 @@ static void broadcastDebugConfig()
 	obj["showVote"]       = cfg.debugShowVote;
 	obj["showLog"]           = cfg.debugShowLog;
 	obj["showCommentDetail"] = cfg.debugShowCommentDetail;
+	obj["showEffect"]        = cfg.debugShowEffect;
+	obj["showPoint"]         = cfg.debugShowPoint;
 	obj["pollInterval"]      = cfg.youtubePollInterval;
 	s_wsServer->broadcast(QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString());
 }
@@ -788,6 +1021,13 @@ static void onAivisParamLimitMenuClick(void * /* data */)
 {
 	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
 	AivisParamLimitDialog dlg(mainWindow);
+	dlg.exec();
+}
+
+static void onBouyomiParamLimitMenuClick(void * /* data */)
+{
+	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	BouyomiParamLimitDialog dlg(mainWindow);
 	dlg.exec();
 }
 
@@ -885,6 +1125,103 @@ static void onReloadMenuClick(void * /* data */)
 	reloadAndReconnect();
 }
 
+// ── エフェクト ──────────────────────────────────────────────────────────────
+
+static QString getEffectsDir()
+{
+#ifdef _WIN32
+	char appdata[MAX_PATH] = {};
+	if (GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH) == 0)
+		return {};
+	return QString::fromLocal8Bit(appdata) +
+	       "\\obs-studio\\plugins\\obs-live-hub\\effects";
+#else
+	return {};
+#endif
+}
+
+static QString getPointsActionsDir()
+{
+#ifdef _WIN32
+	char appdata[MAX_PATH] = {};
+	if (GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH) == 0)
+		return {};
+	return QString::fromLocal8Bit(appdata) +
+	       "\\obs-studio\\plugins\\obs-live-hub\\points_actions";
+#else
+	return {};
+#endif
+}
+
+static void processPointOlhCommand(const QString &userId, const QString &platform,
+                                   const QString &displayName, const QString &message)
+{
+	if (!s_pointManager || !PluginConfig::instance().pointEnabled)
+		return;
+	const int olhIdx = message.indexOf("[olh]", Qt::CaseInsensitive);
+	if (olhIdx < 0)
+		return;
+	const QString params    = message.mid(olhIdx + 5).trimmed();
+	const QStringList pairs = params.split(',', Qt::SkipEmptyParts);
+	for (const QString &pair : pairs) {
+		const int colonIdx = pair.indexOf(':');
+		const QString key =
+			(colonIdx >= 0 ? pair.left(colonIdx) : pair).trimmed();
+		const QString value =
+			colonIdx >= 0 ? pair.mid(colonIdx + 1).trimmed() : QString();
+		if (key.compare("point_use", Qt::CaseInsensitive) == 0 && !value.isEmpty())
+			s_pointManager->onPointUse(userId, platform, displayName, value);
+		else if (key.compare("point_check", Qt::CaseInsensitive) == 0)
+			s_pointManager->onPointCheck(userId, platform, displayName);
+	}
+}
+
+static void onPointSettingsMenuClick(void * /* data */)
+{
+	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	PointSettingsDialog dlg(s_pointManager, mainWindow);
+	dlg.exec();
+}
+
+static void processEffectOlhCommand(const QString &message, const QString &user)
+{
+	if (!s_effectManager)
+		return;
+	const int olhIdx = message.indexOf("[olh]", Qt::CaseInsensitive);
+	if (olhIdx < 0)
+		return;
+	const QString params    = message.mid(olhIdx + 5).trimmed();
+	const QStringList pairs = params.split(',', Qt::SkipEmptyParts);
+	for (const QString &pair : pairs) {
+		const int colonIdx = pair.indexOf(':');
+		if (colonIdx < 0)
+			continue;
+		const QString key   = pair.left(colonIdx).trimmed();
+		const QString value = pair.mid(colonIdx + 1).trimmed();
+		if (key.compare("effect", Qt::CaseInsensitive) == 0 && !value.isEmpty())
+			s_effectManager->onOlhEffect(value, user);
+	}
+}
+
+static void onEffectSettingsMenuClick(void * /* data */)
+{
+	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	EffectSettingsDialog dlg(s_effectManager, mainWindow);
+	dlg.exec();
+}
+
+static void onOpenEffectMenuClick(void * /* data */)
+{
+#ifdef _WIN32
+	char appdata[MAX_PATH] = {};
+	if (GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH) == 0)
+		return;
+	const std::string path =
+		std::string(appdata) + "\\obs-studio\\plugins\\obs-live-hub\\effect.html";
+	ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#endif
+}
+
 // ── サブメニュー構築 ────────────────────────────────────────────────────────
 // obs_frontend_add_tools_menu_item で追加したマーカー項目を QMenu で置き換える
 
@@ -933,12 +1270,20 @@ static void buildObsLiveHubMenu()
 	ovMenu->addAction("TTS音声ページを開く",         []() { onOpenTtsMenuClick(nullptr); });
 
 	auto *ttsMenu = hubMenu->addMenu("読み上げ");
-	ttsMenu->addAction("読み上げ設定",          []() { onTtsSpeechMenuClick(nullptr); });
-	ttsMenu->addAction("読み上げ辞書",          []() { onTtsDictionaryMenuClick(nullptr); });
-	ttsMenu->addAction("AivisSpeechモデル制限", []() { onAivisParamLimitMenuClick(nullptr); });
+	ttsMenu->addAction("読み上げ設定",             []() { onTtsSpeechMenuClick(nullptr); });
+	ttsMenu->addAction("読み上げ辞書",             []() { onTtsDictionaryMenuClick(nullptr); });
+	ttsMenu->addAction("AivisSpeechモデル制限",    []() { onAivisParamLimitMenuClick(nullptr); });
+	ttsMenu->addAction("棒読みちゃんパラメータ制限", []() { onBouyomiParamLimitMenuClick(nullptr); });
 
 	auto *voteMenu = hubMenu->addMenu("アンケート");
 	voteMenu->addAction("アンケート管理", []() { onVoteManagerMenuClick(nullptr); });
+
+	auto *fxMenu = hubMenu->addMenu("エフェクト");
+	fxMenu->addAction("エフェクト設定",          []() { onEffectSettingsMenuClick(nullptr); });
+	fxMenu->addAction("エフェクトページを開く", []() { onOpenEffectMenuClick(nullptr); });
+
+	auto *ptMenu = hubMenu->addMenu("ポイント");
+	ptMenu->addAction("ポイント設定", []() { onPointSettingsMenuClick(nullptr); });
 
 	auto *dbgMenu = hubMenu->addMenu("デバッグ");
 	dbgMenu->addAction("デバッグ設定",       []() { onDebugSettingsMenuClick(nullptr); });
@@ -1068,20 +1413,44 @@ static void onFrontendEvent(obs_frontend_event event, void * /* data */)
 		reconnectTwitch();
 		broadcastTtsDict();
 		broadcastDebugConfig();
-		// AivisSpeech Engine 自動起動
-		if (PluginConfig::instance().aivisAutoStart &&
-		    !PluginConfig::instance().aivisEnginePath.empty()) {
-			obs_log(LOG_INFO, "AivisEngine: auto-starting...");
-			AivisEngine::start(
-				QString::fromStdString(PluginConfig::instance().aivisEnginePath));
-			// エンジン起動完了まで 1 秒ごとにリトライ（最大 30 秒）
-			AivisStyleCache::fetchAndCacheWithRetry(
-				QString::fromStdString(PluginConfig::instance().aivisUrl));
-		} else {
-			// エンジンが既に起動中の場合は即時取得を試みる
-			AivisStyleCache::fetchAndCacheAsync(
-				QString::fromStdString(PluginConfig::instance().aivisUrl));
+		if (s_effectManager) {
+			const QString effectsDir = getEffectsDir();
+			if (!effectsDir.isEmpty()) {
+				QDir().mkpath(effectsDir);
+				s_effectManager->loadEffects(effectsDir);
+			}
 		}
+		if (s_pointManager) {
+			const QString actionsDir = getPointsActionsDir();
+			if (!actionsDir.isEmpty()) {
+				QDir().mkpath(actionsDir);
+				s_pointManager->loadActions(actionsDir);
+			}
+			// 改ざん検知ダイアログ
+			if (s_pointManager->hasTamperWarning()) {
+				auto *mainWin = static_cast<QWidget *>(obs_frontend_get_main_window());
+				QMessageBox msgBox(mainWin);
+				msgBox.setIcon(QMessageBox::Warning);
+				msgBox.setWindowTitle("ポイントデータ整合性エラー");
+				msgBox.setText(
+					"ポイントデータの整合性チェックに失敗しました。\n"
+					"データが手動で変更された可能性があります。\n\n"
+					"このまま読み込みますか？それとも安全のため\n"
+					"全ユーザーのポイントを 0 にリセットしますか？");
+				auto *keepBtn  = msgBox.addButton("そのまま読み込む",
+				                                  QMessageBox::AcceptRole);
+				auto *resetBtn = msgBox.addButton("リセットする",
+				                                  QMessageBox::DestructiveRole);
+				Q_UNUSED(keepBtn);
+				msgBox.exec();
+				if (msgBox.clickedButton() == resetBtn)
+					s_pointManager->resetAllPoints();
+				else
+					s_pointManager->saveNow(); // チェックサムを再計算して保存
+			}
+		}
+		// 有効化されたエンジンを全て起動・接続確認する
+		EngineManager::startAll();
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		if (s_youtube)
@@ -1108,10 +1477,65 @@ bool obs_module_load(void)
 	ensureHtmlFileInAppData(L"overlay.html");
 	ensureHtmlFileInAppData(L"tts.html");
 	ensureHtmlFileInAppData(L"debug.html");
+	ensureHtmlFileInAppData(L"effect.html");
 #endif
 
 	PluginConfig::instance().load();
+	ViewerTtsSettings::instance(); // CSV から読み込み（ログに件数を出力）
 	const auto &cfg = PluginConfig::instance();
+
+	// エフェクトマネージャー
+	s_effectManager = new EffectManager();
+	QObject::connect(s_effectManager, &EffectManager::broadcastEffect,
+	                 [](const std::string &json) {
+		                 if (s_wsServer)
+			                 s_wsServer->broadcast(json);
+	                 });
+
+	// ポイントマネージャー
+	s_pointManager = new PointManager();
+	QObject::connect(s_pointManager, &PointManager::broadcastJson,
+	                 [](const std::string &json) {
+		                 if (s_wsServer)
+			                 s_wsServer->broadcast(json);
+	                 });
+	QObject::connect(s_pointManager, &PointManager::systemCommentRequested,
+	                 [](const std::string &text) {
+		                 if (s_wsServer)
+			                 s_wsServer->broadcast(makeSystemCommentJson(text));
+	                 });
+	QObject::connect(s_pointManager, &PointManager::triggerEffectRequested,
+	                 [](const QString &effectName) {
+		                 if (s_effectManager)
+			                 s_effectManager->onOlhEffect(effectName);
+	                 });
+	QObject::connect(s_pointManager, &PointManager::setModelRequested,
+	                 [](const QString &userId, const QString &modelName) {
+		                 QJsonObject obj;
+		                 obj["userId"]    = userId;
+		                 obj["modelName"] = modelName;
+		                 handleResolveModel(obj);
+	                 });
+	QObject::connect(s_effectManager, &EffectManager::broadcastDebugStatus,
+	                 [](const std::string &json) {
+		                 if (s_wsServer)
+			                 s_wsServer->broadcast(json);
+	                 });
+	QObject::connect(s_effectManager, &EffectManager::broadcastDebugLog,
+	                 [](const std::string &json) {
+		                 if (s_wsServer)
+			                 s_wsServer->broadcast(json);
+	                 });
+	QObject::connect(s_pointManager, &PointManager::debugPointLog,
+	                 [](const std::string &json) {
+		                 if (s_wsServer)
+			                 s_wsServer->broadcast(json);
+	                 });
+	QObject::connect(s_pointManager, &PointManager::debugPointUseLog,
+	                 [](const std::string &json) {
+		                 if (s_wsServer)
+			                 s_wsServer->broadcast(json);
+	                 });
 
 	// ドック
 	s_dock = new CommentDock();
@@ -1150,8 +1574,18 @@ bool obs_module_load(void)
 		if (s_wsServer)
 			s_wsServer->broadcast(
 				makeCommentJson(ev.authorName, ev.message, "twitch", ev.avatarUrl));
-		processVoteComment(QString::fromStdString(ev.authorName),
-				   QString::fromStdString(ev.message));
+		const QString msg        = QString::fromStdString(ev.message);
+		const QString authorName = QString::fromStdString(ev.authorName);
+		recordUserPlatform(authorName, QStringLiteral("twitch"));
+		processVoteComment(authorName, msg);
+		if (s_effectManager) {
+			s_effectManager->onComment(msg, authorName);
+			processEffectOlhCommand(msg, authorName);
+		}
+		if (s_pointManager) {
+			s_pointManager->onComment(authorName, QStringLiteral("twitch"));
+			processPointOlhCommand(authorName, QStringLiteral("twitch"), authorName, msg);
+		}
 	});
 
 	obs_frontend_add_event_callback(onFrontendEvent, nullptr);
@@ -1165,9 +1599,16 @@ void obs_module_unload(void)
 {
 	obs_frontend_remove_event_callback(onFrontendEvent, nullptr);
 
-	AivisEngine::stop();
+	EngineManager::stopAll();
+	AivisEngine::stop(); // safety net（EngineManager 管理外の旧インスタンス用）
 
 	s_eventBus.unsubscribe(s_twitchSubId);
+
+	delete s_effectManager;
+	s_effectManager = nullptr;
+
+	delete s_pointManager;
+	s_pointManager = nullptr;
 
 	delete s_twitch;
 	s_twitch = nullptr;

@@ -216,6 +216,7 @@ void YouTubePlatform::disconnect()
 {
 	connected_ = false;
 	refreshingToken_ = false;
+	retryingAfter401_ = false;
 	pollTimer_->stop();
 	liveChatId_.clear();
 	nextPageToken_.clear();
@@ -274,6 +275,56 @@ void YouTubePlatform::onBroadcastInfoResult(bool ok, int statusCode, const std::
 			QString("YouTube liveBroadcasts.list HTTP %1").arg(statusCode);
 		obs_log(LOG_WARNING, "[%s] %s: %.*s", TAG, msg.toUtf8().constData(),
 			static_cast<int>(std::min(body.size(), size_t(200))), body.c_str());
+		if (statusCode == 401) {
+			const auto &cfg = PluginConfig::instance();
+			if (!retryingAfter401_ && !cfg.youtubeRefreshToken.empty() &&
+			    !cfg.youtubeClientId.empty() && !cfg.youtubeClientSecret.empty()) {
+				retryingAfter401_ = true;
+				refreshingToken_ = true;
+				obs_log(LOG_INFO,
+					"[%s] HTTP 401 (liveBroadcasts) - attempting token refresh...",
+					TAG);
+				QPointer<YouTubePlatform> self = this;
+				GoogleOAuthTokenClient::refreshAccessTokenAsync(
+					cfg.youtubeClientId, cfg.youtubeClientSecret,
+					cfg.youtubeRefreshToken, [self](GoogleTokenResult res) {
+						QMetaObject::invokeMethod(
+							QCoreApplication::instance(),
+							[self, res]() {
+								if (!self)
+									return;
+								self->refreshingToken_ = false;
+								if (res.ok && !res.accessToken.empty()) {
+									self->oauthToken_ =
+										QString::fromStdString(
+											res.accessToken);
+									auto &cfg2 =
+										PluginConfig::instance();
+									cfg2.youtubeAccessToken =
+										res.accessToken;
+									cfg2.youtubeTokenExpiry =
+										QDateTime::currentSecsSinceEpoch() +
+										res.expiresIn;
+									cfg2.save();
+									obs_log(LOG_INFO,
+										"[GoogleOAuth] Token refreshed successfully");
+									self->fetchActiveBroadcast();
+								} else {
+									obs_log(LOG_WARNING,
+										"[GoogleOAuth] Token refresh failed: %s",
+										res.error.c_str());
+									self->retryingAfter401_ = false;
+									emit self->authFailed();
+								}
+							},
+							Qt::QueuedConnection);
+					});
+				return;
+			}
+			retryingAfter401_ = false;
+			emit authFailed();
+			return;
+		}
 		emit errorOccurred(msg);
 		return;
 	}
@@ -432,6 +483,7 @@ int YouTubePlatform::pollIntervalMs() const
 void YouTubePlatform::startPolling()
 {
 	connected_ = true;
+	retryingAfter401_ = false;
 	const int ms = pollIntervalMs();
 	obs_log(LOG_INFO, "[%s] ポーリング開始（間隔: %d ms）", TAG, ms);
 	pollTimer_->start(ms);
@@ -609,9 +661,65 @@ void YouTubePlatform::onMessagesResult(bool ok, int statusCode, const std::strin
 	// HTTP 200 以外はリトライ
 	if (statusCode != 200) {
 		obs_log(LOG_WARNING, "[%s] liveChatMessages.list HTTP %d", TAG, statusCode);
-		if (statusCode == 401 && !authErrorActive_) {
-			authErrorActive_ = true;
-			emit authFailed();
+		if (statusCode == 401) {
+			const auto &cfg = PluginConfig::instance();
+			if (!retryingAfter401_ && !cfg.youtubeRefreshToken.empty() &&
+			    !cfg.youtubeClientId.empty() && !cfg.youtubeClientSecret.empty()) {
+				retryingAfter401_ = true;
+				refreshingToken_ = true;
+				obs_log(LOG_INFO,
+					"[%s] HTTP 401 (liveChatMessages) - attempting token refresh...",
+					TAG);
+				QPointer<YouTubePlatform> self = this;
+				GoogleOAuthTokenClient::refreshAccessTokenAsync(
+					cfg.youtubeClientId, cfg.youtubeClientSecret,
+					cfg.youtubeRefreshToken, [self](GoogleTokenResult res) {
+						QMetaObject::invokeMethod(
+							QCoreApplication::instance(),
+							[self, res]() {
+								if (!self)
+									return;
+								self->refreshingToken_ = false;
+								if (res.ok && !res.accessToken.empty()) {
+									self->oauthToken_ =
+										QString::fromStdString(
+											res.accessToken);
+									auto &cfg2 =
+										PluginConfig::instance();
+									cfg2.youtubeAccessToken =
+										res.accessToken;
+									cfg2.youtubeTokenExpiry =
+										QDateTime::currentSecsSinceEpoch() +
+										res.expiresIn;
+									cfg2.save();
+									obs_log(LOG_INFO,
+										"[GoogleOAuth] Token refreshed successfully");
+									if (self->connected_)
+										self->doFetchMessages();
+								} else {
+									obs_log(LOG_WARNING,
+										"[GoogleOAuth] Token refresh failed: %s",
+										res.error.c_str());
+									self->retryingAfter401_ = false;
+									if (!self->authErrorActive_) {
+										self->authErrorActive_ = true;
+										emit self->authFailed();
+									}
+									if (self->connected_)
+										self->pollTimer_->start(
+											self->pollIntervalMs());
+								}
+							},
+							Qt::QueuedConnection);
+					});
+				return;
+			}
+			// リフレッシュ済みの再試行も 401 、またはリフレッシュ資格情報なし
+			retryingAfter401_ = false;
+			if (!authErrorActive_) {
+				authErrorActive_ = true;
+				emit authFailed();
+			}
 		}
 		if (connected_)
 			pollTimer_->start(pollIntervalMs());
@@ -622,6 +730,7 @@ void YouTubePlatform::onMessagesResult(bool ok, int statusCode, const std::strin
 	const int configMs = pollIntervalMs();
 	const int interval = qMax(configMs, root["pollingIntervalMillis"].toInt(configMs));
 	nextPageToken_ = root["nextPageToken"].toString();
+	retryingAfter401_ = false;
 
 	if (authErrorActive_) {
 		authErrorActive_ = false;

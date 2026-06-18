@@ -69,6 +69,7 @@ private:
 	bool connected_ = false;
 	bool ignoreQuota_;
 	bool refreshingToken_ = false;    // Token 更新中フラグ（二重エントリ防止）
+	bool retryingAfter401_ = false;   // 401 受信後のリフレッシュ＆リトライ中フラグ
 	bool authErrorActive_ = false;    // 401 エラー中フラグ（復帰時のみ error_clear を送る）
 	int broadcastRetryCount_ = 0;     // liveBroadcasts.list "ready" 待ちリトライ回数
 

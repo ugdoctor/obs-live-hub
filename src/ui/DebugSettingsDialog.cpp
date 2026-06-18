@@ -40,6 +40,8 @@ DebugSettingsDialog::DebugSettingsDialog(QWidget *parent) : QDialog(parent)
 	showVoteCheck_          = new QCheckBox("投票状態パネルを表示", this);
 	showLogCheck_           = new QCheckBox("broadcastログを表示", this);
 	showCommentDetailCheck_ = new QCheckBox("最新コメント詳細を表示", this);
+	showEffectCheck_        = new QCheckBox("エフェクト状態パネルを表示", this);
+	showPointCheck_         = new QCheckBox("ポイント状態パネルを表示", this);
 
 	buttonBox_ = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
 
@@ -52,6 +54,8 @@ DebugSettingsDialog::DebugSettingsDialog(QWidget *parent) : QDialog(parent)
 	layout->addWidget(showVoteCheck_);
 	layout->addWidget(showLogCheck_);
 	layout->addWidget(showCommentDetailCheck_);
+	layout->addWidget(showEffectCheck_);
+	layout->addWidget(showPointCheck_);
 	layout->addSpacing(8);
 	layout->addWidget(buttonBox_);
 
@@ -71,6 +75,8 @@ void DebugSettingsDialog::loadFromConfig()
 	showVoteCheck_->setChecked(cfg.debugShowVote);
 	showLogCheck_->setChecked(cfg.debugShowLog);
 	showCommentDetailCheck_->setChecked(cfg.debugShowCommentDetail);
+	showEffectCheck_->setChecked(cfg.debugShowEffect);
+	showPointCheck_->setChecked(cfg.debugShowPoint);
 }
 
 void DebugSettingsDialog::saveToConfig()
@@ -82,6 +88,8 @@ void DebugSettingsDialog::saveToConfig()
 	cfg.debugShowVote          = showVoteCheck_->isChecked();
 	cfg.debugShowLog           = showLogCheck_->isChecked();
 	cfg.debugShowCommentDetail = showCommentDetailCheck_->isChecked();
+	cfg.debugShowEffect        = showEffectCheck_->isChecked();
+	cfg.debugShowPoint         = showPointCheck_->isChecked();
 	cfg.save();
 }
 

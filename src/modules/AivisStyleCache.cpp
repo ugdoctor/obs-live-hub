@@ -193,6 +193,42 @@ void AivisStyleCache::fetchAndCacheAsync(const QString &aivisUrl)
 #endif
 }
 
+// /speakers 取得+キャッシュ更新、先頭話者をメインスレッドの cb に通知
+void AivisStyleCache::fetchAndCacheAsyncWithResult(
+	const QString &url,
+	std::function<void(bool, int64_t, const QString &, const QString &)> cb)
+{
+#ifdef _WIN32
+	const QString resolvedUrl =
+		url.trimmed().isEmpty() ? QStringLiteral("http://localhost:10101") : url;
+
+	std::thread([resolvedUrl, cb]() {
+		QByteArray body;
+		if (!httpGetJson(resolvedUrl, L"/speakers", body)) {
+			QMetaObject::invokeMethod(qApp, [cb]() { cb(false, 0, {}, {}); },
+			                          Qt::QueuedConnection);
+			return;
+		}
+		const auto entries = parseSpeakers(body);
+		if (entries.isEmpty()) {
+			QMetaObject::invokeMethod(qApp, [cb]() { cb(false, 0, {}, {}); },
+			                          Qt::QueuedConnection);
+			return;
+		}
+		applyToCache(entries);
+		const int64_t firstId = entries[0].styleId;
+		const QString firstSp = entries[0].speakerName;
+		const QString firstSt = entries[0].styleName;
+		QMetaObject::invokeMethod(qApp, [cb, firstId, firstSp, firstSt]() {
+			cb(true, firstId, firstSp, firstSt);
+		}, Qt::QueuedConnection);
+	}).detach();
+#else
+	Q_UNUSED(url)
+	Q_UNUSED(cb)
+#endif
+}
+
 // エンジン起動後用：1 秒ごとにリトライ、最大 maxSeconds 秒
 void AivisStyleCache::fetchAndCacheWithRetry(const QString &aivisUrl, int maxSeconds)
 {

@@ -63,19 +63,66 @@ public:
 	bool ttsTwitch = true;
 	bool ttsYoutube = true;
 
-	// AivisSpeech 設定
-	std::string ttsEngine = "webspeech"; // "webspeech" or "aivisspeech"
-	std::string aivisUrl = "http://localhost:10101";
+	// VOICEVOX互換エンジン設定
+	// ttsEngine: webspeech / aivisspeech / sharevox / lmroid / itvoice
+	std::string ttsEngine = "webspeech";
+	// エンジン別URL（デフォルトポートを設定済み）
+	std::string aivisUrl    = "http://localhost:10101"; // AivisSpeech
+	std::string sharevoxUrl = "http://localhost:50025"; // SHAREVOX
+	std::string lmroidUrl   = "http://localhost:49973"; // LMROID
+	std::string itvoiceUrl  = "http://localhost:49540"; // ITVOICE
+	// 話者・スタイル（全VOICEVOX互換エンジン共通）
 	std::string aivisSpeakerUuid;
 	int64_t aivisStyleId = 0;
 	std::string aivisStyleName;
 	std::string aivisSpeakerName;
 
-	// AivisSpeech Engine 起動管理
+	// エンジン起動管理（エンジン別）
 	std::string aivisEnginePath;
-	bool aivisAutoStart = false;
+	bool aivisAutoStart       = false;
+	std::string sharevoxEnginePath;
+	bool sharevoxAutoStart    = false;
+	std::string lmroidEnginePath;
+	bool lmroidAutoStart      = false;
+	std::string itvoiceEnginePath;
+	bool itvoiceAutoStart     = false;
 
-	// AivisSpeech [olh] コマンド パラメータ上下限
+	// エンジン有効化フラグ（複数エンジン同時管理用）
+	// webspeech は常時有効のためフラグ不要
+	bool aivisspeechEnabled = false;
+	bool sharevoxEnabled    = false;
+	bool lmroidEnabled      = false;
+	bool itvoiceEnabled     = false;
+	bool bouyomiEnabled     = false;
+
+	// 現在選択中エンジンのURL
+	std::string activeVoicevoxUrl() const
+	{
+		if (ttsEngine == "sharevox") return sharevoxUrl;
+		if (ttsEngine == "lmroid")   return lmroidUrl;
+		if (ttsEngine == "itvoice")  return itvoiceUrl;
+		return aivisUrl;
+	}
+	// VOICEVOX互換エンジン選択中か
+	bool isVoicevoxCompatible() const
+	{
+		return ttsEngine == "aivisspeech" || ttsEngine == "sharevox" ||
+		       ttsEngine == "lmroid"      || ttsEngine == "itvoice";
+	}
+
+	// 棒読みちゃん設定
+	std::string bouyomiHost  = "localhost";
+	int         bouyomiPort  = 50080;
+	int         bouyomiVoice = 0; // -1=前回と同じ, 0=自動, 1-10=各声
+	// [olh] bouyomi_* パラメータ上下限
+	int bouyomiVolumeMin = 0;
+	int bouyomiVolumeMax = 100;
+	int bouyomiSpeedMin  = 50;
+	int bouyomiSpeedMax  = 300;
+	int bouyomiToneMin   = -100;
+	int bouyomiToneMax   = 100;
+
+	// VOICEVOX互換エンジン [olh] コマンド パラメータ上下限
 	float aivisSpeedMin        =  0.5f;
 	float aivisSpeedMax        =  2.0f;
 	float aivisPitchMin        = -0.15f;
@@ -104,6 +151,20 @@ public:
 	int voteTotalSize    = 11;
 	int voteStatusSize   = 11;
 
+	// エフェクト設定
+	std::string effectDefaultPosition = "center";
+	std::string effectDefaultSize     = "medium";
+	int effectMaxConcurrent = 3;
+	int effectMaxQueue      = 10;
+
+	// ポイントシステム設定
+	bool pointEnabled           = true;
+	int pointCommentAmount      = 1;  // コメント1回あたりの付与量
+	int pointWatchInterval      = 5;  // 視聴ポイント付与間隔（分）
+	int pointWatchAmount        = 1;  // 視聴ポイント付与量
+	int pointCommentCooldown    = 10; // コメントポイント加算クールダウン（秒、0=無効）
+	int pointUseCooldown        = 5;  // point_use実行クールダウン（秒、0=無効）
+
 	// デバッグパネル表示設定
 	bool debugShowConnection     = true;
 	bool debugShowTts            = true;
@@ -111,6 +172,8 @@ public:
 	bool debugShowVote           = true;
 	bool debugShowLog            = true;
 	bool debugShowCommentDetail  = true;
+	bool debugShowEffect         = true;
+	bool debugShowPoint          = true;
 
 	// 配信一括設定（StreamSettingsDialog）
 	std::string streamTwitchTitle;

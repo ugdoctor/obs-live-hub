@@ -35,9 +35,10 @@
   <script>
     var WS_PORT = 8765;
 
-    var ttsEngine    = 'webspeech'; // 'webspeech' or 'aivisspeech'
+    var ttsEngine    = 'webspeech';
     var aivisUrl     = 'http://localhost:10101';
     var aivisStyleId = 0;
+    var bouyomiVoice = 0; // 棒読みちゃん voice番号（配信者設定）
 
     var ttsSettings = {
       enabled: false,
@@ -60,9 +61,11 @@
       if (s.ttsEngine    !== undefined) ttsEngine    = s.ttsEngine;
       if (s.aivisUrl     !== undefined) aivisUrl     = s.aivisUrl;
       if (s.aivisStyleId !== undefined) aivisStyleId = s.aivisStyleId;
+      if (s.bouyomiVoice !== undefined) bouyomiVoice = s.bouyomiVoice;
       try { localStorage.setItem('ttsSpeechSettings', JSON.stringify({
         settings: ttsSettings, ttsEngine: ttsEngine,
-        aivisUrl: aivisUrl, aivisStyleId: aivisStyleId
+        aivisUrl: aivisUrl, aivisStyleId: aivisStyleId,
+        bouyomiVoice: bouyomiVoice
       })); } catch(_) {}
     }
 
@@ -77,6 +80,7 @@
           if (obj.ttsEngine    !== undefined) ttsEngine    = obj.ttsEngine;
           if (obj.aivisUrl     !== undefined) aivisUrl     = obj.aivisUrl;
           if (obj.aivisStyleId !== undefined) aivisStyleId = obj.aivisStyleId;
+          if (obj.bouyomiVoice !== undefined) bouyomiVoice = obj.bouyomiVoice;
         } else {
           applyTts(obj);
         }
@@ -105,9 +109,15 @@
       return result;
     }
 
-    // ── AivisSpeech 音声合成 ──────────────────────────────────
+    // ── VOICEVOX互換エンジン判定 ─────────────────────────────
+    function isVoicevoxEngine(engine) {
+      return engine === 'aivisspeech' || engine === 'sharevox' ||
+             engine === 'lmroid'      || engine === 'itvoice';
+    }
+
+    // ── VOICEVOX互換エンジン 音声合成 ─────────────────────────
     async function speakWithAivis(text, styleId, aivisParams) {
-      console.log('[AivisSpeech] speaking:', text, 'styleId:', styleId);
+      console.log('[VOICEVOX] speaking:', text, 'styleId:', styleId);
       var sid = (styleId !== undefined && styleId !== null) ? styleId : aivisStyleId;
       var ap  = aivisParams || {};
       try {
@@ -158,7 +168,22 @@
       var effectiveEngine  = item.engine  || ttsEngine;
       var effectiveStyleId = (item.styleId !== undefined) ? item.styleId : aivisStyleId;
 
-      if (effectiveEngine === 'aivisspeech') {
+      if (effectiveEngine === 'bouyomi') {
+        // 棒読みちゃんはC++経由でHTTP GETを送るだけ。棒読みちゃん自体が再生キューを管理するため即座に次へ
+        var bp = (item.userCfg && item.userCfg.bouyomiParams) ? item.userCfg.bouyomiParams : {};
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type:   'bouyomi_speak',
+            text:   item.text,
+            voice:  bouyomiVoice,
+            volume: bp.volume !== undefined ? bp.volume : -1,
+            speed:  bp.speed  !== undefined ? bp.speed  : -1,
+            tone:   bp.tone   !== undefined ? bp.tone   : -1
+          }));
+        }
+        ttsSpeaking = false;
+        setTimeout(processTtsQueue, 0);
+      } else if (isVoicevoxEngine(effectiveEngine)) {
         speakWithAivis(item.text, effectiveStyleId,
                        (item.userCfg && item.userCfg.aivisParams) ? item.userCfg.aivisParams : {});
       } else {
@@ -229,6 +254,9 @@
               var s = loadUserSettings();
               if (!s[data.userId]) s[data.userId] = {};
               s[data.userId].engine = data.engine;
+              delete s[data.userId].styleId;
+              delete s[data.userId].speakerName;
+              delete s[data.userId].styleName;
               saveUserSettings(s);
             }
           } else if (data.type === 'resolve_model_result') {
@@ -258,6 +286,10 @@
                 if (wp.rate   !== undefined) s[data.userId].rate   = wp.rate;
                 if (wp.pitch  !== undefined) s[data.userId].pitch  = wp.pitch;
                 if (wp.volume !== undefined) s[data.userId].volume = wp.volume;
+              }
+              if (data.bouyomiParams !== undefined) {
+                s[data.userId].bouyomiParams = Object.assign(
+                  s[data.userId].bouyomiParams || {}, data.bouyomiParams);
               }
               saveUserSettings(s);
             }

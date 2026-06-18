@@ -21,5 +21,7 @@ private:
 	QCheckBox *showVoteCheck_;
 	QCheckBox *showLogCheck_;
 	QCheckBox *showCommentDetailCheck_;
+	QCheckBox *showEffectCheck_;
+	QCheckBox *showPointCheck_;
 	QDialogButtonBox *buttonBox_;
 };

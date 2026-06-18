@@ -234,6 +234,90 @@ void PluginConfig::load()
 	if (obs_data_has_user_value(data, "aivis_auto_start"))
 		aivisAutoStart = obs_data_get_bool(data, "aivis_auto_start");
 
+	// SHAREVOX
+	if (obs_data_has_user_value(data, "sharevox_url")) {
+		const char *s = obs_data_get_string(data, "sharevox_url");
+		if (s && *s) sharevoxUrl = s;
+	}
+	if (obs_data_has_user_value(data, "sharevox_engine_path")) {
+		const char *s = obs_data_get_string(data, "sharevox_engine_path");
+		if (s) sharevoxEnginePath = s;
+	}
+	if (obs_data_has_user_value(data, "sharevox_auto_start"))
+		sharevoxAutoStart = obs_data_get_bool(data, "sharevox_auto_start");
+
+	// LMROID
+	if (obs_data_has_user_value(data, "lmroid_url")) {
+		const char *s = obs_data_get_string(data, "lmroid_url");
+		if (s && *s) lmroidUrl = s;
+	}
+	if (obs_data_has_user_value(data, "lmroid_engine_path")) {
+		const char *s = obs_data_get_string(data, "lmroid_engine_path");
+		if (s) lmroidEnginePath = s;
+	}
+	if (obs_data_has_user_value(data, "lmroid_auto_start"))
+		lmroidAutoStart = obs_data_get_bool(data, "lmroid_auto_start");
+
+	// ITVOICE
+	if (obs_data_has_user_value(data, "itvoice_url")) {
+		const char *s = obs_data_get_string(data, "itvoice_url");
+		if (s && *s) itvoiceUrl = s;
+	}
+	if (obs_data_has_user_value(data, "itvoice_engine_path")) {
+		const char *s = obs_data_get_string(data, "itvoice_engine_path");
+		if (s) itvoiceEnginePath = s;
+	}
+	if (obs_data_has_user_value(data, "itvoice_auto_start"))
+		itvoiceAutoStart = obs_data_get_bool(data, "itvoice_auto_start");
+
+	// エンジン有効化フラグ（キーが無い場合は ttsEngine からの自然な移行）
+	if (obs_data_has_user_value(data, "aivisspeech_enabled"))
+		aivisspeechEnabled = obs_data_get_bool(data, "aivisspeech_enabled");
+	else
+		aivisspeechEnabled = (ttsEngine == "aivisspeech");
+	if (obs_data_has_user_value(data, "sharevox_enabled"))
+		sharevoxEnabled = obs_data_get_bool(data, "sharevox_enabled");
+	else
+		sharevoxEnabled = (ttsEngine == "sharevox");
+	if (obs_data_has_user_value(data, "lmroid_enabled"))
+		lmroidEnabled = obs_data_get_bool(data, "lmroid_enabled");
+	else
+		lmroidEnabled = (ttsEngine == "lmroid");
+	if (obs_data_has_user_value(data, "itvoice_enabled"))
+		itvoiceEnabled = obs_data_get_bool(data, "itvoice_enabled");
+	else
+		itvoiceEnabled = (ttsEngine == "itvoice");
+	if (obs_data_has_user_value(data, "bouyomi_enabled"))
+		bouyomiEnabled = obs_data_get_bool(data, "bouyomi_enabled");
+	else
+		bouyomiEnabled = (ttsEngine == "bouyomi");
+
+	// 棒読みちゃん設定
+	if (obs_data_has_user_value(data, "bouyomi_host")) {
+		const char *s = obs_data_get_string(data, "bouyomi_host");
+		if (s && *s) bouyomiHost = s;
+	}
+	if (obs_data_has_user_value(data, "bouyomi_port")) {
+		bouyomiPort = static_cast<int>(obs_data_get_int(data, "bouyomi_port"));
+		if (bouyomiPort <= 0 || bouyomiPort > 65535) bouyomiPort = 50080;
+	}
+	if (obs_data_has_user_value(data, "bouyomi_voice")) {
+		bouyomiVoice = static_cast<int>(obs_data_get_int(data, "bouyomi_voice"));
+		if (bouyomiVoice < -1 || bouyomiVoice > 10000) bouyomiVoice = 0;
+	}
+	if (obs_data_has_user_value(data, "bouyomi_volume_min"))
+		bouyomiVolumeMin = static_cast<int>(obs_data_get_int(data, "bouyomi_volume_min"));
+	if (obs_data_has_user_value(data, "bouyomi_volume_max"))
+		bouyomiVolumeMax = static_cast<int>(obs_data_get_int(data, "bouyomi_volume_max"));
+	if (obs_data_has_user_value(data, "bouyomi_speed_min"))
+		bouyomiSpeedMin = static_cast<int>(obs_data_get_int(data, "bouyomi_speed_min"));
+	if (obs_data_has_user_value(data, "bouyomi_speed_max"))
+		bouyomiSpeedMax = static_cast<int>(obs_data_get_int(data, "bouyomi_speed_max"));
+	if (obs_data_has_user_value(data, "bouyomi_tone_min"))
+		bouyomiToneMin = static_cast<int>(obs_data_get_int(data, "bouyomi_tone_min"));
+	if (obs_data_has_user_value(data, "bouyomi_tone_max"))
+		bouyomiToneMax = static_cast<int>(obs_data_get_int(data, "bouyomi_tone_max"));
+
 	// AivisSpeech [olh] パラメータ上下限
 	if (obs_data_has_user_value(data, "aivis_speed_min"))
 		aivisSpeedMin = static_cast<float>(obs_data_get_double(data, "aivis_speed_min"));
@@ -256,6 +340,53 @@ void PluginConfig::load()
 	if (obs_data_has_user_value(data, "aivis_emotion_max"))
 		aivisEmotionMax = static_cast<float>(obs_data_get_double(data, "aivis_emotion_max"));
 
+	// ポイントシステム設定
+	if (obs_data_has_user_value(data, "point_enabled"))
+		pointEnabled = obs_data_get_bool(data, "point_enabled");
+	if (obs_data_has_user_value(data, "point_comment_amount")) {
+		pointCommentAmount = static_cast<int>(obs_data_get_int(data, "point_comment_amount"));
+		if (pointCommentAmount < 0 || pointCommentAmount > 100)
+			pointCommentAmount = 1;
+	}
+	if (obs_data_has_user_value(data, "point_watch_interval")) {
+		pointWatchInterval = static_cast<int>(obs_data_get_int(data, "point_watch_interval"));
+		if (pointWatchInterval < 1 || pointWatchInterval > 60)
+			pointWatchInterval = 5;
+	}
+	if (obs_data_has_user_value(data, "point_watch_amount")) {
+		pointWatchAmount = static_cast<int>(obs_data_get_int(data, "point_watch_amount"));
+		if (pointWatchAmount < 0 || pointWatchAmount > 100)
+			pointWatchAmount = 1;
+	}
+	if (obs_data_has_user_value(data, "point_comment_cooldown")) {
+		pointCommentCooldown = static_cast<int>(obs_data_get_int(data, "point_comment_cooldown"));
+		if (pointCommentCooldown < 0 || pointCommentCooldown > 300)
+			pointCommentCooldown = 10;
+	}
+	if (obs_data_has_user_value(data, "point_use_cooldown")) {
+		pointUseCooldown = static_cast<int>(obs_data_get_int(data, "point_use_cooldown"));
+		if (pointUseCooldown < 0 || pointUseCooldown > 300)
+			pointUseCooldown = 5;
+	}
+
+	// エフェクト設定
+	if (obs_data_has_user_value(data, "effect_default_position")) {
+		const char *s = obs_data_get_string(data, "effect_default_position");
+		if (s && *s) effectDefaultPosition = s;
+	}
+	if (obs_data_has_user_value(data, "effect_default_size")) {
+		const char *s = obs_data_get_string(data, "effect_default_size");
+		if (s && *s) effectDefaultSize = s;
+	}
+	if (obs_data_has_user_value(data, "effect_max_concurrent")) {
+		effectMaxConcurrent = static_cast<int>(obs_data_get_int(data, "effect_max_concurrent"));
+		if (effectMaxConcurrent < 1 || effectMaxConcurrent > 10) effectMaxConcurrent = 3;
+	}
+	if (obs_data_has_user_value(data, "effect_max_queue")) {
+		effectMaxQueue = static_cast<int>(obs_data_get_int(data, "effect_max_queue"));
+		if (effectMaxQueue < 1 || effectMaxQueue > 50) effectMaxQueue = 10;
+	}
+
 	// デバッグパネル表示設定
 	if (obs_data_has_user_value(data, "debug_show_connection"))
 		debugShowConnection = obs_data_get_bool(data, "debug_show_connection");
@@ -269,6 +400,10 @@ void PluginConfig::load()
 		debugShowLog = obs_data_get_bool(data, "debug_show_log");
 	if (obs_data_has_user_value(data, "debug_show_comment_detail"))
 		debugShowCommentDetail = obs_data_get_bool(data, "debug_show_comment_detail");
+	if (obs_data_has_user_value(data, "debug_show_effect"))
+		debugShowEffect = obs_data_get_bool(data, "debug_show_effect");
+	if (obs_data_has_user_value(data, "debug_show_point"))
+		debugShowPoint = obs_data_get_bool(data, "debug_show_point");
 
 	// 配信一括設定
 	if (obs_data_has_user_value(data, "stream_twitch_title")) {
@@ -396,6 +531,31 @@ void PluginConfig::save()
 	obs_data_set_string(data, "aivis_speaker_name",   aivisSpeakerName.c_str());
 	obs_data_set_string(data, "aivis_engine_path",    aivisEnginePath.c_str());
 	obs_data_set_bool  (data, "aivis_auto_start",     aivisAutoStart);
+	obs_data_set_string(data, "sharevox_url",          sharevoxUrl.c_str());
+	obs_data_set_string(data, "sharevox_engine_path",  sharevoxEnginePath.c_str());
+	obs_data_set_bool  (data, "sharevox_auto_start",   sharevoxAutoStart);
+	obs_data_set_string(data, "lmroid_url",            lmroidUrl.c_str());
+	obs_data_set_string(data, "lmroid_engine_path",    lmroidEnginePath.c_str());
+	obs_data_set_bool  (data, "lmroid_auto_start",     lmroidAutoStart);
+	obs_data_set_string(data, "itvoice_url",           itvoiceUrl.c_str());
+	obs_data_set_string(data, "itvoice_engine_path",   itvoiceEnginePath.c_str());
+	obs_data_set_bool  (data, "itvoice_auto_start",    itvoiceAutoStart);
+	obs_data_set_bool  (data, "aivisspeech_enabled",   aivisspeechEnabled);
+	obs_data_set_bool  (data, "sharevox_enabled",      sharevoxEnabled);
+	obs_data_set_bool  (data, "lmroid_enabled",        lmroidEnabled);
+	obs_data_set_bool  (data, "itvoice_enabled",       itvoiceEnabled);
+	obs_data_set_bool  (data, "bouyomi_enabled",       bouyomiEnabled);
+
+	// 棒読みちゃん設定
+	obs_data_set_string(data, "bouyomi_host",        bouyomiHost.c_str());
+	obs_data_set_int   (data, "bouyomi_port",        bouyomiPort);
+	obs_data_set_int   (data, "bouyomi_voice",       bouyomiVoice);
+	obs_data_set_int   (data, "bouyomi_volume_min",  bouyomiVolumeMin);
+	obs_data_set_int   (data, "bouyomi_volume_max",  bouyomiVolumeMax);
+	obs_data_set_int   (data, "bouyomi_speed_min",   bouyomiSpeedMin);
+	obs_data_set_int   (data, "bouyomi_speed_max",   bouyomiSpeedMax);
+	obs_data_set_int   (data, "bouyomi_tone_min",    bouyomiToneMin);
+	obs_data_set_int   (data, "bouyomi_tone_max",    bouyomiToneMax);
 
 	// AivisSpeech [olh] パラメータ上下限
 	obs_data_set_double(data, "aivis_speed_min",        static_cast<double>(aivisSpeedMin));
@@ -409,6 +569,20 @@ void PluginConfig::save()
 	obs_data_set_double(data, "aivis_emotion_min",      static_cast<double>(aivisEmotionMin));
 	obs_data_set_double(data, "aivis_emotion_max",      static_cast<double>(aivisEmotionMax));
 
+	// ポイントシステム設定
+	obs_data_set_bool(data, "point_enabled",           pointEnabled);
+	obs_data_set_int (data, "point_comment_amount",    pointCommentAmount);
+	obs_data_set_int (data, "point_watch_interval",    pointWatchInterval);
+	obs_data_set_int (data, "point_watch_amount",      pointWatchAmount);
+	obs_data_set_int (data, "point_comment_cooldown",  pointCommentCooldown);
+	obs_data_set_int (data, "point_use_cooldown",      pointUseCooldown);
+
+	// エフェクト設定
+	obs_data_set_string(data, "effect_default_position", effectDefaultPosition.c_str());
+	obs_data_set_string(data, "effect_default_size",     effectDefaultSize.c_str());
+	obs_data_set_int   (data, "effect_max_concurrent",   effectMaxConcurrent);
+	obs_data_set_int   (data, "effect_max_queue",        effectMaxQueue);
+
 	// デバッグパネル表示設定
 	obs_data_set_bool(data, "debug_show_connection", debugShowConnection);
 	obs_data_set_bool(data, "debug_show_tts",        debugShowTts);
@@ -416,6 +590,8 @@ void PluginConfig::save()
 	obs_data_set_bool(data, "debug_show_vote",       debugShowVote);
 	obs_data_set_bool(data, "debug_show_log",            debugShowLog);
 	obs_data_set_bool(data, "debug_show_comment_detail", debugShowCommentDetail);
+	obs_data_set_bool(data, "debug_show_effect",         debugShowEffect);
+	obs_data_set_bool(data, "debug_show_point",          debugShowPoint);
 
 	// 配信一括設定
 	obs_data_set_string(data, "stream_twitch_title",    streamTwitchTitle.c_str());

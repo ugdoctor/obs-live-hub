@@ -73,6 +73,22 @@ target_sources(
     src/modules/AivisEngine.hpp
     src/modules/AivisStyleCache.cpp
     src/modules/AivisStyleCache.hpp
+    src/modules/EffectManager.cpp
+    src/modules/EffectManager.hpp
+    src/ui/EffectSettingsDialog.cpp
+    src/ui/EffectSettingsDialog.hpp
+    src/modules/PointManager.cpp
+    src/modules/PointManager.hpp
+    src/ui/PointSettingsDialog.cpp
+    src/ui/PointSettingsDialog.hpp
+    src/modules/BouyomiChanClient.cpp
+    src/modules/BouyomiChanClient.hpp
+    src/modules/EngineManager.cpp
+    src/modules/EngineManager.hpp
+    src/ui/BouyomiParamLimitDialog.cpp
+    src/ui/BouyomiParamLimitDialog.hpp
+    src/modules/ViewerTtsSettings.cpp
+    src/modules/ViewerTtsSettings.hpp
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")

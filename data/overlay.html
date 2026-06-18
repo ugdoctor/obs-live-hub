@@ -266,8 +266,12 @@
         }
         if (key === 'engine') {
           var eng = val.toLowerCase();
-          if (eng === 'webspeech' || eng === 'web') result.engine = 'webspeech';
+          if (eng === 'webspeech' || eng === 'web')         result.engine = 'webspeech';
           else if (eng === 'aivis' || eng === 'aivisspeech') result.engine = 'aivisspeech';
+          else if (eng === 'sharevox')                       result.engine = 'sharevox';
+          else if (eng === 'lmroid')                         result.engine = 'lmroid';
+          else if (eng === 'itvoice')                        result.engine = 'itvoice';
+          else if (eng === 'bouyomi')                        result.engine = 'bouyomi';
         }
         if (key === 'model') {
           if (val.length > 0 && val.length <= 80) result.model = val;
@@ -276,6 +280,16 @@
         if (key === 'aivis_speed' || key === 'aivis_pitch' || key === 'aivis_intonation' ||
             key === 'aivis_volume' || key === 'aivis_emotion') {
           var v = parseFloat(val);
+          if (isNaN(v)) {
+            if (!result._errors) result._errors = [];
+            result._errors.push(key);
+          } else {
+            result[key] = v;
+          }
+        }
+        // 棒読みちゃんパラメータ（整数チェックのみ、クランプはC++側）
+        if (key === 'bouyomi_volume' || key === 'bouyomi_speed' || key === 'bouyomi_tone') {
+          var v = parseInt(val, 10);
           if (isNaN(v)) {
             if (!result._errors) result._errors = [];
             result._errors.push(key);
@@ -340,6 +354,13 @@
       if (cmd.aivis_volume     !== undefined) { aivisMsg.volume_scale = cmd.aivis_volume;     hasAivis = true; }
       if (cmd.aivis_emotion    !== undefined) { aivisMsg.emotion      = cmd.aivis_emotion;    hasAivis = true; }
       if (hasAivis) sendWs(aivisMsg);
+      // 棒読みちゃんパラメータ（C++ で上下限クランプ後 broadcast）
+      var bouyomiMsg = { type: 'olh_bouyomi_params_request', userId: user };
+      var hasBouyomi = false;
+      if (cmd.bouyomi_volume !== undefined) { bouyomiMsg.volume = cmd.bouyomi_volume; hasBouyomi = true; }
+      if (cmd.bouyomi_speed  !== undefined) { bouyomiMsg.speed  = cmd.bouyomi_speed;  hasBouyomi = true; }
+      if (cmd.bouyomi_tone   !== undefined) { bouyomiMsg.tone   = cmd.bouyomi_tone;   hasBouyomi = true; }
+      if (hasBouyomi) sendWs(bouyomiMsg);
       // 数値不正エラーをシステムコメントで表示
       if (cmd._errors && cmd._errors.length > 0) {
         cmd._errors.forEach(function(key) {

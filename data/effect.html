@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>obs-live-hub Effect</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 100%; height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+#stage {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+.effect-item {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  opacity: 1;
+  transition: opacity 0.4s ease;
+}
+.effect-item.fading { opacity: 0; }
+.effect-item img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+/* size presets */
+.size-small  { width: 100px; height: 100px; }
+.size-medium { width: 200px; height: 200px; }
+.size-large  { width: 300px; height: 300px; }
+/* position presets – anchor point is element center */
+.pos-center       { top: 50%;  left: 50%;  }
+.pos-top          { top: 10%;  left: 50%;  }
+.pos-bottom       { top: 90%;  left: 50%;  }
+.pos-top-left     { top: 10%;  left: 10%;  }
+.pos-top-right    { top: 10%;  left: 90%;  }
+.pos-bottom-left  { top: 90%;  left: 10%;  }
+.pos-bottom-right { top: 90%;  left: 90%;  }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script>
+'use strict';
+
+var WS_URL = 'ws://127.0.0.1:8765';
+var ws = null;
+
+var VALID_POSITIONS = [
+  'center', 'top', 'bottom',
+  'top-left', 'top-right', 'bottom-left', 'bottom-right'
+];
+
+function connectWs() {
+  if (ws && (ws.readyState === WebSocket.CONNECTING ||
+             ws.readyState === WebSocket.OPEN)) return;
+
+  ws = new WebSocket(WS_URL);
+  var thisWs = ws;
+
+  ws.onerror = function() { if (ws === thisWs) ws = null; };
+  ws.onclose = function() { if (ws === thisWs) ws = null; };
+  ws.onmessage = function(e) {
+    try {
+      var data = JSON.parse(e.data);
+      if (data.type === 'effect_trigger') showEffect(data);
+    } catch (_) {}
+  };
+}
+
+function showEffect(data) {
+  var stage = document.getElementById('stage');
+  var item  = document.createElement('div');
+  item.className = 'effect-item';
+
+  // size
+  var size = (data.size || 'medium').toLowerCase();
+  if (size === 'small')      item.classList.add('size-small');
+  else if (size === 'large') item.classList.add('size-large');
+  else                        item.classList.add('size-medium');
+
+  // position
+  var pos = (data.position || 'center').toLowerCase().replace(/\s+/g, '-');
+  if (VALID_POSITIONS.indexOf(pos) < 0) pos = 'center';
+  item.classList.add('pos-' + pos);
+
+  // image
+  var img = document.createElement('img');
+  img.src = data.file || '';
+  item.appendChild(img);
+  stage.appendChild(item);
+
+  // remove after duration + fade
+  var duration = (data.duration > 0 ? data.duration : 3000);
+  setTimeout(function() {
+    item.classList.add('fading');
+    setTimeout(function() {
+      if (item.parentNode) item.parentNode.removeChild(item);
+    }, 450);
+  }, duration);
+}
+
+connectWs();
+setInterval(function() {
+  if (!ws || ws.readyState === WebSocket.CLOSED ||
+             ws.readyState === WebSocket.CLOSING) {
+    connectWs();
+  }
+}, 1000);
+</script>
+</body>
+</html>
