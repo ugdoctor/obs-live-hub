@@ -1,4 +1,5 @@
 #pragma once
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
@@ -7,6 +8,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QSlider>
 #include <QSpinBox>
 #include <QVector>
@@ -29,11 +31,14 @@ public:
 
 private slots:
 	void accept() override;
-	void onEngineChanged(int index);
+	void onDefaultEngineChanged(int engineIdx);
+	void onEngineEnabledToggled(int engineIdx, bool enabled);
 	void onRefreshSpeakersClicked();
 	void onSpeakerChanged(int index);
 	void onSpeakersLoaded(QVector<AivisSpeakerInfo> speakers);
 	void updateEngineStatus();
+	void refreshEngineStatuses();
+	void onRecheckClicked();
 
 private:
 	void loadFromConfig();
@@ -51,9 +56,16 @@ private:
 	QSpinBox  *maxLengthSpin_;
 	QCheckBox *twitchCheck_;
 	QCheckBox *youtubeCheck_;
+	QCheckBox *checkEngineConnectionCheck_;
 
-	// ── TTSエンジン選択 ──
-	QComboBox *engineCombo_;
+	// ── TTSエンジン選択 (有効化 + デフォルト + 接続状態) ──
+	static constexpr int kEngineCount = 6;
+	QGroupBox    *engineListGroup_;
+	QCheckBox    *engineEnabledCheck_[kEngineCount];
+	QRadioButton *engineDefaultRadio_[kEngineCount];
+	QLabel       *engineStatusLabel_[kEngineCount];
+	QButtonGroup *defaultGroup_;
+	QPushButton  *recheckBtn_;
 
 	// ── AivisSpeech 設定グループ ──
 	QGroupBox   *aivisGroup_;
@@ -61,7 +73,7 @@ private:
 	// エンジン制御
 	QLineEdit   *enginePathEdit_;
 	QPushButton *browseEngineBtn_;
-	QLabel      *engineStatusLabel_;
+	QLabel      *aivisEngineStatusLabel_;
 	QPushButton *startEngineBtn_;
 	QPushButton *stopEngineBtn_;
 	QCheckBox   *autoStartCheck_;

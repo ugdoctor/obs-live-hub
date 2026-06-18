@@ -20,6 +20,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "core/PluginConfig.hpp"
 #include "modules/AivisEngine.hpp"
 #include "modules/AivisStyleCache.hpp"
+#include "modules/EngineManager.hpp"
 
 #include <QApplication>
 #include <QFile>
@@ -197,11 +198,48 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 
 	twitchCheck_  = new QCheckBox("Twitch コメントを読み上げる", this);
 	youtubeCheck_ = new QCheckBox("YouTube コメントを読み上げる", this);
+	checkEngineConnectionCheck_ = new QCheckBox(
+		"エンジン接続チェックを有効にする（OFFにすると未接続エンジンでも強制的に使用）", this);
 
-	// ── TTSエンジン選択 ──
-	engineCombo_ = new QComboBox(this);
-	for (const auto &e : kEngines)
-		engineCombo_->addItem(e.label);
+	// ── TTSエンジン選択 (有効化 + デフォルト) ──
+	engineListGroup_ = new QGroupBox("TTSエンジン", this);
+	auto *engineGrid = new QGridLayout(engineListGroup_);
+	engineGrid->setSpacing(6);
+
+	auto *hdrEnabled = new QLabel("有効化", engineListGroup_);
+	auto *hdrDefault = new QLabel("デフォルト", engineListGroup_);
+	auto *hdrStatus  = new QLabel("接続状態", engineListGroup_);
+	hdrEnabled->setAlignment(Qt::AlignCenter);
+	hdrDefault->setAlignment(Qt::AlignCenter);
+	engineGrid->addWidget(hdrEnabled, 0, 0, Qt::AlignCenter);
+	engineGrid->addWidget(hdrDefault, 0, 1);
+	engineGrid->addWidget(hdrStatus,  0, 2);
+	engineGrid->setColumnStretch(1, 1); // エンジン名列を伸縮させる
+
+	defaultGroup_ = new QButtonGroup(this);
+
+	for (int i = 0; i < kEngineCount; ++i) {
+		engineEnabledCheck_[i] = new QCheckBox(engineListGroup_);
+		engineDefaultRadio_[i] = new QRadioButton(kEngines[i].label, engineListGroup_);
+		engineStatusLabel_[i]  = new QLabel("―", engineListGroup_);
+		engineStatusLabel_[i]->setMinimumWidth(90);
+		defaultGroup_->addButton(engineDefaultRadio_[i], i);
+
+		engineGrid->addWidget(engineEnabledCheck_[i], i + 1, 0, Qt::AlignCenter);
+		engineGrid->addWidget(engineDefaultRadio_[i], i + 1, 1);
+		engineGrid->addWidget(engineStatusLabel_[i],  i + 1, 2);
+
+		if (i == 0) { // webspeech: 常時有効、チェックを外せない
+			engineEnabledCheck_[i]->setChecked(true);
+			engineEnabledCheck_[i]->setEnabled(false);
+			engineStatusLabel_[i]->setText("常時利用可");
+			engineStatusLabel_[i]->setStyleSheet("color: #00aa44;");
+		}
+		engineDefaultRadio_[i]->setEnabled(i == 0);
+	}
+
+	recheckBtn_ = new QPushButton("接続状態を再確認", engineListGroup_);
+	engineGrid->addWidget(recheckBtn_, kEngineCount + 1, 0, 1, 3);
 
 	// ── VOICEVOX互換エンジン設定グループ ──
 	aivisGroup_ = new QGroupBox("VOICEVOX互換エンジン設定", this);
@@ -217,8 +255,8 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 	pathH->addWidget(enginePathEdit_, 1);
 	pathH->addWidget(browseEngineBtn_);
 
-	engineStatusLabel_ = new QLabel("● 停止中", aivisGroup_);
-	engineStatusLabel_->setStyleSheet("color: #cc3333; font-weight: bold;");
+	aivisEngineStatusLabel_ = new QLabel("● 停止中", aivisGroup_);
+	aivisEngineStatusLabel_->setStyleSheet("color: #cc3333; font-weight: bold;");
 
 	startEngineBtn_ = new QPushButton("起動", aivisGroup_);
 	stopEngineBtn_  = new QPushButton("停止", aivisGroup_);
@@ -226,7 +264,7 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 	auto *ctrlRow = new QWidget(aivisGroup_);
 	auto *ctrlH   = new QHBoxLayout(ctrlRow);
 	ctrlH->setContentsMargins(0, 0, 0, 0);
-	ctrlH->addWidget(engineStatusLabel_, 1);
+	ctrlH->addWidget(aivisEngineStatusLabel_, 1);
 	ctrlH->addWidget(startEngineBtn_);
 	ctrlH->addWidget(stopEngineBtn_);
 
@@ -349,7 +387,8 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 	form->addRow("最大文字数:",  maxLengthSpin_);
 	form->addRow("",            twitchCheck_);
 	form->addRow("",            youtubeCheck_);
-	form->addRow("TTSエンジン:", engineCombo_);
+	form->addRow("",            checkEngineConnectionCheck_);
+	form->addRow(engineListGroup_);
 	form->addRow(aivisGroup_);
 	form->addRow(bouyomiGroup_);
 	form->addRow(buttonBox_);
@@ -365,8 +404,16 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 		pitchLabel_->setText(QString::number(v / 100.0, 'f', 2));
 	});
 
-	QObject::connect(engineCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-	                 this, &TtsSpeechDialog::onEngineChanged);
+	QObject::connect(defaultGroup_, &QButtonGroup::idClicked,
+	                 this, &TtsSpeechDialog::onDefaultEngineChanged);
+
+	for (int i = 1; i < kEngineCount; ++i) { // webspeech(0) は常時有効なので除外
+		QObject::connect(engineEnabledCheck_[i], &QCheckBox::toggled, this,
+		                 [this, i](bool checked) { onEngineEnabledToggled(i, checked); });
+	}
+
+	QObject::connect(recheckBtn_, &QPushButton::clicked,
+	                 this, &TtsSpeechDialog::onRecheckClicked);
 
 	QObject::connect(browseEngineBtn_, &QPushButton::clicked, this, [this]() {
 		const QString path = QFileDialog::getOpenFileName(
@@ -401,7 +448,10 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 	connect(buttonBox_, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
 	auto *statusTimer = new QTimer(this);
-	connect(statusTimer, &QTimer::timeout, this, &TtsSpeechDialog::updateEngineStatus);
+	connect(statusTimer, &QTimer::timeout, this, [this]() {
+		updateEngineStatus();
+		refreshEngineStatuses();
+	});
 	statusTimer->start(500);
 
 	loadFromConfig();
@@ -410,10 +460,10 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 // ──────────────────────────────────────────────────────────────
 // スロット実装
 // ──────────────────────────────────────────────────────────────
-void TtsSpeechDialog::onEngineChanged(int index)
+void TtsSpeechDialog::onDefaultEngineChanged(int engineIdx)
 {
-	const bool voicevox  = (index >= 1 && index <= 4);
-	const bool isBouyomi = (index == 5);
+	const bool voicevox  = (engineIdx >= 1 && engineIdx <= 4);
+	const bool isBouyomi = (engineIdx == 5);
 	aivisGroup_->setVisible(voicevox);
 	bouyomiGroup_->setVisible(isBouyomi);
 
@@ -421,7 +471,6 @@ void TtsSpeechDialog::onEngineChanged(int index)
 		const auto &cfg = PluginConfig::instance();
 		bouyomiHostEdit_->setText(QString::fromStdString(cfg.bouyomiHost));
 		bouyomiPortSpin_->setValue(cfg.bouyomiPort);
-		// voice スピンを設定すると valueChanged → combo も連動する
 		bouyomiVoiceSpin_->setValue(cfg.bouyomiVoice);
 		adjustSize();
 		return;
@@ -433,7 +482,7 @@ void TtsSpeechDialog::onEngineChanged(int index)
 	}
 
 	// グループタイトル・プレースホルダーを更新
-	const auto &e = kEngines[index];
+	const auto &e = kEngines[engineIdx];
 	aivisGroup_->setTitle(QString(e.label));
 	enginePathEdit_->setPlaceholderText(e.pathPlaceholder);
 	aivisUrlEdit_->setPlaceholderText(e.defaultUrl);
@@ -447,7 +496,7 @@ void TtsSpeechDialog::onEngineChanged(int index)
 		autoStartCheck_->setChecked(autoS);
 	};
 
-	if (index == 1) { // aivisspeech
+	if (engineIdx == 1) { // aivisspeech
 		QString enginePath = QString::fromStdString(cfg.aivisEnginePath);
 #ifdef _WIN32
 		if (enginePath.isEmpty()) {
@@ -466,11 +515,11 @@ void TtsSpeechDialog::onEngineChanged(int index)
 		aivisUrlEdit_->setText(QString::fromStdString(cfg.aivisUrl));
 		enginePathEdit_->setText(enginePath);
 		autoStartCheck_->setChecked(cfg.aivisAutoStart);
-	} else if (index == 2) { // sharevox
+	} else if (engineIdx == 2) { // sharevox
 		loadEngineValues(cfg.sharevoxUrl, cfg.sharevoxEnginePath, cfg.sharevoxAutoStart);
-	} else if (index == 3) { // lmroid
+	} else if (engineIdx == 3) { // lmroid
 		loadEngineValues(cfg.lmroidUrl, cfg.lmroidEnginePath, cfg.lmroidAutoStart);
-	} else if (index == 4) { // itvoice
+	} else if (engineIdx == 4) { // itvoice
 		loadEngineValues(cfg.itvoiceUrl, cfg.itvoiceEnginePath, cfg.itvoiceAutoStart);
 	}
 
@@ -482,19 +531,110 @@ void TtsSpeechDialog::onEngineChanged(int index)
 	adjustSize();
 }
 
+void TtsSpeechDialog::onEngineEnabledToggled(int engineIdx, bool enabled)
+{
+	engineDefaultRadio_[engineIdx]->setEnabled(enabled);
+
+	if (!enabled && engineDefaultRadio_[engineIdx]->isChecked()) {
+		// デフォルトに設定されていたエンジンが無効化された → webspeech に切り替え
+		engineDefaultRadio_[0]->setChecked(true);
+		onDefaultEngineChanged(0);
+	}
+}
+
 void TtsSpeechDialog::updateEngineStatus()
 {
-	if (AivisEngine::isRunning()) {
-		engineStatusLabel_->setText("● 起動中");
-		engineStatusLabel_->setStyleSheet("color: #00cc44; font-weight: bold;");
-		startEngineBtn_->setEnabled(false);
-		stopEngineBtn_->setEnabled(true);
-	} else {
-		engineStatusLabel_->setText("● 停止中");
-		engineStatusLabel_->setStyleSheet("color: #cc3333; font-weight: bold;");
-		startEngineBtn_->setEnabled(true);
-		stopEngineBtn_->setEnabled(false);
+	// 「起動」「停止」ボタンの有効/無効のみ担当
+	// ラベル更新は refreshEngineStatuses() が担当
+	const bool running = AivisEngine::isRunning();
+	startEngineBtn_->setEnabled(!running);
+	stopEngineBtn_->setEnabled(running);
+}
+
+void TtsSpeechDialog::refreshEngineStatuses()
+{
+	const auto statuses = EngineManager::getAllStatuses();
+
+	for (int i = 1; i < kEngineCount; ++i) { // webspeech(0) は常時利用可で固定
+		if (!engineEnabledCheck_[i]->isChecked()) {
+			engineStatusLabel_[i]->setText("―");
+			engineStatusLabel_[i]->setStyleSheet("color: gray;");
+			continue;
+		}
+
+		const auto it = statuses.find(std::string(kEngines[i].id));
+		if (it == statuses.end()) {
+			engineStatusLabel_[i]->setText("未確認");
+			engineStatusLabel_[i]->setStyleSheet("color: gray;");
+			continue;
+		}
+
+		switch (it->second.state) {
+		case EngineManager::EngineState::NotStarted:
+			engineStatusLabel_[i]->setText("未確認");
+			engineStatusLabel_[i]->setStyleSheet("color: gray;");
+			break;
+		case EngineManager::EngineState::Starting:
+			engineStatusLabel_[i]->setText("確認中...");
+			engineStatusLabel_[i]->setStyleSheet("color: #cc8800;");
+			break;
+		case EngineManager::EngineState::Connected:
+			if (it->second.speakerCount > 0)
+				engineStatusLabel_[i]->setText(
+					QString("接続中 (%1話者)").arg(it->second.speakerCount));
+			else
+				engineStatusLabel_[i]->setText("接続中");
+			engineStatusLabel_[i]->setStyleSheet("color: #00aa44;");
+			break;
+		case EngineManager::EngineState::Error:
+			engineStatusLabel_[i]->setText("停止中");
+			engineStatusLabel_[i]->setStyleSheet("color: #cc3333;");
+			break;
+		}
 	}
+
+	// 下部パネルの「エンジン状態」ラベルも同期する
+	if (aivisGroup_->isVisible()) {
+		const int idx = defaultGroup_->checkedId();
+		if (idx >= 1 && idx <= 4) {
+			const auto it = statuses.find(std::string(kEngines[idx].id));
+			if (it == statuses.end()) {
+				aivisEngineStatusLabel_->setText("● 未確認");
+				aivisEngineStatusLabel_->setStyleSheet("color: gray; font-weight: bold;");
+			} else {
+				switch (it->second.state) {
+				case EngineManager::EngineState::Starting:
+					aivisEngineStatusLabel_->setText("● 確認中...");
+					aivisEngineStatusLabel_->setStyleSheet("color: #cc8800; font-weight: bold;");
+					break;
+				case EngineManager::EngineState::Connected:
+					aivisEngineStatusLabel_->setText("● 接続中");
+					aivisEngineStatusLabel_->setStyleSheet("color: #00cc44; font-weight: bold;");
+					break;
+				case EngineManager::EngineState::NotStarted:
+				case EngineManager::EngineState::Error:
+					aivisEngineStatusLabel_->setText("● 停止中");
+					aivisEngineStatusLabel_->setStyleSheet("color: #cc3333; font-weight: bold;");
+					break;
+				}
+			}
+		}
+	}
+}
+
+void TtsSpeechDialog::onRecheckClicked()
+{
+	// 画面上のチェック状態と PluginConfig がズレていると refreshAll() が誤動作するため、
+	// 先に現在の UI 状態を保存してから接続確認を行う。
+	saveToConfig();
+	recheckBtn_->setEnabled(false);
+	EngineManager::refreshAll();
+	refreshEngineStatuses(); // 即座に "確認中..." 表示
+	// HTTP チェックは最大 3 秒のタイムアウト。5 秒後にボタンを再有効化
+	QTimer::singleShot(5000, this, [this]() {
+		recheckBtn_->setEnabled(true);
+		refreshEngineStatuses();
+	});
 }
 
 void TtsSpeechDialog::onRefreshSpeakersClicked()
@@ -617,16 +757,36 @@ void TtsSpeechDialog::loadFromConfig()
 	maxLengthSpin_->setValue(cfg.ttsMaxLength);
 	twitchCheck_->setChecked(cfg.ttsTwitch);
 	youtubeCheck_->setChecked(cfg.ttsYoutube);
+	checkEngineConnectionCheck_->setChecked(cfg.ttsCheckEngineConnection);
 
-	// エンジン選択（onEngineChanged が URL/パス/autostart をロードする）
-	int engineIdx = 0;
-	if      (cfg.ttsEngine == "aivisspeech") engineIdx = 1;
-	else if (cfg.ttsEngine == "sharevox")    engineIdx = 2;
-	else if (cfg.ttsEngine == "lmroid")      engineIdx = 3;
-	else if (cfg.ttsEngine == "itvoice")     engineIdx = 4;
-	else if (cfg.ttsEngine == "bouyomi")     engineIdx = 5;
-	engineCombo_->setCurrentIndex(engineIdx);
-	// setCurrentIndex が onEngineChanged をトリガーし URL/path/autostart がセットされる
+	// 有効化チェックボックス（シグナルをブロックして一括設定し、後で手動同期する）
+	{
+		QSignalBlocker b1(engineEnabledCheck_[1]);
+		QSignalBlocker b2(engineEnabledCheck_[2]);
+		QSignalBlocker b3(engineEnabledCheck_[3]);
+		QSignalBlocker b4(engineEnabledCheck_[4]);
+		QSignalBlocker b5(engineEnabledCheck_[5]);
+		engineEnabledCheck_[1]->setChecked(cfg.aivisspeechEnabled);
+		engineEnabledCheck_[2]->setChecked(cfg.sharevoxEnabled);
+		engineEnabledCheck_[3]->setChecked(cfg.lmroidEnabled);
+		engineEnabledCheck_[4]->setChecked(cfg.itvoiceEnabled);
+		engineEnabledCheck_[5]->setChecked(cfg.bouyomiEnabled);
+	}
+	for (int i = 0; i < kEngineCount; ++i)
+		engineDefaultRadio_[i]->setEnabled(engineEnabledCheck_[i]->isChecked());
+
+	// デフォルトエンジンのラジオボタン選択
+	int defaultIdx = 0;
+	if      (cfg.ttsEngine == "aivisspeech") defaultIdx = 1;
+	else if (cfg.ttsEngine == "sharevox")    defaultIdx = 2;
+	else if (cfg.ttsEngine == "lmroid")      defaultIdx = 3;
+	else if (cfg.ttsEngine == "itvoice")     defaultIdx = 4;
+	else if (cfg.ttsEngine == "bouyomi")     defaultIdx = 5;
+	// デフォルトエンジンが無効化されていたら webspeech にフォールバック
+	if (!engineDefaultRadio_[defaultIdx]->isEnabled())
+		defaultIdx = 0;
+	engineDefaultRadio_[defaultIdx]->setChecked(true);
+	onDefaultEngineChanged(defaultIdx); // URL/path/autostart をロードしてパネル表示切り替え
 
 	// 保存済み話者名をプレースホルダーとして表示
 	if (!cfg.aivisSpeakerName.empty()) {
@@ -637,6 +797,8 @@ void TtsSpeechDialog::loadFromConfig()
 	}
 
 	updateEngineStatus();
+	EngineManager::refreshAll();
+	refreshEngineStatuses();
 }
 
 void TtsSpeechDialog::saveToConfig()
@@ -648,10 +810,11 @@ void TtsSpeechDialog::saveToConfig()
 	cfg.ttsPitch        = pitchSlider_->value() / 100.0f;
 	cfg.ttsReadUsername = readUsernameCheck_->isChecked();
 	cfg.ttsMaxLength    = maxLengthSpin_->value();
-	cfg.ttsTwitch       = twitchCheck_->isChecked();
-	cfg.ttsYoutube      = youtubeCheck_->isChecked();
+	cfg.ttsTwitch                = twitchCheck_->isChecked();
+	cfg.ttsYoutube               = youtubeCheck_->isChecked();
+	cfg.ttsCheckEngineConnection = checkEngineConnectionCheck_->isChecked();
 
-	const int    idx  = engineCombo_->currentIndex();
+	const int    idx  = defaultGroup_->checkedId();
 	const QString url  = aivisUrlEdit_->text().trimmed();
 	const QString path = enginePathEdit_->text().trimmed();
 	const bool   autoS = autoStartCheck_->isChecked();
@@ -698,6 +861,13 @@ void TtsSpeechDialog::saveToConfig()
 			}
 		}
 	}
+
+	// 有効化フラグをチェックボックスの状態から設定（webspeech は常時有効なのでフラグ不要）
+	cfg.aivisspeechEnabled = engineEnabledCheck_[1]->isChecked();
+	cfg.sharevoxEnabled    = engineEnabledCheck_[2]->isChecked();
+	cfg.lmroidEnabled      = engineEnabledCheck_[3]->isChecked();
+	cfg.itvoiceEnabled     = engineEnabledCheck_[4]->isChecked();
+	cfg.bouyomiEnabled     = engineEnabledCheck_[5]->isChecked();
 	cfg.save();
 }
 
