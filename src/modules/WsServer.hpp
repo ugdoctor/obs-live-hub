@@ -16,13 +16,28 @@
 // ブラウザソースからのローカル接続専用 (127.0.0.1)
 class WsServer {
 public:
+	enum class ListenState {
+		NotStarted,  // 未起動 or 正常停止
+		Listening,   // bind/listen 成功・稼働中
+		BindFailed,  // bind() 失敗（ゾンビソケット等によるポート占有）
+		ListenFailed // listen() 失敗
+	};
+
 	explicit WsServer(uint16_t port);
 	~WsServer();
 
 	bool start();
 	void stop();
 	bool isRunning() const { return running_.load(); }
+	ListenState listenState() const { return listenState_.load(); }
 	uint16_t port() const { return port_; }
+
+	// 接続確立済みクライアント数を返す (スレッドセーフ)
+	int clientCount() const
+	{
+		std::lock_guard<std::mutex> lock(const_cast<std::mutex &>(clientsMutex_));
+		return static_cast<int>(clients_.size());
+	}
 
 	// JSON テキストを全 WebSocket クライアントにブロードキャスト (スレッドセーフ)
 	void broadcast(const std::string &jsonText);
@@ -47,6 +62,7 @@ private:
 	uint16_t port_;
 	SOCKET listenSock_ = INVALID_SOCKET;
 	std::atomic<bool> running_{false};
+	std::atomic<ListenState> listenState_{ListenState::NotStarted};
 	std::atomic<int> activeClients_{0};
 	std::thread acceptThread_;
 	std::mutex clientsMutex_;

@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>obs-live-hub チャットオーバーレイ</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      background: transparent;
+      font-family: 'Segoe UI', 'Yu Gothic UI', 'Meiryo', sans-serif;
+      overflow: hidden;
+    }
+
+    /* ─── ステージ（画面下部固定） ───────────────────────────── */
+    #stage {
+      position: fixed;
+      bottom: 16px;
+      left: 14px;
+      right: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    /* ─── バブル行 ────────────────────────────────────────────── */
+    .brow {
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+      animation: bIn 0.35s cubic-bezier(.25,.8,.25,1) forwards;
+      /* 既存要素の age クラス変更に追従するトランジション */
+      transition: opacity 0.45s ease, font-size 0.45s ease,
+                  padding-left 0.45s ease, padding-right 0.45s ease;
+    }
+    .brow.right { flex-direction: row-reverse; }
+
+    /* 左行は右側に余白（内側に寄せる）、右行は左側に余白 */
+    .brow.left  { padding-right: var(--h-offset, 60px); }
+    .brow.right { padding-left:  var(--h-offset, 60px); }
+
+    @keyframes bIn {
+      from { opacity: 0; transform: translateY(14px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* age-0 = 直近（読み上げ中）、数字が大きいほど古い */
+    .age-0 { opacity: 1.00; font-size: 15px; }
+    .age-1 { opacity: 0.75; font-size: 13px; }
+    .age-2 { opacity: 0.52; font-size: 12px; }
+    .age-3 { opacity: 0.34; font-size: 11px; }
+    .age-4 { opacity: 0.20; font-size: 10px; }
+
+    /* ─── アイコン列 ──────────────────────────────────────────── */
+    .icol {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .ava {
+      border-radius: 50%;
+      object-fit: cover;
+      display: block;
+      transition: width 0.45s ease, height 0.45s ease;
+    }
+    .age-0 .ava { width: 48px; height: 48px; }
+    .age-1 .ava { width: 40px; height: 40px; }
+    .age-2 .ava { width: 34px; height: 34px; }
+    .age-3 .ava { width: 28px; height: 28px; }
+    .age-4 .ava { width: 24px; height: 24px; }
+
+    .spk { font-size: 16px; line-height: 1; }
+
+    /* ─── 吹き出し ────────────────────────────────────────────── */
+    .bubble {
+      position: relative;
+      max-width: calc(100% - 66px);
+      background: rgba(28, 28, 34, 0.90);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 14px;
+      padding: 8px 12px;
+      transition: background 0.45s ease, border-color 0.45s ease,
+                  box-shadow 0.45s ease;
+    }
+    /* 直近バブルはハイライト枠 */
+    .age-0 .bubble {
+      background: rgba(36, 36, 50, 0.96);
+      border-color: rgba(90, 170, 255, 0.50);
+      box-shadow: 0 0 0 1px rgba(90, 170, 255, 0.22),
+                  0 3px 18px rgba(0, 0, 0, 0.55);
+    }
+
+    /* 吹き出しのしっぽ：左行 → 泡の左側 */
+    .brow.left .bubble::before {
+      content: '';
+      position: absolute;
+      bottom: 14px;
+      left: -8px;
+      border: 8px solid transparent;
+      border-right-color: rgba(28, 28, 34, 0.90);
+      border-left: 0;
+    }
+    .brow.right .bubble::before {
+      content: '';
+      position: absolute;
+      bottom: 14px;
+      right: -8px;
+      border: 8px solid transparent;
+      border-left-color: rgba(28, 28, 34, 0.90);
+      border-right: 0;
+    }
+    /* 直近バブルのしっぽ色を背景に合わせる */
+    .age-0.brow.left  .bubble::before { border-right-color: rgba(36, 36, 50, 0.96); }
+    .age-0.brow.right .bubble::before { border-left-color:  rgba(36, 36, 50, 0.96); }
+
+    /* ─── ユーザー名・テキスト ──────────────────────────────── */
+    .bname {
+      display: block;
+      font-size: 0.75em;
+      font-weight: 700;
+      margin-bottom: 3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 200px;
+    }
+    .brow.platform-twitch  .bname { color: #a78fff; }
+    .brow.platform-youtube .bname { color: #ff6060; }
+    .brow.platform-system  .bname { color: #888; }
+
+    .btext {
+      color: #efefef;
+      line-height: 1.5;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+  </style>
+</head>
+<body>
+<div id="stage"></div>
+<script>
+  var WS_PORT    = 8765;
+  var maxBubbles = 3;
+  var zigzagMode = 'alternate'; // 'alternate' | 'fixed'
+  var altCounter = 0;
+  var bubbleEls  = []; // DOM要素の配列（index 0 = 最古、末尾 = 最新）
+
+  // スピーカーアイコン消去タイマー（直近バブル用）
+  var speakerTimer = null;
+
+  /* プレースホルダーアイコン（アバター画像未取得時用） */
+  var BLANK_AVA = 'data:image/svg+xml,' + encodeURIComponent(
+    '<svg viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">' +
+    '<circle cx="18" cy="18" r="18" fill="#4a4a4a"/>' +
+    '<circle cx="18" cy="13" r="6" fill="#888"/>' +
+    '<path d="M5 34c0-7.18 5.82-13 13-13s13 5.82 13 13" fill="#888"/>' +
+    '</svg>');
+
+  /* djb2 ハッシュ → 0(左) / 1(右)。固定モード用 */
+  function hashSide(s) {
+    var h = 0;
+    for (var i = 0; i < s.length; i++)
+      h = (((h << 5) - h) + s.charCodeAt(i)) | 0;
+    return h & 1;
+  }
+
+  function nextSide(user) {
+    if (zigzagMode === 'fixed') return hashSide(user || '');
+    var s = altCounter & 1;
+    altCounter++;
+    return s; // 0=左, 1=右
+  }
+
+  /* HTML エスケープ */
+  function esc(s) {
+    return ('' + s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  /* 全バブルの age クラスとスピーカーバッジ表示を更新 */
+  function updateAgeClasses() {
+    var n = bubbleEls.length;
+    bubbleEls.forEach(function(el, i) {
+      for (var a = 0; a <= 4; a++) el.classList.remove('age-' + a);
+      var age = n - 1 - i; // 末尾要素が age-0（最新）
+      el.classList.add('age-' + Math.min(age, 4));
+      // age-0 以外は強制的に非表示（保険）
+      if (age > 0) {
+        var spk = el.querySelector('.spk');
+        if (spk) spk.style.display = 'none';
+      }
+    });
+  }
+
+  /* 新しいバブルを追加 */
+  function addBubble(data) {
+    var user     = ((data.user     || '')).trim();
+    var text     = ((data.text     || '')).trim();
+    var platform = ((data.platform || '')).toLowerCase();
+    var avatar   = data.avatar || '';
+    if (!text) return;
+
+    var side  = nextSide(user);
+    var stage = document.getElementById('stage');
+
+    // 上限超過時は最古を除去
+    if (bubbleEls.length >= maxBubbles) {
+      stage.removeChild(bubbleEls.shift());
+    }
+
+    var sideClass     = side === 1 ? 'right' : 'left';
+    var platformClass = 'platform-' + (platform || 'twitch');
+    var imgSrc        = avatar || BLANK_AVA;
+
+    var el = document.createElement('div');
+    el.className = 'brow age-0 ' + sideClass + ' ' + platformClass;
+    el.innerHTML =
+      '<div class="icol">' +
+        '<img class="ava" src="' + esc(imgSrc) + '">' +
+        '<div class="spk">🔊</div>' +
+      '</div>' +
+      '<div class="bubble">' +
+        '<span class="bname">' + esc(user) + '</span>' +
+        '<span class="btext">' + esc(text) + '</span>' +
+      '</div>';
+
+    // アバター読み込み失敗時のフォールバック
+    var imgEl = el.querySelector('.ava');
+    imgEl.onerror = function() { this.onerror = null; this.src = BLANK_AVA; };
+
+    stage.appendChild(el);
+    bubbleEls.push(el);
+    updateAgeClasses();
+
+    // 前のタイマーをクリアして、このバブル用の消去タイマーを設定
+    if (speakerTimer) clearTimeout(speakerTimer);
+    var thisEl = el;
+    var delay = Math.max(2000, text.length * 180);
+    speakerTimer = setTimeout(function() {
+      var spk = thisEl.querySelector('.spk');
+      if (spk) spk.style.display = 'none';
+      speakerTimer = null;
+    }, delay);
+  }
+
+  /* 表示件数上限が変更された場合に超過分を除去 */
+  function applyMaxBubbles(newMax) {
+    maxBubbles = newMax;
+    var stage = document.getElementById('stage');
+    while (bubbleEls.length > maxBubbles) {
+      stage.removeChild(bubbleEls.shift());
+    }
+    updateAgeClasses();
+  }
+
+  /* 横オフセットをCSS変数として反映 */
+  function applyHorizontalOffset(px) {
+    document.documentElement.style.setProperty('--h-offset', px + 'px');
+  }
+
+  /* ─── WebSocket ───────────────────────────────────────────── */
+  var ws = null;
+
+  function connectWs() {
+    if (ws && (ws.readyState === WebSocket.CONNECTING ||
+               ws.readyState === WebSocket.OPEN)) return;
+    ws = new WebSocket('ws://127.0.0.1:' + WS_PORT);
+    var ref = ws;
+    ws.onerror = function() { if (ws === ref) ws = null; };
+    ws.onclose = function() { if (ws === ref) ws = null; };
+    ws.onmessage = function(e) {
+      try {
+        var d = JSON.parse(e.data);
+        if (d.type === 'tts_speaking_start') {
+          addBubble(d);
+        } else if (d.type === 'conversation_config') {
+          if (typeof d.maxBubbles === 'number' &&
+              d.maxBubbles >= 1 && d.maxBubbles <= 5) {
+            applyMaxBubbles(d.maxBubbles);
+          }
+          if (d.zigzagMode === 'alternate' || d.zigzagMode === 'fixed') {
+            zigzagMode = d.zigzagMode;
+          }
+          if (typeof d.horizontalOffset === 'number' && d.horizontalOffset >= 0) {
+            applyHorizontalOffset(d.horizontalOffset);
+          }
+        }
+      } catch(_) {}
+    };
+  }
+
+  connectWs();
+  setInterval(function() {
+    if (!ws || ws.readyState === WebSocket.CLOSED ||
+               ws.readyState === WebSocket.CLOSING)
+      connectWs();
+  }, 1000);
+</script>
+</body>
+</html>

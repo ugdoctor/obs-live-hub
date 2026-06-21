@@ -87,6 +87,10 @@ target_sources(
     src/modules/EngineManager.hpp
     src/ui/BouyomiParamLimitDialog.cpp
     src/ui/BouyomiParamLimitDialog.hpp
+    src/ui/BrowserDiagDialog.cpp
+    src/ui/BrowserDiagDialog.hpp
+    src/ui/ConversationOverlayDialog.cpp
+    src/ui/ConversationOverlayDialog.hpp
     src/modules/ViewerTtsSettings.cpp
     src/modules/ViewerTtsSettings.hpp
 )

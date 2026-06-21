@@ -234,9 +234,16 @@ bool WsServer::start()
 		return false;
 	}
 
+	// SO_REUSEADDR は Windows では複数ソケットが同一ポートへ同時 bind できてしまう。
+	// ゾンビソケットと新サーバーが共存して接続を奪い合う問題の根本原因となるため使わない。
+	// SO_EXCLUSIVEADDRUSE: ゾンビソケットがポートを保持している場合に bind() を即失敗させ
+	// 問題を可視化する。また自分が LISTEN 中は他プロセスからの同ポート bind を拒否する。
 	int opt = 1;
-	setsockopt(listenSock_, SOL_SOCKET, SO_REUSEADDR,
-		   reinterpret_cast<const char *>(&opt), sizeof(opt));
+	if (setsockopt(listenSock_, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+		       reinterpret_cast<const char *>(&opt), sizeof(opt)) == SOCKET_ERROR) {
+		obs_log(LOG_WARNING, "[%s] setsockopt(SO_EXCLUSIVEADDRUSE) failed WSA=%d — 続行します",
+			WSTAG, WSAGetLastError());
+	}
 
 	sockaddr_in addr{};
 	addr.sin_family = AF_INET;
@@ -244,19 +251,27 @@ bool WsServer::start()
 	addr.sin_port = htons(port_);
 
 	if (bind(listenSock_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-		obs_log(LOG_WARNING, "[%s] bind() failed on port %u, WSA=%d", WSTAG, port_,
-			WSAGetLastError());
+		const int wsaErr = WSAGetLastError();
+		obs_log(LOG_ERROR,
+			"[%s] bind() FAILED: port %u が別プロセスに占有されています (WSA=%d)。"
+			"コマンドプロンプトで「netstat -ano | findstr :%u」を実行してポートを"
+			"保持しているプロセスを確認してください。PCを再起動すると解消する場合があります。",
+			WSTAG, port_, wsaErr, port_);
 		closesocket(listenSock_);
 		listenSock_ = INVALID_SOCKET;
+		listenState_.store(ListenState::BindFailed);
 		return false;
 	}
 	if (listen(listenSock_, SOMAXCONN) == SOCKET_ERROR) {
-		obs_log(LOG_WARNING, "[%s] listen() failed, WSA=%d", WSTAG, WSAGetLastError());
+		const int wsaErr = WSAGetLastError();
+		obs_log(LOG_WARNING, "[%s] listen() failed WSA=%d", WSTAG, wsaErr);
 		closesocket(listenSock_);
 		listenSock_ = INVALID_SOCKET;
+		listenState_.store(ListenState::ListenFailed);
 		return false;
 	}
 
+	listenState_.store(ListenState::Listening);
 	running_.store(true);
 	acceptThread_ = std::thread(&WsServer::acceptLoop, this);
 	obs_log(LOG_INFO, "[%s] Listening on ws://127.0.0.1:%u", WSTAG, port_);
@@ -267,6 +282,8 @@ void WsServer::stop()
 {
 	if (!running_.exchange(false))
 		return;
+
+	listenState_.store(ListenState::NotStarted);
 
 	// listenSock_ を閉じて acceptLoop の select() を抜ける
 	if (listenSock_ != INVALID_SOCKET) {
@@ -341,11 +358,25 @@ void WsServer::acceptLoop()
 		const int sel = select(0, &fds, nullptr, nullptr, &tv);
 
 		++loopCount;
-		if (loopCount % 10 == 0 && sel < 0)
+
+		// 60秒ごとにハートビートログ（ループが生きているか・接続数の確認）
+		if (loopCount % 60 == 0) {
 			obs_log(LOG_INFO,
-			        "[%s] tick #%d: select()=%d (error) WSA=%d sock=%d",
-			        WSTAG, loopCount, sel, WSAGetLastError(),
-			        static_cast<int>(listenSock_));
+			        "[%s] heartbeat #%d: activeClients=%d listenSock=%d WSA=%d",
+			        WSTAG, loopCount / 60,
+			        activeClients_.load(),
+			        static_cast<int>(listenSock_),
+			        WSAGetLastError());
+		}
+
+		// select() エラー時は毎回ログ（ポート競合・ソケット異常を検出するため）
+		if (sel < 0) {
+			obs_log(LOG_WARNING,
+			        "[%s] select() error: WSA=%d sock=%d tick=%d",
+			        WSTAG, WSAGetLastError(),
+			        static_cast<int>(listenSock_),
+			        loopCount);
+		}
 
 		if (sel <= 0)
 			continue;

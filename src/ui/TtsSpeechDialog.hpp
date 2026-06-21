@@ -87,11 +87,14 @@ private:
 	QVector<AivisSpeakerInfo> speakers_;
 
 	// ── 棒読みちゃん設定グループ ──
-	QGroupBox *bouyomiGroup_;
-	QLineEdit *bouyomiHostEdit_;
-	QSpinBox  *bouyomiPortSpin_;
-	QComboBox *bouyomiVoiceCombo_;
-	QSpinBox  *bouyomiVoiceSpin_;
+	QGroupBox   *bouyomiGroup_;
+	QLineEdit   *bouyomiHostEdit_;
+	QSpinBox    *bouyomiPortSpin_;
+	QComboBox   *bouyomiVoiceCombo_;
+	QSpinBox    *bouyomiVoiceSpin_;
+	QLineEdit   *bouyomiExePathEdit_;
+	QPushButton *browseBouyomiExeBtn_;
+	QCheckBox   *bouyomiAutoStartCheck_;
 
 	QDialogButtonBox *buttonBox_;
 };

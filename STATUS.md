@@ -1,157 +1,62 @@
 # STATUS.md
 
-## 現在のタスク: TTS複数エンジン対応 Step4b
+## 現在の状態
 
-### 直近の進捗
-- WebSocket接続問題は解決済み（PC再起動でゾンビソケット解消、詳細はCLAUDE_LOG.md参照）
-- Step4a/4bの動作確認実施、オーバーレイ・TTS読み上げ自体は正常動作確認済み
-
-### 現在進行中のバグ修正
-[olh] engine:xxx コマンドで個人設定したエンジンが反映されない問題
-- 原因判明: buildCommentTtsJson内のisEngineConnected()チェックが
-  "aivisspeech"を未接続と誤判定し、強制的にwebspeechへ上書きしていた
-  （plugin-main.cpp:172-173）
-- 対応方針: 設定ダイアログにON/OFFチェックボックスを追加し、
-  ユーザー側で接続チェックの有効/無効を選べるようにする
-  → Claude Codeに実装依頼済み、ビルド結果待ち
-
-### tts.html fetch エラー調査結果
-
-エラー: `AivisSpeech error: TypeError: Failed to fetch`
-（ソース位置 `http://absolute/C:/.../tts.html:161` は Chrome が `--disable-web-security` で開いたファイルのURL表現であり、fetch先のURLではない）
-
-#### Q1. URL 組み立て（tts.html L.122, L.128-131）
-
-```javascript
-// speakWithAivis 内
-var url = baseUrl || aivisUrl;          // L.122
-var sid = (styleId !== undefined && styleId !== null) ? styleId : aivisStyleId;
-
-fetch(url + '/audio_query?text=...' + '&speaker=' + sid, { method: 'POST' })
-```
-
-`url + '/audio_query?...'` の単純な文字列連結。`baseUrl` が空文字(falsy)なら `aivisUrl` にフォールバックする構造。
-
-#### Q2. baseUrl の受け取り（tts.html L.175）
-
-```javascript
-var effectiveBaseUrl = info.baseUrl || aivisUrl;   // info = comment の tts フィールド
-```
-
-C++ 側 `engineBaseUrl("aivisspeech")` = `cfg.aivisUrl` = `"http://localhost:10101"` が JSON に埋め込まれるため、`info.baseUrl = "http://localhost:10101"` (truthy) となり、`effectiveBaseUrl = "http://localhost:10101"` に正常解決される。**URL構築にバグなし。**
-
-参考: `engine = "webspeech"` 時は `engineBaseUrl` が空文字を返し `info.baseUrl = ""`(falsy) になるが、その場合 `isVoicevoxEngine(effectiveEngine)` が false なので `speakWithAivis` 自体が呼ばれない（問題なし）。
-
-#### Q3. styleId=0 のガード有無
-
-`speakWithAivis` に入る前・入った後ともに `styleId=0` を弾くガードは存在しない。`sid = 0` はそのまま `speaker=0` として AivisSpeech に渡される。
-
-- AivisSpeech が起動しておらず応答しない → `TypeError: Failed to fetch`（ネットワーク到達失敗）
-- AivisSpeech が起動しているが `speaker=0` が無効 → `Error: audio_query failed: 422`（サーバーエラー）
-
-`styleId=0` が `TypeError: Failed to fetch` を引き起こすことはない。
-
-#### Q4. 発生条件の切り分け
-
-`TypeError: Failed to fetch` の唯一の原因は **AivisSpeech が `http://localhost:10101` で起動していない・応答しない** こと。
-
-| 状況 | 発生するエラー |
-|---|---|
-| AivisSpeech 未起動 | `TypeError: Failed to fetch`（ネットワーク接続失敗） |
-| AivisSpeech 起動中・`speaker=0` が無効 | `Error: audio_query failed: 422` |
-| AivisSpeech 起動中・`speaker=0` が有効 | エラーなし（正常に読み上げ） |
-
-`ttsCheckEngineConnection=false` にする前は `isEngineConnected("aivisspeech")` が false → engine を "webspeech" に上書き → `speakWithAivis` が一切呼ばれなかったため、このエラーが表面化しなかった。チェックをOFFにしたことで `speakWithAivis` が実際に呼ばれるようになり、エンジン未起動の状態が露呈した。
-
-**エンジン切り替え直後のみ発生するわけではなく、AivisSpeech が起動していなければ毎回発生する。**
+- **v0.3.0 リリース済み（2026-06-19）**
+- 主要機能（TTS複数エンジン、棒読みちゃん、視聴者コマンド、ポイント、エフェクト等）は安定動作を確認済み
 
 ---
 
-### AivisEngine::start() が呼ばれない問題 — 根本原因と修正（2026-06-18）
+## 未確認・保留中のタスク（優先度順）
 
-#### 根本原因
+### 1. ttsCheckEngineConnection=true に戻してのテスト
 
-`TtsSpeechDialog::saveToConfig()` が `cfg.ttsEngine = "aivisspeech"` を保存する際、
-`cfg.aivisspeechEnabled` を `true` にしていなかった。
+- **経緯:** `[olh] engine:xxx` 問題の根本修正後、本来の安全設計（接続チェック有効）に戻して問題ないか未確認のまま v0.3.0 をリリースした
+- **確認方法:** 設定ダイアログで「エンジン接続チェックを有効にする」を ON に戻し、有効化済みエンジンへの `[olh] engine:xxx` が正しく動作するか確認
 
-- `cfg.save()` は `aivisspeech_enabled: false`（デフォルト値のまま）をJSONに書き込む
-- 次回起動時、`PluginConfig::load()` はキーが存在するため移行ロジックをスキップし、`aivisspeechEnabled = false` のままにする
-- `EngineManager::startAll()` の `if (!e.enabled) continue;` でaivisspeechをスキップ
-- → EngineManagerにaivisspeechのログが一切出ない、`isEngineConnected("aivisspeech")` がfalseを返す
+### 2. マルチユーザーテスト
 
-#### 修正内容
+- 複数の異なる視聴者が同時に異なるエンジンを指定するケース（例: AivisSpeech と 棒読みちゃんを同時に指定した2人が同時コメント）
+- ホスト単独テスト環境のため後日実施
 
-`src/ui/TtsSpeechDialog.cpp` の `saveToConfig()` 末尾（`cfg.save()` 直前）に追加:
+### 3. AivisSpeech CORS エラー対応の最終確認
 
-```cpp
-cfg.aivisspeechEnabled = (cfg.ttsEngine == "aivisspeech");
-cfg.sharevoxEnabled    = (cfg.ttsEngine == "sharevox");
-cfg.lmroidEnabled      = (cfg.ttsEngine == "lmroid");
-cfg.itvoiceEnabled     = (cfg.ttsEngine == "itvoice");
-cfg.bouyomiEnabled     = (cfg.ttsEngine == "bouyomi");
-```
-
-これにより、ダイアログ保存時にグローバルエンジン選択と `*Enabled` フラグが常に同期される。
-
-#### CORSエラーについて
-
-`[obs-browser: '音声ブラウザ']` のCORSエラーは、AivisSpeechが `--allow_origin "*"` なしで
-手動起動されているために発生。AivisSpeechを正しく起動する方法:
-
-1. 設定ダイアログの「起動」ボタン → `AivisEngine::start()` が `--allow_origin "*"` 付きで起動
-2. 設定ダイアログで「OBS起動時に自動起動」をON + エンジンパスを設定 → `EngineManager::startAll()` が自動起動
-3. 手動起動する場合は `--allow_origin "*"` フラグを自分で付ける必要がある
-
-OBSブラウザソースは `Access-Control-Allow-Origin: *` レスポンスヘッダーを尊重するため、
-AivisSpeechが `--allow_origin "*"` で起動していればCORSエラーは解消される。
-
-#### ビルド・デプロイ結果
-
-- ビルド: 成功（2026-06-18）
-- デプロイ先: `C:\Program Files\obs-studio\obs-plugins\64bit\obs-live-hub.dll`
+- 「OBS起動時に自動起動」を ON にした状態で `--allow_origin "*"` が正しく付与されて起動されるか確認
+- 手動起動時は `--allow_origin "*"` を自分で付ける必要あり（設定ダイアログの「起動」ボタン経由なら自動付与される）
 
 ---
 
-### TTSエンジン「有効化」と「デフォルト」分離 UI実装（2026-06-18）
+## 最近完了した対策（参照用）
 
-#### 変更内容
+### 棒読みちゃん実動作確認・関連対策（2026-06-22 完了）
+- **動作確認:** `speak OK` + 音声再生を確認済み
+- `handleBouyomiSpeakRequest` / `BouyomiChanClient::talk()` にログ追加（受信・HTTP送信・成功/失敗を追跡可能に）
+- 接続確認を常時 Connected の偽実装 → 実 HTTP ping 方式に修正
+- 自動起動機能を実装（読み上げ設定ダイアログ → 棒読みちゃんセクションに「実行ファイルパス + 自動起動チェック」を追加）
 
-`src/ui/TtsSpeechDialog.hpp` / `.cpp`
-
-- `QComboBox *engineCombo_` を廃止
-- 新UIとして `engineListGroup_` (QGroupBox + QGridLayout) を追加:
-  - 列1: 「有効化」QCheckBox（webspeechは常時有効でdisabled）
-  - 列2: 「デフォルト」QRadioButton（エンジン名付き、有効化時のみenabled）
-- スロット: `onEngineChanged(int)` → `onDefaultEngineChanged(int)` + `onEngineEnabledToggled(int, bool)` に分割
-- `loadFromConfig()`: 各エンジンの `*Enabled` フラグからチェックボックスを初期化、`ttsEngine` からラジオを選択
-- `saveToConfig()`: `cfg.*Enabled` をチェックボックス状態から保存（グローバル選択に同期する5行を廃止）
-
-#### 設計上の変更
-
-| 旧 | 新 |
-|---|---|
-| ttsEngine選択 → そのエンジンのみ*Enabled=true、他はfalse | 各エンジンを独立して有効化可能 |
-| [olh] engine:xxx でグローバル以外は常に起動されていない | 有効化されたエンジンはすべてEngineManagerが管理 |
-| engineCombo_ で1つ選択 | 有効化チェック＋デフォルトラジオで分離管理 |
-
-#### ビルド・デプロイ結果
-
-- ビルド: 成功（2026-06-18）
-- デプロイ先: `C:\Program Files\obs-studio\obs-plugins\64bit\obs-live-hub.dll`
+### WsServer ゾンビソケット対策（2026-06-21 完了）
+- **問題:** OBSクラッシュ後、ポート8765のLISTENソケットがOSレベルで残存し、新しいWsServerへの接続が古いゾンビソケット側に奪われる現象
+- **根本原因:** `SO_REUSEADDR` はWindows上で複数ソケットの同時LISTENを許容するため、ゾンビとの「サイレントな共存」が発生していた
+- **対策:** `SO_REUSEADDR` → `SO_EXCLUSIVEADDRUSE` に変更。ゾンビソケットが存在する場合は `bind()` が即座に失敗してログに明示される
+- **連携:** 接続診断ダイアログで「バインド失敗」状態を表示できるよう `ListenState` 列挙型を追加
+- **残課題:** ゾンビソケット自体を解消する手段はなく、PCの再起動が必要な場合がある。今回の改善点は「サイレントな接続横取り → 即座な失敗検知」への変化
 
 ---
 
-### 次にやること
+## 既知の設計上の保留事項（将来検討）
 
-1. OBSを再起動して動作確認:
-   - 「obs-live-hub 読み上げ設定」を開き、AivisSpeechの「有効化」チェックをON、
-     「デフォルト」ラジオをAivisSpeechに設定して保存
-   - OBSログに `[EngineManager] aivisspeech: Starting` が出ることを確認
-   - 必要なら他エンジン（sharevox等）も「有効化」だけONにして同時起動を確認
-2. AivisSpeechをダイアログの「起動」ボタン（または自動起動設定）で起動し直す
-   （--allow_origin "*" フラグ付き起動が必要）
-3. 複数エンジン有効化後、視聴者ごとに `[olh] engine:xxx` を送って
-   それぞれのエンジンで読み上げされることを確認
-4. ttsCheckEngineConnection を true に戻してテスト
-5. デバッグ用ログ（[WsServer] [DBG] tick #N等）の削除をClaude Codeに依頼する
-   （本番運用前に必須）
+- **OBSクラッシュ→再起動時の音声エンジン再接続ロジック**
+  - 既存起動済みプロセスへの再接続の挙動が未設計
+- **多言語対応**
+  - メニュー/UI文字列のみ対象（HTML は日本語のまま）
+- **gh CLI の正式な認証設定**
+  - 現状は Windows の資格情報マネージャー経由で動作しているが、次回リリース時に問題が出る可能性あり
+  - その場合は `gh auth login --web` を再試行
+
+---
+
+## ファイル運用ルール
+
+- **STATUS.md**: 現在のタスクのみ記載。肥大化したら定期的に整理
+- **CLAUDE_LOG.md**: 追記専用の開発履歴（通常は参照不要）
+- **CLAUDE.md の「視聴者コメントコマンド全集」セクション**: コマンド追加・変更・削除時は必ず同時に更新すること

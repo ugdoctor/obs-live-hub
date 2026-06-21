@@ -304,6 +304,22 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 	// ── 棒読みちゃん設定グループ ──
 	bouyomiGroup_ = new QGroupBox("棒読みちゃん設定", this);
 
+	// 実行ファイルパス
+	bouyomiExePathEdit_ = new QLineEdit(bouyomiGroup_);
+	bouyomiExePathEdit_->setPlaceholderText(
+		"例: C:\\BouyomiChan\\BouyomiChan.exe（自動起動する場合に設定）");
+	browseBouyomiExeBtn_ = new QPushButton("参照...", bouyomiGroup_);
+	browseBouyomiExeBtn_->setFixedWidth(64);
+
+	auto *bouyomiPathRow = new QWidget(bouyomiGroup_);
+	auto *bouyomiPathH   = new QHBoxLayout(bouyomiPathRow);
+	bouyomiPathH->setContentsMargins(0, 0, 0, 0);
+	bouyomiPathH->addWidget(bouyomiExePathEdit_, 1);
+	bouyomiPathH->addWidget(browseBouyomiExeBtn_);
+
+	bouyomiAutoStartCheck_ =
+		new QCheckBox("OBS起動時に棒読みちゃんを自動起動する", bouyomiGroup_);
+
 	bouyomiHostEdit_ = new QLineEdit(bouyomiGroup_);
 	bouyomiHostEdit_->setPlaceholderText("localhost");
 
@@ -328,16 +344,20 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 	voiceH->addWidget(bouyomiVoiceSpin_);
 
 	auto *bouyomiNote = new QLabel(
-		"<small>※声番号は棒読みちゃんの「声質」タブの並び順（追加ソフトで番号がずれる場合あり）</small>",
+		"<small>※声番号は棒読みちゃんの「声質」タブの並び順（追加ソフトで番号がずれる場合あり）<br>"
+		"※接続失敗（停止中）が続く場合は棒読みちゃんの HTTP 連携が有効か確認してください</small>",
 		bouyomiGroup_);
 	bouyomiNote->setWordWrap(true);
 
 	auto *bouyomiForm = new QFormLayout(bouyomiGroup_);
 	bouyomiForm->setSpacing(6);
-	bouyomiForm->addRow("ホスト:",   bouyomiHostEdit_);
-	bouyomiForm->addRow("ポート:",   bouyomiPortSpin_);
-	bouyomiForm->addRow("声の種類:", voiceRow);
-	bouyomiForm->addRow("",          bouyomiNote);
+	bouyomiForm->addRow("実行ファイル:", bouyomiPathRow);
+	bouyomiForm->addRow("",              bouyomiAutoStartCheck_);
+	bouyomiForm->addRow(new QFrame(bouyomiGroup_));
+	bouyomiForm->addRow("ホスト:",       bouyomiHostEdit_);
+	bouyomiForm->addRow("ポート:",       bouyomiPortSpin_);
+	bouyomiForm->addRow("声の種類:",     voiceRow);
+	bouyomiForm->addRow("",              bouyomiNote);
 
 	// コンボ変更 → スピンボックスに反映
 	QObject::connect(bouyomiVoiceCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -423,6 +443,20 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 			enginePathEdit_->setText(path);
 	});
 
+	QObject::connect(browseBouyomiExeBtn_, &QPushButton::clicked, this, [this]() {
+		const QString path = QFileDialog::getOpenFileName(
+			this, "棒読みちゃん 実行ファイルを選択",
+			bouyomiExePathEdit_->text(), "実行ファイル (*.exe)");
+		if (!path.isEmpty())
+			bouyomiExePathEdit_->setText(path);
+	});
+
+	QObject::connect(bouyomiAutoStartCheck_, &QCheckBox::toggled,
+	                 this, [this](bool checked) {
+		bouyomiExePathEdit_->setEnabled(checked);
+		browseBouyomiExeBtn_->setEnabled(checked);
+	});
+
 	QObject::connect(startEngineBtn_, &QPushButton::clicked, this, [this]() {
 		const QString path = enginePathEdit_->text().trimmed();
 		if (path.isEmpty()) {
@@ -469,6 +503,10 @@ void TtsSpeechDialog::onDefaultEngineChanged(int engineIdx)
 
 	if (isBouyomi) {
 		const auto &cfg = PluginConfig::instance();
+		bouyomiExePathEdit_->setText(QString::fromStdString(cfg.bouyomiExePath));
+		bouyomiAutoStartCheck_->setChecked(cfg.bouyomiAutoStart);
+		bouyomiExePathEdit_->setEnabled(cfg.bouyomiAutoStart);
+		browseBouyomiExeBtn_->setEnabled(cfg.bouyomiAutoStart);
 		bouyomiHostEdit_->setText(QString::fromStdString(cfg.bouyomiHost));
 		bouyomiPortSpin_->setValue(cfg.bouyomiPort);
 		bouyomiVoiceSpin_->setValue(cfg.bouyomiVoice);
@@ -820,11 +858,13 @@ void TtsSpeechDialog::saveToConfig()
 	const bool   autoS = autoStartCheck_->isChecked();
 
 	if (idx == 5) { // bouyomi
-		cfg.ttsEngine      = "bouyomi";
-		cfg.bouyomiHost    = bouyomiHostEdit_->text().trimmed().toStdString();
+		cfg.ttsEngine        = "bouyomi";
+		cfg.bouyomiExePath   = bouyomiExePathEdit_->text().trimmed().toStdString();
+		cfg.bouyomiAutoStart = bouyomiAutoStartCheck_->isChecked();
+		cfg.bouyomiHost      = bouyomiHostEdit_->text().trimmed().toStdString();
 		if (cfg.bouyomiHost.empty()) cfg.bouyomiHost = "localhost";
-		cfg.bouyomiPort    = bouyomiPortSpin_->value();
-		cfg.bouyomiVoice   = bouyomiVoiceSpin_->value();
+		cfg.bouyomiPort  = bouyomiPortSpin_->value();
+		cfg.bouyomiVoice = bouyomiVoiceSpin_->value();
 	} else if (idx == 0) {
 		cfg.ttsEngine = "webspeech";
 	} else {

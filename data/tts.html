@@ -168,6 +168,18 @@
       if (!ttsQueue.length) { ttsSpeaking = false; return; }
       ttsSpeaking = true;
       var item = ttsQueue.shift();
+
+      // 読み上げ開始を会話オーバーレイへ通知（C++ 経由で全クライアントへ中継）
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type:     'tts_speaking_start',
+          user:     item.user     || '',
+          text:     item.origText || '',
+          platform: item.platform || '',
+          avatar:   item.avatar   || ''
+        }));
+      }
+
       // コメントに埋め込まれた tts 情報を使う（なければグローバル設定にフォールバック）
       var info = item.ttsInfo || {};
 
@@ -225,7 +237,7 @@
     }
 
     // ttsInfo: commentメッセージの "tts" オブジェクト（C++側が埋め込み済み）
-    function queueTts(user, text, platform, ttsInfo) {
+    function queueTts(user, text, platform, ttsInfo, avatar) {
       if (!ttsSettings.enabled) return;
       if (platform === 'system') return;
       if (platform === 'twitch'  && !ttsSettings.twitch)  return;
@@ -239,7 +251,8 @@
       var userName    = applyDictionary(ttsUser);
       var commentText = applyDictionary(text);
       var speak = ttsSettings.readUsername ? (userName + '、' + commentText) : commentText;
-      ttsQueue.push({ text: speak, ttsInfo: info });
+      ttsQueue.push({ text: speak, origText: text, user: user, platform: platform,
+                      avatar: avatar || '', ttsInfo: info });
       if (!ttsSpeaking) processTtsQueue();
     }
 
@@ -309,7 +322,7 @@
             var text = data.text || '';
             if (text.trim().startsWith('[olh]')) return;
             var platform = ((data.platform || 'twitch') + '').toLowerCase();
-            queueTts(data.user || '', text, platform, data.tts || null);
+            queueTts(data.user || '', text, platform, data.tts || null, data.avatar || '');
           }
         } catch(_) {}
       };

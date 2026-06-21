@@ -23,6 +23,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <string>
 #include <thread>
 
+#include <obs-module.h>
+#include <plugin-support.h>
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -48,6 +51,9 @@ void BouyomiChanClient::talk(const QString &host, int port, const QString &text,
 		                         "&speed=" + std::to_string(speed) +
 		                         "&tone=" + std::to_string(tone);
 
+		obs_log(LOG_INFO, "[BouyomiChanClient] GET http://%s:%d%s",
+		        hostStr.c_str(), port, path.c_str());
+
 		const std::wstring whost(hostStr.begin(), hostStr.end());
 		const std::wstring wpath(path.begin(), path.end());
 
@@ -55,12 +61,17 @@ void BouyomiChanClient::talk(const QString &host, int port, const QString &text,
 		                                 WINHTTP_ACCESS_TYPE_NO_PROXY,
 		                                 WINHTTP_NO_PROXY_NAME,
 		                                 WINHTTP_NO_PROXY_BYPASS, 0);
-		if (!hSession)
+		if (!hSession) {
+			obs_log(LOG_WARNING, "[BouyomiChanClient] WinHttpOpen failed: err=%lu",
+			        GetLastError());
 			return;
+		}
 
 		HINTERNET hConnect = WinHttpConnect(hSession, whost.c_str(),
 		                                    static_cast<INTERNET_PORT>(port), 0);
 		if (!hConnect) {
+			obs_log(LOG_WARNING, "[BouyomiChanClient] WinHttpConnect failed: err=%lu",
+			        GetLastError());
 			WinHttpCloseHandle(hSession);
 			return;
 		}
@@ -70,6 +81,8 @@ void BouyomiChanClient::talk(const QString &host, int port, const QString &text,
 			                   nullptr, WINHTTP_NO_REFERER,
 			                   WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
 		if (!hRequest) {
+			obs_log(LOG_WARNING, "[BouyomiChanClient] WinHttpOpenRequest failed: err=%lu",
+			        GetLastError());
 			WinHttpCloseHandle(hConnect);
 			WinHttpCloseHandle(hSession);
 			return;
@@ -79,6 +92,10 @@ void BouyomiChanClient::talk(const QString &host, int port, const QString &text,
 		if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
 		                       WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
 			WinHttpReceiveResponse(hRequest, nullptr);
+			obs_log(LOG_INFO, "[BouyomiChanClient] speak OK");
+		} else {
+			obs_log(LOG_WARNING, "[BouyomiChanClient] WinHttpSendRequest failed: err=%lu",
+			        GetLastError());
 		}
 
 		WinHttpCloseHandle(hRequest);

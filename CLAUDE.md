@@ -147,6 +147,50 @@ public:
 - DLLはOBSのプラグインフォルダに配置して動作確認
 - `CLAUDE_LOG.md` は開発履歴ログのみ。調査・参照不要。読み込まないこと。
 
+## 既知の問題と対策
+
+### WsServer ポート占有問題（ゾンビソケット）
+
+**症状:** OBSクラッシュ後、ポート8765が解放されず、新しいWsServerへの接続が確立しない。
+または `netstat -ano | findstr :8765` で複数のLISTENINGエントリが存在し、
+片方のPIDが既に終了しているにもかかわらず接続が奪われ続ける。
+
+**原因:** Windowsでは異常終了時（特に libcef.dll クラッシュ等）に子プロセスが
+ソケットを保持したままになり、TCPソケットがOSレベルで残存することがある。
+
+**対策実装済み（2026-06-21）:**
+- `SO_REUSEADDR` を廃止し `SO_EXCLUSIVEADDRUSE` を使用。
+  Windowsの `SO_REUSEADDR` は複数ソケットの同時LISTENを許容するため
+  ゾンビとの「サイレントな接続の奪い合い」が発生していた。
+  `SO_EXCLUSIVEADDRUSE` はポートが占有中の場合 `bind()` を即座に失敗させ
+  問題を可視化する（OBSログに `bind() FAILED: port N が別プロセスに占有されています (WSA=XXXXX)` と出力）。
+- `WsServer::ListenState` 列挙型（`NotStarted` / `Listening` / `BindFailed` / `ListenFailed`）
+  でバインド状態を保持し、接続診断ダイアログから参照可能。
+
+**診断方法:**
+- OBSメニュー「ツール → obs-live-hub 接続診断」で WsServer のバインド状態を確認
+- コマンドプロンプトで `netstat -ano | findstr :8765` を実行し、PIDが生きているか確認
+
+### 棒読みちゃんで音声が再生されない場合
+
+`tts.html` → WebSocket → `handleBouyomiSpeakRequest` → `BouyomiChanClient::talk()` → HTTP GET
+という経路を OBS ログで確認する。
+
+1. `[BouyomiChanClient] speak request:` が出ない → WebSocket メッセージが届いていない（`tts.html` 側の問題）
+2. `[BouyomiChanClient] GET http://...` が出ない → `talk()` が呼ばれていない（ハンドラの問題）
+3. `WinHttpSendRequest failed: err=12029` → 棒読みちゃんが未起動（接続拒否）。棒読みちゃん本体を起動するか、読み上げ設定ダイアログで「自動起動」を設定する
+4. `WinHttpSendRequest failed: err=XXXXX`（12029 以外）→ ポート設定の相違、またはファイアウォールの可能性
+5. `speak OK` が出るのに読み上げられない → 棒読みちゃんアプリ側の設定問題（HTTP連携が有効か確認）
+
+**自動起動機能（2026-06-22 実装）:**
+読み上げ設定ダイアログ（ツール → obs-live-hub → 読み上げ設定）の棒読みちゃんセクションで
+「実行ファイルパス」を設定し「OBS起動時に自動起動する」をチェックすると、
+OBS 起動時に `EngineManager::startAll()` が棒読みちゃんを自動起動する。
+起動後は HTTP ping（GET /）で接続確認し、成功すれば EngineStatus が Connected になる。
+EngineManager の接続確認ログ: `[EngineManager] bouyomi auto-start: launching ...` / `already running, skipping launch` / `path not set, skipping`
+
+**解消方法:** bind失敗時はPCの再起動が必要な場合がある（OBS単体の再起動では直らないことがある）。
+
 ## OBSプラグインフォルダ（Windows）
 ```
 C:\Program Files\obs-studio\obs-plugins\64bit\

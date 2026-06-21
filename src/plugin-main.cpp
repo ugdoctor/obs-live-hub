@@ -69,6 +69,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "ui/TtsDictionaryDialog.hpp"
 #include "ui/VoteManagerDialog.hpp"
 #include "ui/TtsSpeechDialog.hpp"
+#include "ui/BrowserDiagDialog.hpp"
+#include "ui/ConversationOverlayDialog.hpp"
 #include "modules/EffectManager.hpp"
 #include "modules/PointManager.hpp"
 #include "ui/PointSettingsDialog.hpp"
@@ -218,6 +220,8 @@ static void handleWsClientMessage(const QString &json); // forward declaration
 static std::string makeTtsJson();                 // forward declaration
 static void broadcastTtsDict();                   // forward declaration
 static void broadcastDebugConfig();               // forward declaration
+static std::string makeConversationConfigJson();  // forward declaration
+static void broadcastConversationConfig();        // forward declaration
 static void processEffectOlhCommand(const QString &message, const QString &user = {}); // forward declaration
 static void processPointOlhCommand(const QString &userId, const QString &platform,
                                    const QString &displayName,
@@ -251,6 +255,7 @@ static void applyWsCallbacks(WsServer *srv)
 			s_wsServer->broadcast(makeTtsJson());
 			s_wsServer->broadcast(TtsDictionaryDialog::makeDictJson());
 			broadcastDebugConfig();
+			broadcastConversationConfig();
 		}, Qt::QueuedConnection);
 	});
 }
@@ -275,9 +280,10 @@ static void restartWsServer()
 	s_wsServer = new WsServer(static_cast<uint16_t>(newPort));
 	applyWsCallbacks(s_wsServer);
 	if (!s_wsServer->start()) {
-		obs_log(LOG_WARNING, "WsServer: Failed to start on port %d", newPort);
-		delete s_wsServer;
-		s_wsServer = nullptr;
+		obs_log(LOG_WARNING, "WsServer: Failed to start on port %d — "
+			"接続診断ダイアログで詳細を確認してください", newPort);
+		// インスタンスは保持する。isRunning()==false のため broadcast は no-op 。
+		// listenState() でバインド失敗の理由を接続診断ダイアログに表示するために必要。
 	}
 }
 
@@ -754,6 +760,12 @@ static void handleBouyomiSpeakRequest(const QJsonObject &obj)
 	const int tone   = obj.contains("tone")   ? obj["tone"].toInt(-1)   : -1;
 
 	const auto &cfg = PluginConfig::instance();
+	obs_log(LOG_INFO, "[BouyomiChanClient] speak request: host=%s port=%d voice=%d "
+	        "volume=%d speed=%d tone=%d text=\"%s\"",
+	        cfg.bouyomiHost.c_str(), cfg.bouyomiPort,
+	        voice, volume, speed, tone,
+	        text.toUtf8().constData());
+
 	BouyomiChanClient::talk(QString::fromStdString(cfg.bouyomiHost), cfg.bouyomiPort,
 	                        text, voice, volume, speed, tone);
 }
@@ -959,6 +971,47 @@ static void handleWsClientMessage(const QString &json)
 		handleOlhBouyomiParamsRequest(obj);
 	else if (type == "bouyomi_speak")
 		handleBouyomiSpeakRequest(obj);
+	else if (type == "tts_speaking_start") {
+		// tts.html からの読み上げ開始通知を全クライアントへ中継する
+		if (s_wsServer)
+			s_wsServer->broadcast(json.toStdString());
+	}
+}
+
+static std::string makeConversationConfigJson()
+{
+	const auto &cfg = PluginConfig::instance();
+	return std::string("{\"type\":\"conversation_config\","
+	                   "\"maxBubbles\":"       + std::to_string(cfg.conversationMaxBubbles) + ","
+	                   "\"zigzagMode\":\""     + cfg.conversationZigzagMode + "\","
+	                   "\"horizontalOffset\":" + std::to_string(cfg.conversationHorizontalOffset) + "}");
+}
+
+static void broadcastConversationConfig()
+{
+	if (s_wsServer)
+		s_wsServer->broadcast(makeConversationConfigJson());
+}
+
+static void onConversationOverlayMenuClick(void * /* data */)
+{
+	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	ConversationOverlayDialog dlg(mainWindow);
+	if (dlg.exec() == QDialog::Accepted)
+		broadcastConversationConfig();
+}
+
+static void onOpenConversationOverlayMenuClick(void * /* data */)
+{
+#ifdef _WIN32
+	char appdata[MAX_PATH] = {};
+	if (GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH) == 0)
+		return;
+	const std::string path =
+		std::string(appdata) +
+		"\\obs-studio\\plugins\\obs-live-hub\\conversation_overlay.html";
+	ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#endif
 }
 
 static void onOverlayStyleMenuClick(void * /* data */)
@@ -986,6 +1039,13 @@ static void onTtsSpeechMenuClick(void * /* data */)
 		if (s_wsServer)
 			s_wsServer->broadcast(makeTtsJson());
 	}
+}
+
+static void onBrowserDiagMenuClick(void * /* data */)
+{
+	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	BrowserDiagDialog dlg(s_wsServer, mainWindow);
+	dlg.exec();
 }
 
 static void onSettingsMenuClick(void * /* data */)
@@ -1344,12 +1404,16 @@ static void buildObsLiveHubMenu()
 	auto *connMenu = hubMenu->addMenu("接続・設定");
 	connMenu->addAction("設定",         []() { onSettingsMenuClick(nullptr); });
 	connMenu->addAction("リロード",     []() { onReloadMenuClick(nullptr); });
+	connMenu->addAction("接続診断",     []() { onBrowserDiagMenuClick(nullptr); });
 	connMenu->addAction("配信一括設定", []() { onStreamSettingsMenuClick(nullptr); });
 
 	auto *ovMenu = hubMenu->addMenu("オーバーレイ");
-	ovMenu->addAction("オーバーレイ外観設定",        []() { onOverlayStyleMenuClick(nullptr); });
-	ovMenu->addAction("オーバーレイをブラウザで開く", []() { onOpenOverlayMenuClick(nullptr); });
-	ovMenu->addAction("TTS音声ページを開く",         []() { onOpenTtsMenuClick(nullptr); });
+	ovMenu->addAction("コメントオーバーレイ設定",              []() { onOverlayStyleMenuClick(nullptr); });
+	ovMenu->addAction("コメントオーバーレイをブラウザで開く", []() { onOpenOverlayMenuClick(nullptr); });
+	ovMenu->addAction("TTS音声ページを開く",                  []() { onOpenTtsMenuClick(nullptr); });
+	ovMenu->addSeparator();
+	ovMenu->addAction("チャットオーバーレイ設定",              []() { onConversationOverlayMenuClick(nullptr); });
+	ovMenu->addAction("チャットオーバーレイをブラウザで開く",  []() { onOpenConversationOverlayMenuClick(nullptr); });
 
 	auto *ttsMenu = hubMenu->addMenu("読み上げ");
 	ttsMenu->addAction("読み上げ設定",             []() { onTtsSpeechMenuClick(nullptr); });
@@ -1560,6 +1624,7 @@ bool obs_module_load(void)
 	ensureHtmlFileInAppData(L"tts.html");
 	ensureHtmlFileInAppData(L"debug.html");
 	ensureHtmlFileInAppData(L"effect.html");
+	ensureHtmlFileInAppData(L"conversation_overlay.html");
 #endif
 
 	PluginConfig::instance().load();

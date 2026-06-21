@@ -112,9 +112,11 @@ public:
 	}
 
 	// 棒読みちゃん設定
-	std::string bouyomiHost  = "localhost";
-	int         bouyomiPort  = 50080;
-	int         bouyomiVoice = 0; // -1=前回と同じ, 0=自動, 1-10=各声
+	std::string bouyomiHost     = "localhost";
+	int         bouyomiPort     = 50080;
+	int         bouyomiVoice    = 0; // -1=前回と同じ, 0=自動, 1-10=各声
+	std::string bouyomiExePath;      // 実行ファイルパス（自動起動用）
+	bool        bouyomiAutoStart = false;
 	// [olh] bouyomi_* パラメータ上下限
 	int bouyomiVolumeMin = 0;
 	int bouyomiVolumeMax = 100;
@@ -175,6 +177,11 @@ public:
 	bool debugShowCommentDetail  = true;
 	bool debugShowEffect         = true;
 	bool debugShowPoint          = true;
+
+	// 会話風オーバーレイ設定
+	int conversationMaxBubbles = 3;           // 1〜5
+	std::string conversationZigzagMode = "alternate"; // "alternate" or "fixed"
+	int conversationHorizontalOffset = 60;    // 対向側の余白px（0=全幅、大きいほど内側に寄る）
 
 	// 配信一括設定（StreamSettingsDialog）
 	std::string streamTwitchTitle;

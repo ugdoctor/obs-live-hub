@@ -307,6 +307,12 @@ void PluginConfig::load()
 		bouyomiVoice = static_cast<int>(obs_data_get_int(data, "bouyomi_voice"));
 		if (bouyomiVoice < -1 || bouyomiVoice > 10000) bouyomiVoice = 0;
 	}
+	if (obs_data_has_user_value(data, "bouyomi_exe_path")) {
+		const char *s = obs_data_get_string(data, "bouyomi_exe_path");
+		if (s) bouyomiExePath = s;
+	}
+	if (obs_data_has_user_value(data, "bouyomi_auto_start"))
+		bouyomiAutoStart = obs_data_get_bool(data, "bouyomi_auto_start");
 	if (obs_data_has_user_value(data, "bouyomi_volume_min"))
 		bouyomiVolumeMin = static_cast<int>(obs_data_get_int(data, "bouyomi_volume_min"));
 	if (obs_data_has_user_value(data, "bouyomi_volume_max"))
@@ -406,6 +412,24 @@ void PluginConfig::load()
 		debugShowEffect = obs_data_get_bool(data, "debug_show_effect");
 	if (obs_data_has_user_value(data, "debug_show_point"))
 		debugShowPoint = obs_data_get_bool(data, "debug_show_point");
+
+	// 会話風オーバーレイ設定
+	if (obs_data_has_user_value(data, "conversation_max_bubbles")) {
+		conversationMaxBubbles = static_cast<int>(obs_data_get_int(data, "conversation_max_bubbles"));
+		if (conversationMaxBubbles < 1 || conversationMaxBubbles > 5)
+			conversationMaxBubbles = 3;
+	}
+	if (obs_data_has_user_value(data, "conversation_zigzag_mode")) {
+		const char *s = obs_data_get_string(data, "conversation_zigzag_mode");
+		if (s && *s)
+			conversationZigzagMode = s;
+	}
+	if (obs_data_has_user_value(data, "conversation_horizontal_offset")) {
+		conversationHorizontalOffset =
+			static_cast<int>(obs_data_get_int(data, "conversation_horizontal_offset"));
+		if (conversationHorizontalOffset < 0 || conversationHorizontalOffset > 300)
+			conversationHorizontalOffset = 60;
+	}
 
 	// 配信一括設定
 	if (obs_data_has_user_value(data, "stream_twitch_title")) {
@@ -553,6 +577,8 @@ void PluginConfig::save()
 	obs_data_set_string(data, "bouyomi_host",        bouyomiHost.c_str());
 	obs_data_set_int   (data, "bouyomi_port",        bouyomiPort);
 	obs_data_set_int   (data, "bouyomi_voice",       bouyomiVoice);
+	obs_data_set_string(data, "bouyomi_exe_path",    bouyomiExePath.c_str());
+	obs_data_set_bool  (data, "bouyomi_auto_start",  bouyomiAutoStart);
 	obs_data_set_int   (data, "bouyomi_volume_min",  bouyomiVolumeMin);
 	obs_data_set_int   (data, "bouyomi_volume_max",  bouyomiVolumeMax);
 	obs_data_set_int   (data, "bouyomi_speed_min",   bouyomiSpeedMin);
@@ -595,6 +621,11 @@ void PluginConfig::save()
 	obs_data_set_bool(data, "debug_show_comment_detail", debugShowCommentDetail);
 	obs_data_set_bool(data, "debug_show_effect",         debugShowEffect);
 	obs_data_set_bool(data, "debug_show_point",          debugShowPoint);
+
+	// 会話風オーバーレイ設定
+	obs_data_set_int   (data, "conversation_max_bubbles",       conversationMaxBubbles);
+	obs_data_set_string(data, "conversation_zigzag_mode",       conversationZigzagMode.c_str());
+	obs_data_set_int   (data, "conversation_horizontal_offset", conversationHorizontalOffset);
 
 	// 配信一括設定
 	obs_data_set_string(data, "stream_twitch_title",    streamTwitchTitle.c_str());

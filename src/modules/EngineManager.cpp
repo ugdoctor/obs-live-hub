@@ -238,6 +238,86 @@ static void launchSpeakerCheck(const std::string &engineName, const std::string 
 #endif
 }
 
+// 棒読みちゃん HTTP サーバーへの疎通確認（GET / を送り、レスポンスが来ればOK）
+#ifdef _WIN32
+static bool pingBouyomi(const std::string &host, int port)
+{
+	const std::wstring whost(host.begin(), host.end());
+
+	HINTERNET hSession =
+		WinHttpOpen(L"obs-live-hub/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
+		            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+	if (!hSession)
+		return false;
+
+	WinHttpSetTimeouts(hSession, 2000, 2000, 2000, 2000);
+
+	HINTERNET hConnect =
+		WinHttpConnect(hSession, whost.c_str(),
+		               static_cast<INTERNET_PORT>(port), 0);
+	if (!hConnect) {
+		WinHttpCloseHandle(hSession);
+		return false;
+	}
+
+	HINTERNET hRequest =
+		WinHttpOpenRequest(hConnect, L"GET", L"/", nullptr,
+		                   WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+	if (!hRequest) {
+		WinHttpCloseHandle(hConnect);
+		WinHttpCloseHandle(hSession);
+		return false;
+	}
+
+	const bool ok =
+		WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+		                   WINHTTP_NO_REQUEST_DATA, 0, 0, 0) != FALSE &&
+		WinHttpReceiveResponse(hRequest, nullptr) != FALSE;
+
+	WinHttpCloseHandle(hRequest);
+	WinHttpCloseHandle(hConnect);
+	WinHttpCloseHandle(hSession);
+	return ok;
+}
+#endif
+
+// 棒読みちゃん接続確認をバックグラウンドで実行してステータスを更新する
+static void launchBouyomiCheck(const std::string &host, int port,
+                                bool withRetry, int maxSeconds = 30)
+{
+#ifdef _WIN32
+	std::thread([host, port, withRetry, maxSeconds]() {
+		const int tries = withRetry ? maxSeconds : 1;
+
+		for (int i = 0; i < tries; ++i) {
+			if (i > 0)
+				Sleep(1000);
+
+			if (pingBouyomi(host, port)) {
+				QMetaObject::invokeMethod(qApp, []() {
+					EngineManager::EngineStatus st;
+					st.state = EngineManager::EngineState::Connected;
+					applyStatus("bouyomi", st);
+				}, Qt::QueuedConnection);
+				return;
+			}
+		}
+
+		QMetaObject::invokeMethod(qApp, []() {
+			EngineManager::EngineStatus st;
+			st.state    = EngineManager::EngineState::Error;
+			st.errorMsg = "棒読みちゃんに接続できませんでした";
+			applyStatus("bouyomi", st);
+		}, Qt::QueuedConnection);
+	}).detach();
+#else
+	Q_UNUSED(host)
+	Q_UNUSED(port)
+	Q_UNUSED(withRetry)
+	Q_UNUSED(maxSeconds)
+#endif
+}
+
 } // namespace
 
 // ── public API ─────────────────────────────────────────────────────────────
@@ -288,12 +368,39 @@ void EngineManager::startAll()
 		                   /*withRetry=*/doAutoStart);
 	}
 
-	// 棒読みちゃん: 起動プロセス不要、有効なら Connected 扱い
+	// 棒読みちゃん: 自動起動対応・HTTP ping で接続確認
 	if (cfg.bouyomiEnabled) {
-		EngineStatus st;
-		st.state = EngineState::Connected;
-		applyStatus("bouyomi", st);
+		{
+			EngineStatus st;
+			st.state = EngineState::Starting;
+			applyStatus("bouyomi", st);
+		}
 		anyStarted = true;
+
+		const bool alreadyLaunched =
+			s_processes.count("bouyomi") > 0 &&
+			s_processes.at("bouyomi") != nullptr &&
+			s_processes.at("bouyomi")->state() != QProcess::NotRunning;
+
+		bool doAutoStart = false;
+		if (cfg.bouyomiAutoStart) {
+			if (cfg.bouyomiExePath.empty()) {
+				obs_log(LOG_WARNING,
+				        "[EngineManager] bouyomi auto-start: path not set, skipping");
+			} else if (alreadyLaunched) {
+				obs_log(LOG_INFO,
+				        "[EngineManager] bouyomi auto-start: already running, skipping launch");
+			} else {
+				obs_log(LOG_INFO, "[EngineManager] bouyomi auto-start: launching %s",
+				        cfg.bouyomiExePath.c_str());
+				auto *proc = new QProcess();
+				proc->start(QString::fromStdString(cfg.bouyomiExePath), {});
+				s_processes["bouyomi"] = proc;
+				doAutoStart = true;
+			}
+		}
+
+		launchBouyomiCheck(cfg.bouyomiHost, cfg.bouyomiPort, doAutoStart);
 	}
 
 	if (!anyStarted)
@@ -350,8 +457,11 @@ void EngineManager::refreshAll()
 	}
 
 	if (cfg.bouyomiEnabled) {
-		EngineStatus st;
-		st.state = EngineState::Connected;
-		applyStatus("bouyomi", st);
+		{
+			EngineStatus st;
+			st.state = EngineState::Starting;
+			applyStatus("bouyomi", st);
+		}
+		launchBouyomiCheck(cfg.bouyomiHost, cfg.bouyomiPort, /*withRetry=*/false);
 	}
 }
