@@ -28,6 +28,15 @@
 
 ## 最近完了した対策（参照用）
 
+### VOICEROID（AssistantSeika）TTSエンジン対応（2026-06-22 完了）
+- **新規追加:** `VoiceroidClient`（POST /PLAY2/<cid> + JSON + BASIC認証）
+- `PluginConfig` に voiceroid 設定フィールドを追加（host/port/cid/username/password/enabled）
+- `EngineManager` に voiceroid ping チェック（GET /VERSION）を追加
+- `tts.html` に `voiceroid` エンジン分岐を追加（`voiceroid_speak` WebSocket メッセージ）
+- `plugin-main.cpp` に `handleVoiceroidSpeakRequest()` を追加
+- `TtsSpeechDialog` に「VOICEROID（AssistantSeika）」設定グループを追加（host/port/cid/認証情報）
+- **注意:** 接続確認は `GET /VERSION` エンドポイントで実施。今後の実機テストで動作確認が必要
+
 ### 棒読みちゃん実動作確認・関連対策（2026-06-22 完了）
 - **動作確認:** `speak OK` + 音声再生を確認済み
 - `handleBouyomiSpeakRequest` / `BouyomiChanClient::talk()` にログ追加（受信・HTTP送信・成功/失敗を追跡可能に）

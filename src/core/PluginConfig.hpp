@@ -95,6 +95,7 @@ public:
 	bool lmroidEnabled      = false;
 	bool itvoiceEnabled     = false;
 	bool bouyomiEnabled     = false;
+	bool voiceroidEnabled   = false;
 
 	// 現在選択中エンジンのURL
 	std::string activeVoicevoxUrl() const
@@ -124,6 +125,13 @@ public:
 	int bouyomiSpeedMax  = 300;
 	int bouyomiToneMin   = -100;
 	int bouyomiToneMax   = 100;
+
+	// VOICEROID（AssistantSeika）設定
+	std::string voiceroidHost     = "localhost";
+	int         voiceroidPort     = 7180;
+	int         voiceroidCid      = 0;  // 話者番号（AssistantSeika の「設定2」タブで確認）
+	std::string voiceroidUsername;       // AssistantSeika BASIC 認証ユーザー名
+	std::string voiceroidPassword;       // AssistantSeika BASIC 認証パスワード
 
 	// VOICEVOX互換エンジン [olh] コマンド パラメータ上下限
 	float aivisSpeedMin        =  0.5f;

@@ -281,6 +281,86 @@ static bool pingBouyomi(const std::string &host, int port)
 }
 #endif
 
+// AssistantSeika HTTP サーバーへの疎通確認（GET /VERSION を送り、レスポンスが来ればOK）
+#ifdef _WIN32
+static bool pingVoiceroid(const std::string &host, int port)
+{
+	const std::wstring whost(host.begin(), host.end());
+
+	HINTERNET hSession =
+		WinHttpOpen(L"obs-live-hub/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
+		            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+	if (!hSession)
+		return false;
+
+	WinHttpSetTimeouts(hSession, 2000, 2000, 2000, 2000);
+
+	HINTERNET hConnect =
+		WinHttpConnect(hSession, whost.c_str(),
+		               static_cast<INTERNET_PORT>(port), 0);
+	if (!hConnect) {
+		WinHttpCloseHandle(hSession);
+		return false;
+	}
+
+	HINTERNET hRequest =
+		WinHttpOpenRequest(hConnect, L"GET", L"/VERSION", nullptr,
+		                   WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+	if (!hRequest) {
+		WinHttpCloseHandle(hConnect);
+		WinHttpCloseHandle(hSession);
+		return false;
+	}
+
+	const bool ok =
+		WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+		                   WINHTTP_NO_REQUEST_DATA, 0, 0, 0) != FALSE &&
+		WinHttpReceiveResponse(hRequest, nullptr) != FALSE;
+
+	WinHttpCloseHandle(hRequest);
+	WinHttpCloseHandle(hConnect);
+	WinHttpCloseHandle(hSession);
+	return ok;
+}
+#endif
+
+// AssistantSeika 接続確認をバックグラウンドで実行してステータスを更新する
+static void launchVoiceroidCheck(const std::string &host, int port,
+                                  bool withRetry, int maxSeconds = 30)
+{
+#ifdef _WIN32
+	std::thread([host, port, withRetry, maxSeconds]() {
+		const int tries = withRetry ? maxSeconds : 1;
+
+		for (int i = 0; i < tries; ++i) {
+			if (i > 0)
+				Sleep(1000);
+
+			if (pingVoiceroid(host, port)) {
+				QMetaObject::invokeMethod(qApp, []() {
+					EngineManager::EngineStatus st;
+					st.state = EngineManager::EngineState::Connected;
+					applyStatus("voiceroid", st);
+				}, Qt::QueuedConnection);
+				return;
+			}
+		}
+
+		QMetaObject::invokeMethod(qApp, []() {
+			EngineManager::EngineStatus st;
+			st.state    = EngineManager::EngineState::Error;
+			st.errorMsg = "AssistantSeika に接続できませんでした";
+			applyStatus("voiceroid", st);
+		}, Qt::QueuedConnection);
+	}).detach();
+#else
+	Q_UNUSED(host)
+	Q_UNUSED(port)
+	Q_UNUSED(withRetry)
+	Q_UNUSED(maxSeconds)
+#endif
+}
+
 // 棒読みちゃん接続確認をバックグラウンドで実行してステータスを更新する
 static void launchBouyomiCheck(const std::string &host, int port,
                                 bool withRetry, int maxSeconds = 30)
@@ -403,6 +483,17 @@ void EngineManager::startAll()
 		launchBouyomiCheck(cfg.bouyomiHost, cfg.bouyomiPort, doAutoStart);
 	}
 
+	// VOICEROID（AssistantSeika）: HTTP ping で接続確認
+	if (cfg.voiceroidEnabled) {
+		{
+			EngineStatus st;
+			st.state = EngineState::Starting;
+			applyStatus("voiceroid", st);
+		}
+		anyStarted = true;
+		launchVoiceroidCheck(cfg.voiceroidHost, cfg.voiceroidPort, /*withRetry=*/false);
+	}
+
 	if (!anyStarted)
 		obs_log(LOG_INFO, "[EngineManager] No engines enabled — skipping startup");
 }
@@ -463,5 +554,14 @@ void EngineManager::refreshAll()
 			applyStatus("bouyomi", st);
 		}
 		launchBouyomiCheck(cfg.bouyomiHost, cfg.bouyomiPort, /*withRetry=*/false);
+	}
+
+	if (cfg.voiceroidEnabled) {
+		{
+			EngineStatus st;
+			st.state = EngineState::Starting;
+			applyStatus("voiceroid", st);
+		}
+		launchVoiceroidCheck(cfg.voiceroidHost, cfg.voiceroidPort, /*withRetry=*/false);
 	}
 }

@@ -62,6 +62,7 @@ obs-comment-viewer/
     │   ├── AivisEngine.hpp/cpp     # VOICEVOX 互換 HTTP API ラッパー
     │   ├── AivisStyleCache.hpp/cpp # 話者一覧キャッシュ（エンジン → スタイル名解決）
     │   ├── BouyomiChanClient.hpp/cpp # 棒読みちゃん連携クライアント
+    │   ├── VoiceroidClient.hpp/cpp  # AssistantSeika HTTP API クライアント（VOICEROID連携）
     │   ├── EffectManager.hpp/cpp   # エフェクト設定管理・発火制御
     │   ├── EngineManager.hpp/cpp   # TTS エンジンライフサイクル管理（起動/接続確認）
     │   ├── PointManager.hpp/cpp    # ポイントシステム管理・CSV 永続化
@@ -123,7 +124,7 @@ public:
 
 | 機能 | 主要クラス | 備考 |
 |---|---|---|
-| TTS 読み上げ（複数エンジン同時対応） | `EngineManager` / `AivisEngine` / `BouyomiChanClient` | webspeech / aivisspeech / sharevox / lmroid / itvoice / bouyomi |
+| TTS 読み上げ（複数エンジン同時対応） | `EngineManager` / `AivisEngine` / `BouyomiChanClient` / `VoiceroidClient` | webspeech / aivisspeech / sharevox / lmroid / itvoice / bouyomi / voiceroid |
 | 視聴者別 TTS 個人設定 | `ViewerTtsSettings` | CSV 永続化、再起動後も維持 |
 | 視聴者コメントコマンド（`[olh]`） | `plugin-main.cpp` / `overlay.html` | 詳細は「視聴者コメントコマンド全集」セクション参照 |
 | WebSocket サーバー | `WsServer` | overlay.html / tts.html との双方向通信 |
@@ -261,6 +262,7 @@ C:\Program Files\obs-studio\obs-plugins\64bit\
 | `[olh] engine:lmroid` | LMROID (localhost:49973) | 同上 |
 | `[olh] engine:itvoice` | ITVOICE (localhost:49540) | 同上 |
 | `[olh] engine:bouyomi` | 棒読みちゃん (localhost:50080) | 先頭話者の自動設定なし |
+| `[olh] engine:voiceroid` | VOICEROID（AssistantSeika経由、localhost:7180） | 先頭話者の自動設定なし。cid・認証情報は読み上げ設定で配信者が一括設定 |
 
 **注意:** 不正なエンジン名（上記以外）はエラーなしで無視される。コメントがカードとして表示される。
 

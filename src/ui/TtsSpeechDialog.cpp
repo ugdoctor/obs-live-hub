@@ -139,12 +139,13 @@ static const struct {
 	const char *defaultUrl;
 	const char *pathPlaceholder;
 } kEngines[] = {
-	{ "webspeech",   "Web Speech API（ブラウザ）",  "",                       "" },
-	{ "aivisspeech", "AivisSpeech（ローカル）",      "http://localhost:10101", "AivisSpeech-Engine\\run.exe のパス" },
-	{ "sharevox",    "SHAREVOX（ローカル）",          "http://localhost:50025", "SHAREVOX\\run.exe のパス（任意）" },
-	{ "lmroid",      "LMROID（ローカル）",            "http://localhost:49973", "LMROID\\run.exe のパス（任意）" },
-	{ "itvoice",     "ITVOICE（ローカル）",           "http://localhost:49540", "ITVOICE\\run.exe のパス（任意）" },
-	{ "bouyomi",     "棒読みちゃん（ローカル）",      "",                       "" },
+	{ "webspeech",   "Web Speech API（ブラウザ）",       "",                       "" },
+	{ "aivisspeech", "AivisSpeech（ローカル）",           "http://localhost:10101", "AivisSpeech-Engine\\run.exe のパス" },
+	{ "sharevox",    "SHAREVOX（ローカル）",               "http://localhost:50025", "SHAREVOX\\run.exe のパス（任意）" },
+	{ "lmroid",      "LMROID（ローカル）",                 "http://localhost:49973", "LMROID\\run.exe のパス（任意）" },
+	{ "itvoice",     "ITVOICE（ローカル）",                "http://localhost:49540", "ITVOICE\\run.exe のパス（任意）" },
+	{ "bouyomi",     "棒読みちゃん（ローカル）",           "",                       "" },
+	{ "voiceroid",   "VOICEROID（AssistantSeika経由）",   "",                       "" },
 };
 
 // 棒読みちゃん標準 voice 番号一覧（AquesTalk 同梱声）
@@ -359,6 +360,44 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 	bouyomiForm->addRow("声の種類:",     voiceRow);
 	bouyomiForm->addRow("",              bouyomiNote);
 
+	// ── VOICEROID（AssistantSeika）設定グループ ──
+	voiceroidGroup_ = new QGroupBox("VOICEROID（AssistantSeika）設定", this);
+
+	voiceroidHostEdit_ = new QLineEdit(voiceroidGroup_);
+	voiceroidHostEdit_->setPlaceholderText("localhost");
+
+	voiceroidPortSpin_ = new QSpinBox(voiceroidGroup_);
+	voiceroidPortSpin_->setRange(1, 65535);
+	voiceroidPortSpin_->setValue(7180);
+
+	voiceroidCidSpin_ = new QSpinBox(voiceroidGroup_);
+	voiceroidCidSpin_->setRange(0, 99999);
+	voiceroidCidSpin_->setSpecialValueText("（未設定）");
+
+	voiceroidUsernameEdit_ = new QLineEdit(voiceroidGroup_);
+	voiceroidUsernameEdit_->setPlaceholderText("AssistantSeika のユーザー名");
+
+	voiceroidPasswordEdit_ = new QLineEdit(voiceroidGroup_);
+	voiceroidPasswordEdit_->setPlaceholderText("AssistantSeika のパスワード");
+	voiceroidPasswordEdit_->setEchoMode(QLineEdit::Password);
+
+	auto *voiceroidNote = new QLabel(
+		"<small>※AssistantSeika の「設定2」タブで HTTP 連携を有効にし、"
+		"認証情報と cid を設定してください<br>"
+		"※cid はAssistantSeika に登録した話者の番号です"
+		"（例: 2001=琴葉茜、3001=さとうささら）</small>",
+		voiceroidGroup_);
+	voiceroidNote->setWordWrap(true);
+
+	auto *voiceroidForm = new QFormLayout(voiceroidGroup_);
+	voiceroidForm->setSpacing(6);
+	voiceroidForm->addRow("ホスト:",       voiceroidHostEdit_);
+	voiceroidForm->addRow("ポート:",       voiceroidPortSpin_);
+	voiceroidForm->addRow("cid（話者番号）:", voiceroidCidSpin_);
+	voiceroidForm->addRow("ユーザー名:",   voiceroidUsernameEdit_);
+	voiceroidForm->addRow("パスワード:",   voiceroidPasswordEdit_);
+	voiceroidForm->addRow("",              voiceroidNote);
+
 	// コンボ変更 → スピンボックスに反映
 	QObject::connect(bouyomiVoiceCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
 	                 this, [this](int idx) {
@@ -411,6 +450,7 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 	form->addRow(engineListGroup_);
 	form->addRow(aivisGroup_);
 	form->addRow(bouyomiGroup_);
+	form->addRow(voiceroidGroup_);
 	form->addRow(buttonBox_);
 
 	// ── シグナル接続 ──
@@ -496,10 +536,12 @@ TtsSpeechDialog::TtsSpeechDialog(QWidget *parent) : QDialog(parent)
 // ──────────────────────────────────────────────────────────────
 void TtsSpeechDialog::onDefaultEngineChanged(int engineIdx)
 {
-	const bool voicevox  = (engineIdx >= 1 && engineIdx <= 4);
-	const bool isBouyomi = (engineIdx == 5);
+	const bool voicevox    = (engineIdx >= 1 && engineIdx <= 4);
+	const bool isBouyomi   = (engineIdx == 5);
+	const bool isVoiceroid = (engineIdx == 6);
 	aivisGroup_->setVisible(voicevox);
 	bouyomiGroup_->setVisible(isBouyomi);
+	voiceroidGroup_->setVisible(isVoiceroid);
 
 	if (isBouyomi) {
 		const auto &cfg = PluginConfig::instance();
@@ -510,6 +552,17 @@ void TtsSpeechDialog::onDefaultEngineChanged(int engineIdx)
 		bouyomiHostEdit_->setText(QString::fromStdString(cfg.bouyomiHost));
 		bouyomiPortSpin_->setValue(cfg.bouyomiPort);
 		bouyomiVoiceSpin_->setValue(cfg.bouyomiVoice);
+		adjustSize();
+		return;
+	}
+
+	if (isVoiceroid) {
+		const auto &cfg = PluginConfig::instance();
+		voiceroidHostEdit_->setText(QString::fromStdString(cfg.voiceroidHost));
+		voiceroidPortSpin_->setValue(cfg.voiceroidPort);
+		voiceroidCidSpin_->setValue(cfg.voiceroidCid);
+		voiceroidUsernameEdit_->setText(QString::fromStdString(cfg.voiceroidUsername));
+		voiceroidPasswordEdit_->setText(QString::fromStdString(cfg.voiceroidPassword));
 		adjustSize();
 		return;
 	}
@@ -804,11 +857,13 @@ void TtsSpeechDialog::loadFromConfig()
 		QSignalBlocker b3(engineEnabledCheck_[3]);
 		QSignalBlocker b4(engineEnabledCheck_[4]);
 		QSignalBlocker b5(engineEnabledCheck_[5]);
+		QSignalBlocker b6(engineEnabledCheck_[6]);
 		engineEnabledCheck_[1]->setChecked(cfg.aivisspeechEnabled);
 		engineEnabledCheck_[2]->setChecked(cfg.sharevoxEnabled);
 		engineEnabledCheck_[3]->setChecked(cfg.lmroidEnabled);
 		engineEnabledCheck_[4]->setChecked(cfg.itvoiceEnabled);
 		engineEnabledCheck_[5]->setChecked(cfg.bouyomiEnabled);
+		engineEnabledCheck_[6]->setChecked(cfg.voiceroidEnabled);
 	}
 	for (int i = 0; i < kEngineCount; ++i)
 		engineDefaultRadio_[i]->setEnabled(engineEnabledCheck_[i]->isChecked());
@@ -820,6 +875,7 @@ void TtsSpeechDialog::loadFromConfig()
 	else if (cfg.ttsEngine == "lmroid")      defaultIdx = 3;
 	else if (cfg.ttsEngine == "itvoice")     defaultIdx = 4;
 	else if (cfg.ttsEngine == "bouyomi")     defaultIdx = 5;
+	else if (cfg.ttsEngine == "voiceroid")   defaultIdx = 6;
 	// デフォルトエンジンが無効化されていたら webspeech にフォールバック
 	if (!engineDefaultRadio_[defaultIdx]->isEnabled())
 		defaultIdx = 0;
@@ -865,6 +921,14 @@ void TtsSpeechDialog::saveToConfig()
 		if (cfg.bouyomiHost.empty()) cfg.bouyomiHost = "localhost";
 		cfg.bouyomiPort  = bouyomiPortSpin_->value();
 		cfg.bouyomiVoice = bouyomiVoiceSpin_->value();
+	} else if (idx == 6) { // voiceroid
+		cfg.ttsEngine           = "voiceroid";
+		cfg.voiceroidHost       = voiceroidHostEdit_->text().trimmed().toStdString();
+		if (cfg.voiceroidHost.empty()) cfg.voiceroidHost = "localhost";
+		cfg.voiceroidPort       = voiceroidPortSpin_->value();
+		cfg.voiceroidCid        = voiceroidCidSpin_->value();
+		cfg.voiceroidUsername   = voiceroidUsernameEdit_->text().toStdString();
+		cfg.voiceroidPassword   = voiceroidPasswordEdit_->text().toStdString();
 	} else if (idx == 0) {
 		cfg.ttsEngine = "webspeech";
 	} else {
@@ -908,6 +972,7 @@ void TtsSpeechDialog::saveToConfig()
 	cfg.lmroidEnabled      = engineEnabledCheck_[3]->isChecked();
 	cfg.itvoiceEnabled     = engineEnabledCheck_[4]->isChecked();
 	cfg.bouyomiEnabled     = engineEnabledCheck_[5]->isChecked();
+	cfg.voiceroidEnabled   = engineEnabledCheck_[6]->isChecked();
 	cfg.save();
 }
 

@@ -202,6 +202,16 @@
         }
         ttsSpeaking = false;
         setTimeout(processTtsQueue, 0);
+      } else if (effectiveEngine === 'voiceroid') {
+        // VoiceroidはC++経由でAssistantSeika HTTP POSTを送るだけ。即座に次へ
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'voiceroid_speak',
+            text: item.text
+          }));
+        }
+        ttsSpeaking = false;
+        setTimeout(processTtsQueue, 0);
       } else if (isVoicevoxEngine(effectiveEngine)) {
         // コメントの aivis パラメータを aivisParams 形式に変換
         var ap = {};

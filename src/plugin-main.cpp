@@ -54,6 +54,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "modules/AivisStyleCache.hpp"
 #include "modules/EngineManager.hpp"
 #include "modules/BouyomiChanClient.hpp"
+#include "modules/VoiceroidClient.hpp"
 #include "modules/ViewerTtsSettings.hpp"
 #include "modules/WsServer.hpp"
 #include "platforms/TwitchPlatform.hpp"
@@ -770,6 +771,23 @@ static void handleBouyomiSpeakRequest(const QJsonObject &obj)
 	                        text, voice, volume, speed, tone);
 }
 
+// VOICEROID 読み上げリクエスト（tts.html → C++ → AssistantSeika HTTP POST）
+static void handleVoiceroidSpeakRequest(const QJsonObject &obj)
+{
+	const QString text = obj["text"].toString();
+	if (text.isEmpty())
+		return;
+
+	const auto &cfg = PluginConfig::instance();
+	VoiceroidClient::talk(
+		QString::fromStdString(cfg.voiceroidHost),
+		cfg.voiceroidPort,
+		cfg.voiceroidCid,
+		text,
+		QString::fromStdString(cfg.voiceroidUsername),
+		QString::fromStdString(cfg.voiceroidPassword));
+}
+
 static void handleOlhWebSpeechParamsRequest(const QJsonObject &obj)
 {
 	const QString userId = obj["userId"].toString();
@@ -971,6 +989,8 @@ static void handleWsClientMessage(const QString &json)
 		handleOlhBouyomiParamsRequest(obj);
 	else if (type == "bouyomi_speak")
 		handleBouyomiSpeakRequest(obj);
+	else if (type == "voiceroid_speak")
+		handleVoiceroidSpeakRequest(obj);
 	else if (type == "tts_speaking_start") {
 		// tts.html からの読み上げ開始通知を全クライアントへ中継する
 		if (s_wsServer)

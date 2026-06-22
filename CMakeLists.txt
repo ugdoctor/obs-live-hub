@@ -83,6 +83,8 @@ target_sources(
     src/ui/PointSettingsDialog.hpp
     src/modules/BouyomiChanClient.cpp
     src/modules/BouyomiChanClient.hpp
+    src/modules/VoiceroidClient.cpp
+    src/modules/VoiceroidClient.hpp
     src/modules/EngineManager.cpp
     src/modules/EngineManager.hpp
     src/ui/BouyomiParamLimitDialog.cpp

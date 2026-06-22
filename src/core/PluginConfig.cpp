@@ -293,6 +293,10 @@ void PluginConfig::load()
 		bouyomiEnabled = obs_data_get_bool(data, "bouyomi_enabled");
 	else
 		bouyomiEnabled = (ttsEngine == "bouyomi");
+	if (obs_data_has_user_value(data, "voiceroid_enabled"))
+		voiceroidEnabled = obs_data_get_bool(data, "voiceroid_enabled");
+	else
+		voiceroidEnabled = (ttsEngine == "voiceroid");
 
 	// 棒読みちゃん設定
 	if (obs_data_has_user_value(data, "bouyomi_host")) {
@@ -325,6 +329,26 @@ void PluginConfig::load()
 		bouyomiToneMin = static_cast<int>(obs_data_get_int(data, "bouyomi_tone_min"));
 	if (obs_data_has_user_value(data, "bouyomi_tone_max"))
 		bouyomiToneMax = static_cast<int>(obs_data_get_int(data, "bouyomi_tone_max"));
+
+	// VOICEROID（AssistantSeika）設定
+	if (obs_data_has_user_value(data, "voiceroid_host")) {
+		const char *s = obs_data_get_string(data, "voiceroid_host");
+		if (s && *s) voiceroidHost = s;
+	}
+	if (obs_data_has_user_value(data, "voiceroid_port")) {
+		voiceroidPort = static_cast<int>(obs_data_get_int(data, "voiceroid_port"));
+		if (voiceroidPort <= 0 || voiceroidPort > 65535) voiceroidPort = 7180;
+	}
+	if (obs_data_has_user_value(data, "voiceroid_cid"))
+		voiceroidCid = static_cast<int>(obs_data_get_int(data, "voiceroid_cid"));
+	if (obs_data_has_user_value(data, "voiceroid_username")) {
+		const char *s = obs_data_get_string(data, "voiceroid_username");
+		if (s) voiceroidUsername = s;
+	}
+	if (obs_data_has_user_value(data, "voiceroid_password")) {
+		const char *s = obs_data_get_string(data, "voiceroid_password");
+		if (s) voiceroidPassword = s;
+	}
 
 	// AivisSpeech [olh] パラメータ上下限
 	if (obs_data_has_user_value(data, "aivis_speed_min"))
@@ -572,6 +596,7 @@ void PluginConfig::save()
 	obs_data_set_bool  (data, "lmroid_enabled",        lmroidEnabled);
 	obs_data_set_bool  (data, "itvoice_enabled",       itvoiceEnabled);
 	obs_data_set_bool  (data, "bouyomi_enabled",       bouyomiEnabled);
+	obs_data_set_bool  (data, "voiceroid_enabled",     voiceroidEnabled);
 
 	// 棒読みちゃん設定
 	obs_data_set_string(data, "bouyomi_host",        bouyomiHost.c_str());
@@ -585,6 +610,13 @@ void PluginConfig::save()
 	obs_data_set_int   (data, "bouyomi_speed_max",   bouyomiSpeedMax);
 	obs_data_set_int   (data, "bouyomi_tone_min",    bouyomiToneMin);
 	obs_data_set_int   (data, "bouyomi_tone_max",    bouyomiToneMax);
+
+	// VOICEROID（AssistantSeika）設定
+	obs_data_set_string(data, "voiceroid_host",      voiceroidHost.c_str());
+	obs_data_set_int   (data, "voiceroid_port",      voiceroidPort);
+	obs_data_set_int   (data, "voiceroid_cid",       voiceroidCid);
+	obs_data_set_string(data, "voiceroid_username",  voiceroidUsername.c_str());
+	obs_data_set_string(data, "voiceroid_password",  voiceroidPassword.c_str());
 
 	// AivisSpeech [olh] パラメータ上下限
 	obs_data_set_double(data, "aivis_speed_min",        static_cast<double>(aivisSpeedMin));

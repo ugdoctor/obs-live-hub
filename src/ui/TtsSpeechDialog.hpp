@@ -59,7 +59,7 @@ private:
 	QCheckBox *checkEngineConnectionCheck_;
 
 	// ── TTSエンジン選択 (有効化 + デフォルト + 接続状態) ──
-	static constexpr int kEngineCount = 6;
+	static constexpr int kEngineCount = 7;
 	QGroupBox    *engineListGroup_;
 	QCheckBox    *engineEnabledCheck_[kEngineCount];
 	QRadioButton *engineDefaultRadio_[kEngineCount];
@@ -95,6 +95,14 @@ private:
 	QLineEdit   *bouyomiExePathEdit_;
 	QPushButton *browseBouyomiExeBtn_;
 	QCheckBox   *bouyomiAutoStartCheck_;
+
+	// ── VOICEROID（AssistantSeika）設定グループ ──
+	QGroupBox   *voiceroidGroup_;
+	QLineEdit   *voiceroidHostEdit_;
+	QSpinBox    *voiceroidPortSpin_;
+	QSpinBox    *voiceroidCidSpin_;
+	QLineEdit   *voiceroidUsernameEdit_;
+	QLineEdit   *voiceroidPasswordEdit_;
 
 	QDialogButtonBox *buttonBox_;
 };
