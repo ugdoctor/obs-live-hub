@@ -314,6 +314,36 @@ EngineManager の接続確認ログ: `[EngineManager] bouyomi auto-start: launch
 
 **解消方法:** bind失敗時はPCの再起動が必要な場合がある（OBS単体の再起動では直らないことがある）。
 
+### Google OAuth 同意画面「テスト中」ステータスとリフレッシュトークン有効期限
+
+**症状:** YouTube 連携が 7 日経過後に突然失敗し始める。OBS ログに
+`invalid_grant: Token has been expired or revoked.` が出る。
+
+**原因:** Google Cloud Console で OAuth 同意画面を作成した直後は公開ステータスが
+**「テスト中（Testing）」** になっている。このステータスでは
+**リフレッシュトークンの有効期限が 7 日間** に制限される（通常は無期限）。
+7 日間 OBS を起動しないか YouTube 連携が使われないと、リフレッシュトークン自体が
+失効し、アクセストークンの自動更新（`refreshAccessTokenAsync`）を試みても
+`invalid_grant` エラーになる。
+
+**対応方法（いずれか）:**
+
+1. **推奨（個人利用）:** 7 日以内に一度は OBS を起動して YouTube 連携を使う運用にする。
+   - 再認証は `ツール → obs-live-hub → 接続設定 → YouTube タブ → Googleアカウントと連携`
+     からいつでも可能。
+2. **「アプリを公開」（任意）:** Google Cloud Console の OAuth 同意画面で
+   「本番環境（公開）」に変更すると 7 日制限が解除される。
+   ただし使用スコープによっては Google の審査プロセスが必要になる場合があり、
+   個人利用の範囲では審査コストを考えると必須ではない。
+
+**自動リフレッシュの実装状況（参考）:**
+`YouTubePlatform` は以下 3 か所でトークン自動更新を試みる（すでに実装済み）:
+- `fetchMessages()`: 有効期限 300 秒前にプロアクティブに更新
+- `onBroadcastInfoResult()`: HTTP 401 応答時にリアクティブに更新
+- `onMessagesResult()`: 同上
+
+`invalid_grant` の場合は自動更新自体が失敗するため、上記の再認証フローが必要。
+
 ### YouTubeリンク取得のタイムラグについて（仕様）
 
 **症状:** 配信開始後、X手動投稿ダイアログの「YouTubeリンク」が「取得中...」のまま
