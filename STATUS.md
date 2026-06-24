@@ -28,6 +28,88 @@
 
 ## 最近完了した対策（参照用）
 
+### X投稿機能 一連の実装・実機検証完了（2026-06-24）
+API投稿・手動投稿・テンプレート・Twitch/YouTubeリンク自動構築のすべてが実機で動作確認済み。
+- X API 投稿（OAuth 1.0a / WinHTTP）: `POST OK: HTTP 201` 確認
+- X 手動投稿（Web Intent）: ブラウザで `x.com/intent/post` が開き投稿完了
+- Twitch/YouTubeリンクのテンプレート保存 → ダイアログ初期反映: 動作確認済み
+- `broadcastResolved` シグナル経由の YouTube URL 動的更新: 動作確認済み
+  - `isGuiThread=true` / ラベル更新正常 / チェック状態維持を確認
+  - 配信開始後 15〜30秒で `lifeCycleStatus: live` → URL取得というタイムラグは仕様通り
+
+### XManualPostDialog broadcastResolved 診断ログ追加（2026-06-24）
+- `broadcastResolved` ラムダ内に以下3点のログを追加:
+  1. シグナル受信確認 + `isGuiThread`（`QThread::currentThread() == QApplication::instance()->thread()`）
+  2. URL更新直前（newUrl と現在のチェック状態）
+  3. UI更新完了確認（チェック状態が変わっていないことを記録）
+- これにより「シグナル未着」「スレッド不整合」「ダイアログ破棄済み（受信なし）」を
+  ログだけで判別可能
+
+### 自動投稿設定ダイアログのメニュー追加・STREAMING_STARTEDログ追加（2026-06-24）
+- `ツール → obs-live-hub → X投稿 → 配信開始時の自動投稿設定` メニュー項目を追加
+  - クリックするとラジオボタン3択ダイアログ（オフ/API投稿確認/手動投稿）が開く
+  - OK時: PluginConfig に保存 + `s_xPostDock->refresh()` でドック側 UI と同期
+  - ドックパネルが非表示でも設定変更可能
+- `STREAMING_STARTED` ハンドラに `xAutoPostMode=N (...)` のログ出力を追加
+  - ログから「設定がオフだったのか」「処理が動かなかったのか」を即座に判別できる
+- **調査結果:** `obs_frontend_add_dock_by_id()` でのデフォルト表示制御: OBS公式APIなし。
+  `QDockWidget::show()` を直接呼ぶと毎回強制表示されてしまうため非推奨。
+  ドック非表示の問題はメニューからの設定アクセスで対処済み。
+
+### XTemplate へのリンクチェック設定追加（2026-06-24）
+- `XTemplate` 構造体に `includeTwitchLink` / `includeYoutubeLink`（bool）を追加
+- `PluginConfig.cpp` の load/save に `include_twitch_link` / `include_youtube_link` キーを追加（後方互換: 既存テンプレートはデフォルト false）
+- `XTemplateSettingsDialog` の右ペインに「Twitchリンクを含める」「YouTubeリンクを含める」チェックボックスを追加
+- `XManualPostDialog::onTemplateChanged()` でテンプレートのチェック値を Twitch/YouTube チェックボックスの初期値として反映
+- `broadcastResolved` シグナル受信時はラベルのみ更新し、チェック状態は変更しない（テンプレート由来の初期値を維持）
+- **実機確認済み（2026-06-24）**
+
+### XManualPostDialog YouTube チェックボックス挙動修正（2026-06-24）
+- 「取得中」状態でもチェックボックスを有効化し、配信前から先行チェックできるように変更
+- `broadcastResolved` 受信時はラベルのみ更新し、チェック状態（ON/OFF）を変更しないように修正
+- 「ブラウザで投稿」押下時に YouTube チェック済みかつ `youtubeUrl_` が空（未取得）の場合はブロックし案内を表示
+- **実機確認済み（2026-06-24）**
+
+### YouTube 動的 URL 取得対応（2026-06-24 完了）
+- `YouTubePlatform` に `resolvedBroadcastId_` フィールド・`currentBroadcastId()` getter・`broadcastResolved(QString)` シグナルを追加
+- `fetchActiveBroadcast()` で `item.id`（動画ID）を取得して保存 → `broadcastResolved` emit
+- `fetchVideoInfo()` で `broadcastId_`（手動指定ID）を `resolvedBroadcastId_` に保存 → `broadcastResolved` emit
+- `XManualPostDialog` を `YouTubePlatform*` 引数に対応:
+  - 即座に ID が取得済み → 即時 URL 表示
+  - 未取得 → 「取得中...」＋チェック可能（先行チェック対応）＋`broadcastResolved` に接続（ダイアログ破棄で自動切断）
+  - YouTube 未接続 → config の固定IDにフォールバック
+- `plugin-main.cpp` の両呼び出し箇所（メニュー・STREAMING_STARTED）で `s_youtube` を渡すように変更
+
+### X 手動投稿機能 修正（2026-06-24）
+- `xAutoPostOnStreamStart` を `bool` → `int`（0=オフ, 1=API投稿, 2=手動投稿）に変更
+  - 後方互換マイグレーション実装済み（旧 bool キーを読んで int に変換）
+- `XPostDock` のチェックボックス → ラジオボタン3択に変更
+  （「自動表示しない」「API投稿確認ダイアログを表示」「手動投稿ダイアログを表示」）
+- `OBS_FRONTEND_EVENT_STREAMING_STARTED` ハンドラで mode=1 なら `XPostConfirmDialog`、mode=2 なら `XManualPostDialog` を起動
+- `XManualPostDialog` に Twitch/YouTube チェックボックスを追加
+  - Twitch: `PluginConfig::twitchChannel` から URL 自動構築。設定済みなら有効化
+  - YouTube: `PluginConfig::youtubeBroadcastId` が実 ID の場合のみ有効化。"me"/空は無効化（ツールチップで理由説明）
+
+### X 手動投稿機能実装（2026-06-24 完了）
+- **新規追加:** `XManualPostDialog`（X API を一切使わない Web Intent 方式）
+- テンプレート選択（既存 `XTemplate` を流用）→ 本文・リンクURL・画像を編集 → ブラウザで `x.com/intent/post` を開く
+- 画像は `QPixmap` でクリップボードにコピー（貼り付け案内付き）
+- テキストは `QUrl::toPercentEncoding` で UTF-8 パーセントエンコード
+- メニュー: `ツール → obs-live-hub → X投稿 → X手動投稿`（既存の API テスト・設定メニューとは区分けしてセパレータ挿入）
+- **実機確認済み（2026-06-24）**
+
+### X(Twitter) 投稿機能実装（2026-06-24 完了）
+- **新規追加:** `XClient`（OAuth 1.0a / BCrypt HMAC-SHA1 / WinHTTP HTTPS POST /2/tweets）
+- `PluginConfig` に `XTemplate` struct・x* フィールド（xApiKey / xApiSecret / xAccessToken / xAccessTokenSecret / xAutoPostOnStreamStart / xDefaultTemplateIndex / xTemplates）を追加
+- `XAccountSettingsDialog`（API認証情報入力、マスク表示）
+- `XTemplateSettingsDialog`（テンプレート管理：追加/削除/並び替え/編集）
+- `XPostDock`（OBS ドックパネル、常時表示可能）
+- `XPostConfirmDialog`（配信開始時の自動投稿確認）
+- `obs_frontend_add_dock_by_id("obs-live-hub-x-post-dock", ...)` でドック登録
+- `OBS_FRONTEND_EVENT_STREAMING_STARTED` 時に `xAutoPostOnStreamStart` が true なら確認ダイアログを表示
+- **スコープ外（Phase 2）:** 画像添付・リンクURL自動生成・テンプレートプレースホルダー（`imagePath` フィールドは JSON 構造体に確保済み）
+- **実機確認済み（2026-06-24）: `POST OK: HTTP 201` 確認**
+
 ### VOICEROID（AssistantSeika）TTSエンジン対応（2026-06-22 完了）
 - **新規追加:** `VoiceroidClient`（POST /PLAY2/<cid> + JSON + BASIC認証）
 - `PluginConfig` に voiceroid 設定フィールドを追加（host/port/cid/username/password/enabled）

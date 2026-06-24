@@ -13,15 +13,23 @@
       機密ファイルがコミットされていないか確認
 - [ ] 過去のコミットにOAuthトークン・APIキー等の「値」が直接
       ログ出力・ハードコードされていないか確認
-      （grep -rn "access_token\|refresh_token\|client_secret\|api_key" 
-      を全コミット履歴に対して実行する、または該当コミットのdiffを
-      個別に確認）
+      （下記コマンドを全コミット履歴に対して実行するか、
+      該当コミットのdiffを個別に確認）
+
+      スネークケース・キャメルケース両対応（-i で大文字小文字も無視）:
+      git log -p | grep -iE "(client_secret|clientSecret|api_key|apiKey|api_secret|apiSecret|oauth_token|oauthToken|access_token|accessToken|token_secret|tokenSecret|refresh_token|refreshToken)" | grep -v "^[+-][+-][+-]" | grep -v "^diff\|^index\|^---\|^+++"
+
 - [ ] コードのロジックのみが履歴に残るのは問題なし。
       「値」が残っている場合のみ要対応（履歴の書き換えを検討）
 
 ## 3. ソースコード内の直接埋め込み確認
-- [ ] grep -rn "client_secret\|api_key\|oauth_token" src/ で
-      ハードコードされた値がないか確認
+- [ ] 以下のコマンドでハードコードされた値がないか確認
+      （スネークケース・キャメルケース・大文字小文字をすべてカバー）:
+
+      grep -rniE "(client_secret|clientSecret|api_key|apiKey|api_secret|apiSecret|oauth_token|oauthToken|access_token|accessToken|token_secret|tokenSecret|refresh_token|refreshToken)" src/
+
+      ※ 変数名・フィールド名・コメントとして出力されることは正常。
+        文字列リテラルに「値そのもの」が埋め込まれていないかを確認すること。
 
 ## 4. ログ出力コードの確認
 - [ ] OAuth関連のレスポンス処理で、レスポンスボディ全文や
