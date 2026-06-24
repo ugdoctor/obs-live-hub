@@ -192,7 +192,8 @@ void YouTubePlatform::connect()
 		return;
 	}
 
-	// クォータカウンターを初期化（次の UTC 0:00 でリセット）
+	// 動画ID・クォータカウンターを初期化
+	resolvedBroadcastId_.clear();
 	dailyUnitsUsed_ = 0;
 	quotaWarningSent_ = false;
 	const QDate tomorrow = QDateTime::currentDateTimeUtc().date().addDays(1);
@@ -220,6 +221,7 @@ void YouTubePlatform::disconnect()
 	pollTimer_->stop();
 	liveChatId_.clear();
 	nextPageToken_.clear();
+	resolvedBroadcastId_.clear();
 	obs_log(LOG_INFO, "[%s] Disconnected", TAG);
 }
 
@@ -343,6 +345,7 @@ void YouTubePlatform::onBroadcastInfoResult(bool ok, int statusCode, const std::
 	// lifeCycleStatus が "live"/"liveStarting" を優先し、"ready" を次点候補とする。
 	// broadcastStatus と mine=true は同時使用不可のためクライアント側でフィルタする。
 	QString readyCandidateChatId;
+	QString resolvedVideoId; // item.id が YouTube 動画ID
 	for (const QJsonValue &item : items) {
 		const QJsonObject obj = item.toObject();
 		const QString lifeCycleStatus =
@@ -350,7 +353,8 @@ void YouTubePlatform::onBroadcastInfoResult(bool ok, int statusCode, const std::
 		obs_log(LOG_INFO, "[%s] broadcast lifeCycleStatus: %s", TAG,
 			lifeCycleStatus.toUtf8().constData());
 		if (lifeCycleStatus == "live" || lifeCycleStatus == "liveStarting") {
-			liveChatId_ = obj["snippet"].toObject()["liveChatId"].toString();
+			liveChatId_    = obj["snippet"].toObject()["liveChatId"].toString();
+			resolvedVideoId = obj["id"].toString();
 			break;
 		}
 		if (lifeCycleStatus == "ready" && readyCandidateChatId.isEmpty())
@@ -361,8 +365,12 @@ void YouTubePlatform::onBroadcastInfoResult(bool ok, int statusCode, const std::
 		// "live" / "liveStarting" が見つかった
 		obs_log(LOG_INFO, "[%s] liveChatId 自動取得完了: %s", TAG,
 			liveChatId_.toUtf8().constData());
+		resolvedBroadcastId_ = resolvedVideoId;
+		obs_log(LOG_INFO, "[%s] broadcastResolved: videoId=%s", TAG,
+			resolvedBroadcastId_.toUtf8().constData());
 		broadcastRetryCount_ = 0;
 		startPolling();
+		emit broadcastResolved(resolvedBroadcastId_);
 		return;
 	}
 
@@ -467,7 +475,12 @@ void YouTubePlatform::onVideoInfoResult(bool ok, int statusCode, const std::stri
 
 	obs_log(LOG_INFO, "[%s] liveChatId 取得完了: %s", TAG,
 		liveChatId_.toUtf8().constData());
+	// broadcastId_ が動画IDそのもの（fetchVideoInfo は手動ID指定ルート）
+	resolvedBroadcastId_ = broadcastId_;
+	obs_log(LOG_INFO, "[%s] broadcastResolved: videoId=%s", TAG,
+		resolvedBroadcastId_.toUtf8().constData());
 	startPolling();
+	emit broadcastResolved(resolvedBroadcastId_);
 }
 
 // ---- ポーリング間隔取得 ----

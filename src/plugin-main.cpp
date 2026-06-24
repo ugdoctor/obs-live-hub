@@ -31,6 +31,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <algorithm>
 
 #include <QApplication>
+#include <QButtonGroup>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -45,6 +48,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QMessageBox>
 #include <QPointer>
 #include <QProcess>
+#include <QRadioButton>
+#include <QVBoxLayout>
 #include <QWidget>
 
 #include "core/EventBus.hpp"
@@ -75,6 +80,13 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "modules/EffectManager.hpp"
 #include "modules/PointManager.hpp"
 #include "ui/PointSettingsDialog.hpp"
+#include "modules/XClient.hpp"
+#include "ui/XAccountSettingsDialog.hpp"
+#include "ui/XTemplateSettingsDialog.hpp"
+#include "ui/XPostDock.hpp"
+#include "ui/XPostConfirmDialog.hpp"
+#include "ui/XApiTestDialog.hpp"
+#include "ui/XManualPostDialog.hpp"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -85,6 +97,7 @@ static TwitchPlatform *s_twitch = nullptr;
 static WsServer *s_wsServer = nullptr;
 static EffectManager *s_effectManager = nullptr;
 static PointManager *s_pointManager = nullptr;
+static XPostDock *s_xPostDock = nullptr;
 
 // userId → platform マップ（overlay.html の WS メッセージにはプラットフォームが含まれないため）
 static QMutex              s_userPlatformMutex;
@@ -1051,6 +1064,117 @@ static void onOverlayStyleMenuClick(void * /* data */)
 	}
 }
 
+static void doXPostTweet(const QString &text)
+{
+	const auto &cfg = PluginConfig::instance();
+	if (cfg.xApiKey.empty() || cfg.xApiSecret.empty() ||
+	    cfg.xAccessToken.empty() || cfg.xAccessTokenSecret.empty()) {
+		auto *w = static_cast<QWidget *>(obs_frontend_get_main_window());
+		QMessageBox::warning(w, "設定不足",
+		    "X APIの認証情報が設定されていません。\n"
+		    "「obs-live-hub > X投稿 > Xアカウント設定」から設定してください。");
+		return;
+	}
+	if (text.trimmed().isEmpty()) {
+		auto *w = static_cast<QWidget *>(obs_frontend_get_main_window());
+		QMessageBox::warning(w, "テキストが空", "投稿テキストを入力してください。");
+		return;
+	}
+	const std::string apiKey            = cfg.xApiKey;
+	const std::string apiSecret         = cfg.xApiSecret;
+	const std::string accessToken       = cfg.xAccessToken;
+	const std::string accessTokenSecret = cfg.xAccessTokenSecret;
+	const std::string textStr           = text.toStdString();
+
+	std::thread([apiKey, apiSecret, accessToken, accessTokenSecret, textStr]() {
+		const auto result = XClient::postTweet(
+			apiKey, apiSecret, accessToken, accessTokenSecret, textStr);
+		QMetaObject::invokeMethod(qApp, [result]() {
+			auto *w = static_cast<QWidget *>(obs_frontend_get_main_window());
+			if (result.ok) {
+				QMessageBox::information(w, "X投稿完了", "Xへの投稿が完了しました。");
+			} else {
+				QMessageBox::warning(w, "X投稿失敗",
+				    QString("Xへの投稿に失敗しました。\nHTTP %1").arg(result.httpStatus));
+			}
+		}, Qt::QueuedConnection);
+	}).detach();
+}
+
+static void onXApiTestMenuClick(void *)
+{
+	auto *w = static_cast<QWidget *>(obs_frontend_get_main_window());
+	XApiTestDialog dlg(w);
+	dlg.exec();
+}
+
+static void onXManualPostMenuClick(void *)
+{
+	auto *w = static_cast<QWidget *>(obs_frontend_get_main_window());
+	XManualPostDialog dlg(w, s_youtube);
+	dlg.exec();
+}
+
+static void onXAutoPostModeMenuClick(void *)
+{
+	auto *mainWin = static_cast<QWidget *>(obs_frontend_get_main_window());
+
+	QDialog dlg(mainWin);
+	dlg.setWindowTitle("配信開始時の自動投稿設定");
+	dlg.setFixedWidth(380);
+
+	auto *radioOff    = new QRadioButton("自動表示しない",                        &dlg);
+	auto *radioApi    = new QRadioButton("API投稿確認ダイアログを表示",            &dlg);
+	auto *radioManual = new QRadioButton("手動投稿ダイアログ（Web Intent）を表示", &dlg);
+
+	auto *btnGroup = new QButtonGroup(&dlg);
+	btnGroup->addButton(radioOff,    0);
+	btnGroup->addButton(radioApi,    1);
+	btnGroup->addButton(radioManual, 2);
+
+	const int cur = PluginConfig::instance().xAutoPostOnStreamStart;
+	if      (cur == 1) radioApi->setChecked(true);
+	else if (cur == 2) radioManual->setChecked(true);
+	else               radioOff->setChecked(true);
+
+	auto *buttons = new QDialogButtonBox(
+		QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+	QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+	QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+	auto *layout = new QVBoxLayout(&dlg);
+	layout->addWidget(radioOff);
+	layout->addWidget(radioApi);
+	layout->addWidget(radioManual);
+	layout->addSpacing(8);
+	layout->addWidget(buttons);
+
+	if (dlg.exec() == QDialog::Accepted) {
+		int mode = 0;
+		if      (radioApi->isChecked())    mode = 1;
+		else if (radioManual->isChecked()) mode = 2;
+		PluginConfig::instance().xAutoPostOnStreamStart = mode;
+		PluginConfig::instance().save();
+		if (s_xPostDock)
+			s_xPostDock->refresh();
+	}
+}
+
+static void onXAccountSettingsMenuClick(void *)
+{
+	auto *w = static_cast<QWidget *>(obs_frontend_get_main_window());
+	XAccountSettingsDialog dlg(w);
+	dlg.exec();
+}
+
+static void onXTemplateSettingsMenuClick(void *)
+{
+	auto *w = static_cast<QWidget *>(obs_frontend_get_main_window());
+	XTemplateSettingsDialog dlg(w);
+	if (dlg.exec() == QDialog::Accepted && s_xPostDock)
+		s_xPostDock->refresh();
+}
+
 static void onTtsSpeechMenuClick(void * /* data */)
 {
 	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
@@ -1451,6 +1575,14 @@ static void buildObsLiveHubMenu()
 	auto *ptMenu = hubMenu->addMenu("ポイント");
 	ptMenu->addAction("ポイント設定", []() { onPointSettingsMenuClick(nullptr); });
 
+	auto *xMenu = hubMenu->addMenu("X投稿");
+	xMenu->addAction("X手動投稿",               []() { onXManualPostMenuClick(nullptr); });
+	xMenu->addAction("配信開始時の自動投稿設定", []() { onXAutoPostModeMenuClick(nullptr); });
+	xMenu->addSeparator();
+	xMenu->addAction("Xアカウント設定",         []() { onXAccountSettingsMenuClick(nullptr); });
+	xMenu->addAction("Xテンプレート設定",       []() { onXTemplateSettingsMenuClick(nullptr); });
+	xMenu->addAction("X APIテスト",             []() { onXApiTestMenuClick(nullptr); });
+
 	auto *dbgMenu = hubMenu->addMenu("デバッグ");
 	dbgMenu->addAction("デバッグ設定",       []() { onDebugSettingsMenuClick(nullptr); });
 	dbgMenu->addAction("デバッグ表示を開く", []() { onOpenDebugMenuClick(nullptr); });
@@ -1623,6 +1755,32 @@ static void onFrontendEvent(obs_frontend_event event, void * /* data */)
 			s_youtube->connect();
 		if (s_twitch)
 			s_twitch->connect();
+		{
+			const int autoMode = PluginConfig::instance().xAutoPostOnStreamStart;
+			obs_log(LOG_INFO, "[obs-live-hub] STREAMING_STARTED: xAutoPostMode=%d (%s)",
+			        autoMode,
+			        autoMode == 0 ? "オフ" :
+			        autoMode == 1 ? "API投稿確認" :
+			        autoMode == 2 ? "手動投稿" : "不明");
+			if (autoMode == 1) {
+				// API投稿確認ダイアログ
+				QMetaObject::invokeMethod(qApp, []() {
+					auto *mainWin =
+						static_cast<QWidget *>(obs_frontend_get_main_window());
+					XPostConfirmDialog dlg(mainWin);
+					if (dlg.exec() == QDialog::Accepted)
+						doXPostTweet(dlg.postText());
+				}, Qt::QueuedConnection);
+			} else if (autoMode == 2) {
+				// 手動投稿ダイアログ（Web Intent）
+				QMetaObject::invokeMethod(qApp, []() {
+					auto *mainWin =
+						static_cast<QWidget *>(obs_frontend_get_main_window());
+					XManualPostDialog dlg(mainWin, s_youtube);
+					dlg.exec();
+				}, Qt::QueuedConnection);
+			}
+		}
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
 		if (s_youtube)
@@ -1707,6 +1865,12 @@ bool obs_module_load(void)
 	// ドック
 	s_dock = new CommentDock();
 	obs_frontend_add_dock_by_id("obs-live-hub-comment-dock", "コメントビューワー", s_dock);
+
+	// X投稿ドック
+	s_xPostDock = new XPostDock();
+	obs_frontend_add_dock_by_id("obs-live-hub-x-post-dock", "X投稿", s_xPostDock);
+	QObject::connect(s_xPostDock, &XPostDock::postRequested,
+	                 [](const QString &text) { doXPostTweet(text); });
 
 	// WebSocket サーバー起動
 	s_wsServer = new WsServer(static_cast<uint16_t>(cfg.wsPort));

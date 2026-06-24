@@ -85,6 +85,20 @@ target_sources(
     src/modules/BouyomiChanClient.hpp
     src/modules/VoiceroidClient.cpp
     src/modules/VoiceroidClient.hpp
+    src/modules/XClient.cpp
+    src/modules/XClient.hpp
+    src/ui/XApiTestDialog.cpp
+    src/ui/XApiTestDialog.hpp
+    src/ui/XManualPostDialog.cpp
+    src/ui/XManualPostDialog.hpp
+    src/ui/XAccountSettingsDialog.cpp
+    src/ui/XAccountSettingsDialog.hpp
+    src/ui/XTemplateSettingsDialog.cpp
+    src/ui/XTemplateSettingsDialog.hpp
+    src/ui/XPostDock.cpp
+    src/ui/XPostDock.hpp
+    src/ui/XPostConfirmDialog.cpp
+    src/ui/XPostConfirmDialog.hpp
     src/modules/EngineManager.cpp
     src/modules/EngineManager.hpp
     src/ui/BouyomiParamLimitDialog.cpp
@@ -103,7 +117,7 @@ target_compile_features(${CMAKE_PROJECT_NAME} PRIVATE cxx_std_17)
 
 # WinSock2 + SChannel (TlsSocket で使用)
 if(WIN32)
-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ws2_32 secur32 winhttp)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ws2_32 secur32 winhttp bcrypt crypt32)
 endif()
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

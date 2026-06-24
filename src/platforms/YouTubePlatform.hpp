@@ -30,6 +30,9 @@ public:
 	std::string getPlatformName() const override { return "YouTube Live"; }
 	bool isConnected() const override { return connected_; }
 
+	// fetchActiveBroadcast / fetchVideoInfo で解決した動画ID（未取得時は空文字）
+	QString currentBroadcastId() const { return resolvedBroadcastId_; }
+
 signals:
 	void commentReceived(const QString &author, const QString &message,
 			     const QString &avatarUrl);
@@ -39,6 +42,7 @@ signals:
 	void authFailed();      // HTTP 401 受信時
 	void pollSucceeded();   // liveChatMessages.list HTTP 200 成功時
 	void errorOccurred(const QString &errorMessage);
+	void broadcastResolved(const QString &videoId); // 動画IDが確定したタイミングで発火
 
 private slots:
 	void fetchMessages(); // タイマーから呼ばれる入口
@@ -63,9 +67,10 @@ private:
 	QTimer *pollTimer_;
 	QString apiKey_;
 	QString broadcastId_;
-	QString oauthToken_; // 現在の Access Token
+	QString oauthToken_;          // 現在の Access Token
 	QString liveChatId_;
 	QString nextPageToken_;
+	QString resolvedBroadcastId_; // fetchActiveBroadcast / fetchVideoInfo で確定した動画ID
 	bool connected_ = false;
 	bool ignoreQuota_;
 	bool refreshingToken_ = false;    // Token 更新中フラグ（二重エントリ防止）

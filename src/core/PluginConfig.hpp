@@ -1,6 +1,16 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
+
+struct XTemplate {
+	std::string name         = "デフォルト";
+	std::string text;
+	std::string linkPlatform    = "none"; // "none" / "twitch" / "youtube" / "other"
+	std::string imagePath;                // 将来の画像添付用（Phase 1 では未使用）
+	bool includeTwitchLink  = false;      // X手動投稿でTwitchリンクを含める
+	bool includeYoutubeLink = false;      // X手動投稿でYouTubeリンクを含める
+};
 
 // プラグイン全体で共有する設定。シングルトン。
 // obs_data_t のラップは PluginConfig.cpp で実装。
@@ -201,6 +211,16 @@ public:
 	std::string streamYoutubeDescription;
 	std::string streamYoutubeCategoryId = "20";
 	std::string streamYoutubePrivacy = "public";
+
+	// X(Twitter) 投稿設定
+	std::string xApiKey;
+	std::string xApiSecret;
+	std::string xAccessToken;
+	std::string xAccessTokenSecret;
+	// 0=オフ, 1=配信開始時にAPI投稿確認ダイアログ, 2=配信開始時に手動投稿ダイアログ
+	int         xAutoPostOnStreamStart = 0;
+	int         xDefaultTemplateIndex  = 0;
+	std::vector<XTemplate> xTemplates;
 
 private:
 	PluginConfig() = default;

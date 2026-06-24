@@ -493,6 +493,59 @@ void PluginConfig::load()
 		if (s && *s) streamYoutubePrivacy = s;
 	}
 
+	// X(Twitter) 投稿設定
+	if (obs_data_has_user_value(data, "x_api_key")) {
+		const char *s = obs_data_get_string(data, "x_api_key");
+		if (s) xApiKey = s;
+	}
+	if (obs_data_has_user_value(data, "x_api_secret")) {
+		const char *s = obs_data_get_string(data, "x_api_secret");
+		if (s) xApiSecret = s;
+	}
+	if (obs_data_has_user_value(data, "x_access_token")) {
+		const char *s = obs_data_get_string(data, "x_access_token");
+		if (s) xAccessToken = s;
+	}
+	if (obs_data_has_user_value(data, "x_access_token_secret")) {
+		const char *s = obs_data_get_string(data, "x_access_token_secret");
+		if (s) xAccessTokenSecret = s;
+	}
+	// 後方互換: 旧 bool キー (x_auto_post_on_stream_start) → 新 int キー (x_auto_post_mode) へ移行
+	if (obs_data_has_user_value(data, "x_auto_post_mode")) {
+		xAutoPostOnStreamStart = static_cast<int>(obs_data_get_int(data, "x_auto_post_mode"));
+		if (xAutoPostOnStreamStart < 0 || xAutoPostOnStreamStart > 2)
+			xAutoPostOnStreamStart = 0;
+	} else if (obs_data_has_user_value(data, "x_auto_post_on_stream_start")) {
+		xAutoPostOnStreamStart =
+			obs_data_get_bool(data, "x_auto_post_on_stream_start") ? 1 : 0;
+	}
+	if (obs_data_has_user_value(data, "x_default_template_index")) {
+		xDefaultTemplateIndex =
+			static_cast<int>(obs_data_get_int(data, "x_default_template_index"));
+		if (xDefaultTemplateIndex < 0) xDefaultTemplateIndex = 0;
+	}
+	{
+		obs_data_array_t *arr = obs_data_get_array(data, "x_templates");
+		if (arr) {
+			xTemplates.clear();
+			const size_t count = obs_data_array_count(arr);
+			for (size_t i = 0; i < count; ++i) {
+				obs_data_t *item = obs_data_array_item(arr, i);
+				XTemplate t;
+				const char *s;
+				s = obs_data_get_string(item, "name");          if (s) t.name = s;
+				s = obs_data_get_string(item, "text");          if (s) t.text = s;
+				s = obs_data_get_string(item, "link_platform"); if (s) t.linkPlatform = s;
+				s = obs_data_get_string(item, "image_path");    if (s) t.imagePath = s;
+				t.includeTwitchLink  = obs_data_get_bool(item, "include_twitch_link");
+				t.includeYoutubeLink = obs_data_get_bool(item, "include_youtube_link");
+				xTemplates.push_back(std::move(t));
+				obs_data_release(item);
+			}
+			obs_data_array_release(arr);
+		}
+	}
+
 	obs_data_release(data);
 }
 
@@ -669,6 +722,30 @@ void PluginConfig::save()
 	obs_data_set_string(data, "stream_youtube_description",  streamYoutubeDescription.c_str());
 	obs_data_set_string(data, "stream_youtube_category_id",  streamYoutubeCategoryId.c_str());
 	obs_data_set_string(data, "stream_youtube_privacy",      streamYoutubePrivacy.c_str());
+
+	// X(Twitter) 投稿設定
+	obs_data_set_string(data, "x_api_key",             xApiKey.c_str());
+	obs_data_set_string(data, "x_api_secret",          xApiSecret.c_str());
+	obs_data_set_string(data, "x_access_token",        xAccessToken.c_str());
+	obs_data_set_string(data, "x_access_token_secret", xAccessTokenSecret.c_str());
+	obs_data_set_int   (data, "x_auto_post_mode", xAutoPostOnStreamStart);
+	obs_data_set_int   (data, "x_default_template_index",    xDefaultTemplateIndex);
+	{
+		obs_data_array_t *arr = obs_data_array_create();
+		for (const auto &t : xTemplates) {
+			obs_data_t *item = obs_data_create();
+			obs_data_set_string(item, "name",          t.name.c_str());
+			obs_data_set_string(item, "text",          t.text.c_str());
+			obs_data_set_string(item, "link_platform", t.linkPlatform.c_str());
+			obs_data_set_string(item, "image_path",    t.imagePath.c_str());
+			obs_data_set_bool  (item, "include_twitch_link",  t.includeTwitchLink);
+			obs_data_set_bool  (item, "include_youtube_link", t.includeYoutubeLink);
+			obs_data_array_push_back(arr, item);
+			obs_data_release(item);
+		}
+		obs_data_set_array(data, "x_templates", arr);
+		obs_data_array_release(arr);
+	}
 
 	obs_data_save_json_safe(data, path, "tmp", "bak");
 
