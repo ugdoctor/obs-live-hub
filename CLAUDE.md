@@ -378,6 +378,10 @@ C:\Program Files\obs-studio\obs-plugins\64bit\
 %APPDATA%\obs-studio\plugins\
 ```
 
+## ドキュメント
+
+初心者向けガイドは `GETTING_STARTED.md` を参照。
+
 ## 参考リンク
 - OBS Plugin API: https://obsproject.com/docs/
 - obs-plugintemplate: https://github.com/obsproject/obs-plugintemplate

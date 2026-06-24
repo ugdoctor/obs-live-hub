@@ -18,6 +18,7 @@
 !CLAUDE.md
 !STATUS.md
 !RELEASE_CHECKLIST.md
+!GETTING_STARTED.md
 !config.json.example
 
 # Exclude configuration files (contain API keys / tokens)

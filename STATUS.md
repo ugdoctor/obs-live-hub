@@ -28,6 +28,10 @@
 
 ## 最近完了した対策（参照用）
 
+### 初心者向け導入ガイド作成（2026-06-25）
+- `GETTING_STARTED.md` を新規作成。ダウンロード〜Twitch接続・TTS・YouTube・X投稿・FAQ を網羅
+- `CLAUDE.md` に「初心者向けガイドは `GETTING_STARTED.md` を参照」の一文を追記
+
 ### X投稿機能 一連の実装・実機検証完了（2026-06-24）
 API投稿・手動投稿・テンプレート・Twitch/YouTubeリンク自動構築のすべてが実機で動作確認済み。
 - X API 投稿（OAuth 1.0a / WinHTTP）: `POST OK: HTTP 201` 確認
