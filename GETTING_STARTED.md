@@ -38,8 +38,7 @@ OBS Studio をすでに使っていて、プログラミングは詳しくない
 ブラウザで次のページを開きます。
 
 **https://github.com/ugdoctor/obs-live-hub/releases**
-
-[ここにスクリーンショット: GitHubのリリースページ全体の画面]
+<img width="1320" height="757" alt="image" src="https://github.com/user-attachments/assets/7037f787-824e-434d-9b95-1a5e97bcc684" />
 
 一番上にある項目が最新バージョンです。
 
