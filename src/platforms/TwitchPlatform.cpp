@@ -261,6 +261,8 @@ void TwitchPlatform::receiverLoop()
 
 				if (line.find(" PRIVMSG ") != std::string::npos)
 					parseLine(line);
+				else if (line.find(" USERNOTICE ") != std::string::npos)
+					parseUserNotice(line);
 			}
 
 			if (shouldReconnect)
@@ -298,6 +300,8 @@ void TwitchPlatform::parseLine(const std::string &line)
 	std::string userId;
 	std::string messageText;
 
+	int bitsCount = 0;
+
 	if (!line.empty() && line[0] == '@') {
 		// IRCv3 タグあり: @tag1=val1;tag2=val2 :nick!... PRIVMSG #ch :message
 		const size_t spacePos = line.find(' ');
@@ -307,7 +311,7 @@ void TwitchPlatform::parseLine(const std::string &line)
 		const std::string tags = line.substr(1, spacePos - 1);
 		const std::string rest = line.substr(spacePos + 1);
 
-		// display-name と user-id タグを一括抽出
+		// display-name / user-id / bits タグを一括抽出
 		size_t start = 0;
 		while (start < tags.size()) {
 			const size_t end = tags.find(';', start);
@@ -321,6 +325,8 @@ void TwitchPlatform::parseLine(const std::string &line)
 					displayName = val;
 				else if (key == "user-id")
 					userId = val;
+				else if (key == "bits" && !val.empty())
+					bitsCount = std::atoi(val.c_str());
 			}
 			if (end == std::string::npos)
 				break;
@@ -350,6 +356,16 @@ void TwitchPlatform::parseLine(const std::string &line)
 	if (messageText.empty())
 		return;
 
+	// Bits チアの場合は bitsReceived を emit（通常コメントとしても表示）
+	if (bitsCount > 0) {
+		obs_log(LOG_INFO, "[%s] bits: user=%s bits=%d", TAG,
+		        displayName.c_str(), bitsCount);
+		emit bitsReceived(QString::fromStdString(userId),
+		                  QString::fromStdString(displayName),
+		                  bitsCount,
+		                  QString::fromStdString(messageText));
+	}
+
 	// user-id があれば Helix API でアバター URL を取得（キャッシュ済みは即返す）
 	const std::string avatarUrl = userId.empty() ? "" : fetchAvatarUrl(userId);
 
@@ -359,6 +375,93 @@ void TwitchPlatform::parseLine(const std::string &line)
 	ev.message = messageText;
 	ev.avatarUrl = avatarUrl;
 	bus_.publish(ev);
+}
+
+// ---- IRC USERNOTICE パース（サブスクリプション系）----
+
+void TwitchPlatform::parseUserNotice(const std::string &line)
+{
+	if (line.find(" USERNOTICE ") == std::string::npos)
+		return;
+
+	std::string displayName;
+	std::string userId;
+	std::string msgId;
+	std::string subPlan;
+	std::string recipientName;
+	int giftCount = 1;
+	std::string messageText;
+
+	if (!line.empty() && line[0] == '@') {
+		const size_t spacePos = line.find(' ');
+		if (spacePos == std::string::npos)
+			return;
+
+		const std::string tags = line.substr(1, spacePos - 1);
+
+		size_t start = 0;
+		while (start < tags.size()) {
+			const size_t end = tags.find(';', start);
+			const std::string tag =
+				tags.substr(start, end == std::string::npos ? end : end - start);
+			const size_t eq = tag.find('=');
+			if (eq != std::string::npos) {
+				const std::string key = tag.substr(0, eq);
+				const std::string val = tag.substr(eq + 1);
+				if (key == "display-name")
+					displayName = val;
+				else if (key == "user-id")
+					userId = val;
+				else if (key == "msg-id")
+					msgId = val;
+				else if (key == "msg-param-sub-plan")
+					subPlan = val;
+				else if (key == "msg-param-recipient-display-name")
+					recipientName = val;
+				else if (key == "msg-param-mass-gift-count" && !val.empty())
+					giftCount = std::atoi(val.c_str());
+			}
+			if (end == std::string::npos)
+				break;
+			start = end + 1;
+		}
+
+		// USERNOTICE の本文（オプション）: :tmi.twitch.tv USERNOTICE #ch :text
+		const size_t colonPos = line.rfind(" :");
+		if (colonPos != std::string::npos && colonPos > spacePos)
+			messageText = line.substr(colonPos + 2);
+	}
+
+	// 対応する msg-id のみ処理
+	if (msgId != "sub" && msgId != "resub" &&
+	    msgId != "subgift" && msgId != "submysterygift" &&
+	    msgId != "anonsubgift" && msgId != "anonsubmysterygift")
+		return;
+
+	// サブギフトの場合、ギフター名 + 受領者名をメモとして付加
+	if (msgId == "subgift" || msgId == "anonsubgift") {
+		if (!recipientName.empty())
+			messageText = "→ " + recipientName;
+	}
+	if (msgId == "submysterygift" || msgId == "anonsubmysterygift") {
+		if (giftCount > 1)
+			messageText = std::to_string(giftCount) + "人へギフト";
+	}
+
+	obs_log(LOG_INFO, "[%s] USERNOTICE: msgId=%s user=%s subPlan=%s giftCount=%d",
+	        TAG, msgId.c_str(), displayName.c_str(), subPlan.c_str(), giftCount);
+
+	// アノニマスギフトの場合は userId/displayName が空になることがある
+	if (displayName.empty())
+		displayName = "AnonymousGifter";
+
+	emit subscriptionReceived(
+		QString::fromStdString(userId),
+		QString::fromStdString(displayName),
+		QString::fromStdString(msgId),
+		QString::fromStdString(subPlan),
+		giftCount,
+		QString::fromStdString(messageText));
 }
 
 // ---- アバター URL キャッシュ ----

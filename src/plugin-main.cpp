@@ -29,6 +29,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 
 #include <algorithm>
+#include <cmath>
 
 #include <QApplication>
 #include <QButtonGroup>
@@ -80,7 +81,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "modules/EffectManager.hpp"
 #include "modules/PointManager.hpp"
 #include "ui/PointSettingsDialog.hpp"
+#include "modules/SupporterLedger.hpp"
 #include "modules/XClient.hpp"
+#include "ui/SupporterHistoryDialog.hpp"
+#include "ui/MembershipPlanPriceDialog.hpp"
 #include "ui/XAccountSettingsDialog.hpp"
 #include "ui/XTemplateSettingsDialog.hpp"
 #include "ui/XPostDock.hpp"
@@ -98,6 +102,7 @@ static WsServer *s_wsServer = nullptr;
 static EffectManager *s_effectManager = nullptr;
 static PointManager *s_pointManager = nullptr;
 static XPostDock *s_xPostDock = nullptr;
+static QPointer<SupporterHistoryDialog> s_supporterHistoryDialog;
 
 // userId → platform マップ（overlay.html の WS メッセージにはプラットフォームが含まれないため）
 static QMutex              s_userPlatformMutex;
@@ -325,6 +330,27 @@ static void reconnectTwitch()
 	s_twitch->connect();
 }
 
+// 課金イベント（SC/Bits/Sub等）のUSD額に応じてポイントを付与する。
+// usdAmount<=0（メンバーシップ等の金額情報なしイベント）は呼び出し側でプラン価格を
+// 解決してから渡すこと（SupporterLedger::resolveMembershipUsd 参照）。
+static void awardBillingPoints(const QString &userId, const QString &displayName,
+                                const QString &platform, double usdAmount)
+{
+	const auto &cfg = PluginConfig::instance();
+	if (!cfg.pointBillingEnabled || !s_pointManager || usdAmount <= 0.0)
+		return;
+
+	const int pts = static_cast<int>(std::lround(usdAmount * cfg.pointBillingRate));
+	if (pts <= 0)
+		return;
+
+	s_pointManager->awardBillingPoints(userId, platform, pts);
+	obs_log(LOG_INFO,
+	        "[PointBilling] Awarded %d pt to %s (%s) for $%.2f USD (rate: %.1f)",
+	        pts, displayName.toUtf8().constData(), platform.toUtf8().constData(),
+	        usdAmount, cfg.pointBillingRate);
+}
+
 static void connectTwitchSignals()
 {
 	QObject::connect(s_twitch, &TwitchPlatform::errorOccurred, [](const QString &msg) {
@@ -353,6 +379,74 @@ static void connectTwitchSignals()
 				"{\"type\":\"error_clear\",\"code\":\"TWITCH_CONNECTION_LOST\"}");
 		}
 	});
+
+	// ── Twitch 課金イベント → SupporterLedger ──────────────────────────────
+	QObject::connect(
+		s_twitch, &TwitchPlatform::bitsReceived,
+		[](const QString &userId, const QString &displayName, int bits, const QString &msg) {
+			// 100 bits = $1.00。amountMicros = bits × 10,000（USD micros）
+			const int64_t micros = static_cast<int64_t>(bits) * 10'000LL;
+			const double usd = static_cast<double>(bits) / 100.0;
+			SupporterEvent ev;
+			ev.timestamp    = QDateTime::currentDateTime();
+			ev.platform     = "Twitch";
+			ev.type         = SupportEventType::TwitchBits;
+			ev.amountMicros = micros;
+			ev.currency     = "USD";
+			ev.usdAmount    = usd;
+			ev.note         = QString("%1 bits").arg(bits);
+			ev.message      = msg;
+			const QString uid = userId.isEmpty() ? displayName : userId;
+			SupporterLedger::instance().addEvent(uid, displayName, "Twitch", ev);
+			awardBillingPoints(uid, displayName, QStringLiteral("twitch"), usd);
+		});
+
+	QObject::connect(
+		s_twitch, &TwitchPlatform::subscriptionReceived,
+		[](const QString &userId, const QString &displayName,
+		   const QString &msgId, const QString &subPlan,
+		   int giftCount, const QString &msg) {
+			// Tier → USD マッピング（地域差は許容）
+			auto tierUsd = [](const QString &plan) -> double {
+				if (plan == "2000") return 9.99;
+				if (plan == "3000") return 24.99;
+				return 4.99; // 1000 / Prime / 不明
+			};
+			const double unitUsd = tierUsd(subPlan);
+			const double totalUsd = unitUsd * std::max(1, giftCount);
+			const int64_t micros = static_cast<int64_t>(totalUsd * 1'000'000.0);
+
+			SupporterEvent ev;
+			ev.timestamp    = QDateTime::currentDateTime();
+			ev.platform     = "Twitch";
+			ev.currency     = "USD";
+			ev.usdAmount    = totalUsd;
+			ev.amountMicros = micros;
+			ev.message      = msg;
+
+			QString tierLabel;
+			if (subPlan == "Prime")      tierLabel = "Prime";
+			else if (subPlan == "2000")  tierLabel = "Tier 2";
+			else if (subPlan == "3000")  tierLabel = "Tier 3";
+			else                          tierLabel = "Tier 1";
+
+			if (msgId == "sub") {
+				ev.type = SupportEventType::TwitchSub;
+				ev.note = tierLabel;
+			} else if (msgId == "resub") {
+				ev.type = SupportEventType::TwitchResub;
+				ev.note = tierLabel;
+			} else {
+				// subgift / submysterygift / anon 系
+				ev.type = SupportEventType::TwitchSubGift;
+				ev.note = giftCount > 1
+				                  ? QString("%1 × %2件").arg(tierLabel).arg(giftCount)
+				                  : tierLabel;
+			}
+			const QString uid = userId.isEmpty() ? displayName : userId;
+			SupporterLedger::instance().addEvent(uid, displayName, "Twitch", ev);
+			awardBillingPoints(uid, displayName, QStringLiteral("twitch"), totalUsd);
+		});
 }
 
 static void broadcastVoteUpdate(bool ending = false)
@@ -531,6 +625,67 @@ static void connectYouTubeSignals()
 	QObject::connect(s_youtube, &YouTubePlatform::errorOccurred, [](const QString &msg) {
 		obs_log(LOG_WARNING, "YouTube error: %s", msg.toUtf8().constData());
 	});
+
+	// ── YouTube 課金イベント → SupporterLedger ──────────────────────────────
+	QObject::connect(
+		s_youtube, &YouTubePlatform::superChatReceived,
+		[](const QString &authorId, const QString &authorName, const QString & /*avatar*/,
+		   int64_t amountMicros, const QString &currency, int tier, const QString &message) {
+			SupporterEvent ev;
+			ev.timestamp    = QDateTime::currentDateTime();
+			ev.platform     = "YouTube";
+			ev.type         = SupportEventType::SuperChat;
+			ev.amountMicros = amountMicros;
+			ev.currency     = currency;
+			ev.usdAmount    = SupporterLedger::toUsd(amountMicros, currency);
+			ev.note         = tier > 0 ? QString("Tier %1").arg(tier) : QString();
+			ev.message      = message;
+			SupporterLedger::instance().addEvent(authorId, authorName, "YouTube", ev);
+			awardBillingPoints(authorId, authorName, QStringLiteral("youtube"), ev.usdAmount);
+		});
+
+	QObject::connect(
+		s_youtube, &YouTubePlatform::superStickerReceived,
+		[](const QString &authorId, const QString &authorName, const QString & /*avatar*/,
+		   int64_t amountMicros, const QString &currency, int tier) {
+			SupporterEvent ev;
+			ev.timestamp    = QDateTime::currentDateTime();
+			ev.platform     = "YouTube";
+			ev.type         = SupportEventType::SuperSticker;
+			ev.amountMicros = amountMicros;
+			ev.currency     = currency;
+			ev.usdAmount    = SupporterLedger::toUsd(amountMicros, currency);
+			ev.note         = tier > 0 ? QString("Tier %1").arg(tier) : QString();
+			SupporterLedger::instance().addEvent(authorId, authorName, "YouTube", ev);
+			awardBillingPoints(authorId, authorName, QStringLiteral("youtube"), ev.usdAmount);
+		});
+
+	QObject::connect(
+		s_youtube, &YouTubePlatform::membershipReceived,
+		[](const QString &authorId, const QString &authorName, const QString & /*avatar*/,
+		   const QString &eventType, const QString &levelName, int memberMonth) {
+			SupporterEvent ev;
+			ev.timestamp    = QDateTime::currentDateTime();
+			ev.platform     = "YouTube";
+			ev.usdAmount    = 0.0;      // YouTube API は金額情報なし
+			ev.planName     = levelName; // 表示・集計時にプラン価格マッピングでUSD解決
+			if (eventType == "join") {
+				ev.type = SupportEventType::MembershipJoin;
+				ev.note = levelName;
+			} else if (eventType == "milestone") {
+				ev.type = SupportEventType::MemberMilestone;
+				ev.note = (memberMonth > 0)
+				                  ? QString("継続%1ヶ月 / %2").arg(memberMonth).arg(levelName)
+				                  : levelName;
+			} else {
+				ev.type = SupportEventType::GiftMembership;
+				ev.note = levelName;
+			}
+			SupporterLedger::instance().addEvent(authorId, authorName, "YouTube", ev);
+			const double resolvedUsd = SupporterLedger::resolveMembershipUsd(
+				ev, SupporterLedger::buildPlanUsdMapFromConfig());
+			awardBillingPoints(authorId, authorName, QStringLiteral("youtube"), resolvedUsd);
+		});
 }
 
 static void reconnectYouTube()
@@ -1469,6 +1624,41 @@ static void onPointSettingsMenuClick(void * /* data */)
 	dlg.exec();
 }
 
+static void onSupporterHistoryMenuClick(void * /* data */)
+{
+	auto *mainWin = static_cast<QWidget *>(obs_frontend_get_main_window());
+
+	if (obs_frontend_streaming_active()) {
+		const auto btn = QMessageBox::warning(
+			mainWin, "配信中の注意",
+			"現在配信中です。\n"
+			"この画面を配信に映すと視聴者が不快に感じる可能性があります。\n\n"
+			"本当に開きますか？",
+			QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+		if (btn != QMessageBox::Yes)
+			return;
+	}
+
+	if (!s_supporterHistoryDialog) {
+		s_supporterHistoryDialog = new SupporterHistoryDialog(mainWin);
+	}
+	s_supporterHistoryDialog->refresh();
+	s_supporterHistoryDialog->show();
+	s_supporterHistoryDialog->raise();
+	s_supporterHistoryDialog->activateWindow();
+}
+
+static void onMembershipPlanPriceMenuClick(void * /* data */)
+{
+	auto *mainWin = static_cast<QWidget *>(obs_frontend_get_main_window());
+	MembershipPlanPriceDialog dlg(mainWin);
+	if (dlg.exec() == QDialog::Accepted) {
+		// プラン設定変更を既存の履歴ビューアに即時反映
+		if (s_supporterHistoryDialog && s_supporterHistoryDialog->isVisible())
+			s_supporterHistoryDialog->refresh();
+	}
+}
+
 static void processEffectOlhCommand(const QString &message, const QString &user)
 {
 	if (!s_effectManager)
@@ -1574,6 +1764,9 @@ static void buildObsLiveHubMenu()
 
 	auto *ptMenu = hubMenu->addMenu("ポイント");
 	ptMenu->addAction("ポイント設定", []() { onPointSettingsMenuClick(nullptr); });
+
+	hubMenu->addAction("サポーター履歴", []() { onSupporterHistoryMenuClick(nullptr); });
+	hubMenu->addAction("メンバーシッププラン価格設定", []() { onMembershipPlanPriceMenuClick(nullptr); });
 
 	auto *xMenu = hubMenu->addMenu("X投稿");
 	xMenu->addAction("X手動投稿",               []() { onXManualPostMenuClick(nullptr); });
@@ -1807,6 +2000,7 @@ bool obs_module_load(void)
 
 	PluginConfig::instance().load();
 	ViewerTtsSettings::instance(); // CSV から読み込み（ログに件数を出力）
+	SupporterLedger::instance();   // DPAPI 復号・データ読み込み
 	const auto &cfg = PluginConfig::instance();
 
 	// エフェクトマネージャー

@@ -44,6 +44,14 @@
 - [ ] クリーンビルドを実行し、最新のコードが正しく反映されることを
       確認（ビルドディレクトリの古いキャッシュ起因の問題を防ぐ）
 
+## 7. GitHub Release アセット添付確認
+- [ ] `gh release create` 後、ビルド済み DLL と data ファイル zip を
+      `gh release upload` でアセットとして添付したか確認する
+      例: `gh release upload vX.Y.Z build_x64/RelWithDebInfo/obs-live-hub.dll obs-live-hub-data.zip`
+- [ ] リリースページの Assets に Source code 以外のファイル
+      （`obs-live-hub.dll`、`obs-live-hub-data.zip`）が表示されているか目視確認する
+      例: `gh release view vX.Y.Z --json assets` でアセット一覧を確認
+
 ## 結果の分類
 各項目について、問題が見つかった場合は以下のいずれかに分類して報告：
 - 現状追跡されていないので問題なし

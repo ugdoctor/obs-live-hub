@@ -109,6 +109,12 @@ target_sources(
     src/ui/ConversationOverlayDialog.hpp
     src/modules/ViewerTtsSettings.cpp
     src/modules/ViewerTtsSettings.hpp
+    src/modules/SupporterLedger.cpp
+    src/modules/SupporterLedger.hpp
+    src/ui/SupporterHistoryDialog.cpp
+    src/ui/SupporterHistoryDialog.hpp
+    src/ui/MembershipPlanPriceDialog.cpp
+    src/ui/MembershipPlanPriceDialog.hpp
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")

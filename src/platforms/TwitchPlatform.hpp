@@ -37,10 +37,21 @@ signals:
 	void connectionLost();   // 接続断・再接続開始
 	void joinSucceeded();    // JOIN 成功（376/001 受信後）
 
+	// ── 課金イベントシグナル ──────────────────────────────────────────────────
+	// bits: チア数。userId/displayName が空の場合はログ欠損やアノニマス。
+	void bitsReceived(const QString &userId, const QString &displayName,
+	                  int bits, const QString &message);
+	// msgId: sub / resub / subgift / submysterygift。
+	// subPlan: Prime / 1000 / 2000 / 3000。giftCount: subgift 一括件数（通常 1）。
+	void subscriptionReceived(const QString &userId, const QString &displayName,
+	                          const QString &msgId, const QString &subPlan,
+	                          int giftCount, const QString &message);
+
 private:
 	void receiverLoop();
 	void sendRaw(const std::string &line);
 	void parseLine(const std::string &line);
+	void parseUserNotice(const std::string &line); // USERNOTICE（サブスク系）処理
 	// user-id からアバター URL を返す（キャッシュ済みならキャッシュを返す）
 	std::string fetchAvatarUrl(const std::string &userId);
 	// WinHTTP で Twitch Helix API を呼び出して profile_image_url を取得する

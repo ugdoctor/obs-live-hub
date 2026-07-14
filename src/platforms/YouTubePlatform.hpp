@@ -44,6 +44,20 @@ signals:
 	void errorOccurred(const QString &errorMessage);
 	void broadcastResolved(const QString &videoId); // 動画IDが確定したタイミングで発火
 
+	// ── 課金イベントシグナル（snippet.type で判別） ──────────────────────────
+	// amountMicros: 通貨単位の 1/1,000,000。tier: 1〜7（0=不明）。
+	void superChatReceived(const QString &authorId, const QString &authorName,
+	                       const QString &avatarUrl, int64_t amountMicros,
+	                       const QString &currency, int tier, const QString &message);
+	void superStickerReceived(const QString &authorId, const QString &authorName,
+	                          const QString &avatarUrl, int64_t amountMicros,
+	                          const QString &currency, int tier);
+	// eventType: "join" | "milestone" | "gift"。 memberMonth: milestone のみ有効。
+	// YouTube API は金額情報を返さないため amountMicros 相当は存在しない。
+	void membershipReceived(const QString &authorId, const QString &authorName,
+	                        const QString &avatarUrl, const QString &eventType,
+	                        const QString &levelName, int memberMonth);
+
 private slots:
 	void fetchMessages(); // タイマーから呼ばれる入口
 

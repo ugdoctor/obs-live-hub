@@ -9,6 +9,20 @@
 
 ## 未確認・保留中のタスク（優先度順）
 
+### 0. ポイントシステム課金連携（USD→ポイント自動付与）の実機確認
+
+- **経緯:** 2026-07-14、課金イベント（SC/スーパーステッカー/Bits/サブスク/メンバーシップ）受信時に
+  `pointBillingRate`（デフォルト100pt/USD）に基づきポイントを自動付与する機能を実装。ビルド確認のみ済み
+- **確認方法:**
+  1. `ツール → obs-live-hub → ポイント設定` の「設定」タブで「課金連携を有効にする」がON、レートが意図通りか確認
+  2. `サポーター履歴` の「テストデータ注入」を実行 → OBSログに `[PointBilling] Awarded N pt to ...` が出力されることを確認
+     （注意：テストデータの通常課金分は`usdAmount`が入っているため付与されるはずだが、メンバーシップ分は
+     プラン価格未設定だと `resolvedUsd=0` のため付与されない。「メンバーシッププラン価格設定」で
+     「テストメンバーレベル」に価格を設定してから再度確認するとメンバーシップ分の付与も確認できる）
+  3. `ポイント設定 → ユーザーポイント` タブでテストユーザーのポイントが加算されていることを確認
+  4. 実際のTwitch配信でBits/サブスクを発生させ、バックグラウンドスレッドからの呼び出しでもクラッシュ・
+     警告ログが出ないこと（スレッド安全性）を確認
+
 ### 1. ttsCheckEngineConnection=true に戻してのテスト
 
 - **経緯:** `[olh] engine:xxx` 問題の根本修正後、本来の安全設計（接続チェック有効）に戻して問題ないか未確認のまま v0.3.0 をリリースした
@@ -28,113 +42,55 @@
 
 ## 最近完了した対策（参照用）
 
+### ポイントシステム課金連携機能実装（2026-07-14）
+- `PluginConfig::pointBillingEnabled`（デフォルトtrue）/ `pointBillingRate`（デフォルト100.0 pt/USD）を追加
+- `PointSettingsDialog`「設定」タブにチェックボックスとレート入力欄を追加
+- `PointManager::awardBillingPoints()` を新規実装。`QMetaObject::invokeMethod(..., Qt::QueuedConnection)` でTwitchのバックグラウンドスレッドからの呼び出しでも安全に `points_` を更新（`scheduleSave()` と同じパターン）
+- `plugin-main.cpp` の Twitch Bits・サブスク、YouTube SC・スーパーステッカー・メンバーシップの各課金イベントハンドラに `awardBillingPoints()` 呼び出しを追加
+- メンバーシップ分は `SupporterLedger::buildPlanUsdMapFromConfig()`（新規、`SupporterHistoryDialog::buildPlanUsdMap()` から共通化）で解決したUSD額を使用
+- ビルド確認済み（2026-07-14）。**実機未確認**（上記「未確認・保留中のタスク」参照）
+
+### メンバーシッププラン価格設定：実機検証完了（2026-07-14）
+- テストデータ注入 → 500 JPYマッピング設定 → ビューアで $3.25 反映を確認。設計通りの動的遡及反映を確認
+- 06/26投入の旧テストデータは対象外だったが、これは別セッションの古いテストデータによるもので設計上の問題ではない
+
+### メンバーシッププラン価格設定機能実装（2026-06-26）
+- **新規追加:** `MembershipPlanPriceDialog`（プラン名 → 価格・通貨 のマッピング設定UI）
+- メニュー: `ツール → obs-live-hub → メンバーシッププラン価格設定`
+- `PluginConfig::membershipPlanPrices` に永続化（`membership_plan_prices` JSON配列キー）
+- `SupporterEvent::planName` フィールドを追加。メンバーシップ受信時に `levelName` を保存
+- `SupporterLedger::resolveMembershipUsd` / `computeTotalUsd` で表示・集計時に動的USD計算
+- `SupporterHistoryDialog` の金額欄・合計欄がプラン価格設定に連動して即時反映
+- 過去のメンバーシップイベントにも遡って価格が反映される設計
+- `injectTestData()` でメンバーシップイベントに `planName="テストメンバーレベル"` を設定
+- ビルド確認済み（2026-06-26）
+
+### サポーター（課金）履歴機能実装（2026-06-26）
+- **新規追加:** `SupporterLedger`（課金履歴台帳）+ `SupporterHistoryDialog`（UIビューア）
+- 対応イベント: YouTube スーパーチャット・スーパーステッカー・メンバーシップ系（金額なし）、Twitch Bits・サブスクリプション系
+- DPAPI（CryptProtectData/CryptUnprotectData）で `supporter_ledger.dat` をユーザーアカウント固有に暗号化保存
+- USD変換は固定概算レートテーブル（約40通貨）でオフライン計算
+- メンバーシップ系（newSponsorEvent / memberMilestone / giftMembership）は金額情報なしのため件数のみ記録、USD合計に計上しない
+- Twitch Bits: 100bits=$1、サブスクはTier1=$4.99 / Tier2=$9.99 / Tier3=$24.99でマッピング
+- `ツール → obs-live-hub → サポーター履歴` で開く。配信中は警告ダイアログ付き
+- ダイアログ内「テストデータ注入」ボタンでダミーデータを使った暗号化/復号/表示テスト可能
+- YouTubePlatform に `superChatReceived` / `superStickerReceived` / `membershipReceived` シグナルを追加
+- TwitchPlatform に `bitsReceived` / `subscriptionReceived` シグナルと USERNOTICE パース（`parseUserNotice`）を追加
+- ビルド確認済み（2026-06-26）
+- **実機確認済み（2026-06-26）**: テストデータ注入（8件）→ OBS再起動後の復号確認 → 配信中警告ダイアログ（Yes/Cancel両挙動）→ supporter_ledger.dat 暗号化目視確認、すべて問題なし
+
 ### 初心者向け導入ガイド作成（2026-06-25）
 - `GETTING_STARTED.md` を新規作成。ダウンロード〜Twitch接続・TTS・YouTube・X投稿・FAQ を網羅
 - `CLAUDE.md` に「初心者向けガイドは `GETTING_STARTED.md` を参照」の一文を追記
 
-### X投稿機能 一連の実装・実機検証完了（2026-06-24）
-API投稿・手動投稿・テンプレート・Twitch/YouTubeリンク自動構築のすべてが実機で動作確認済み。
-- X API 投稿（OAuth 1.0a / WinHTTP）: `POST OK: HTTP 201` 確認
-- X 手動投稿（Web Intent）: ブラウザで `x.com/intent/post` が開き投稿完了
-- Twitch/YouTubeリンクのテンプレート保存 → ダイアログ初期反映: 動作確認済み
-- `broadcastResolved` シグナル経由の YouTube URL 動的更新: 動作確認済み
-  - `isGuiThread=true` / ラベル更新正常 / チェック状態維持を確認
-  - 配信開始後 15〜30秒で `lifeCycleStatus: live` → URL取得というタイムラグは仕様通り
-
-### XManualPostDialog broadcastResolved 診断ログ追加（2026-06-24）
-- `broadcastResolved` ラムダ内に以下3点のログを追加:
-  1. シグナル受信確認 + `isGuiThread`（`QThread::currentThread() == QApplication::instance()->thread()`）
-  2. URL更新直前（newUrl と現在のチェック状態）
-  3. UI更新完了確認（チェック状態が変わっていないことを記録）
-- これにより「シグナル未着」「スレッド不整合」「ダイアログ破棄済み（受信なし）」を
-  ログだけで判別可能
-
-### 自動投稿設定ダイアログのメニュー追加・STREAMING_STARTEDログ追加（2026-06-24）
-- `ツール → obs-live-hub → X投稿 → 配信開始時の自動投稿設定` メニュー項目を追加
-  - クリックするとラジオボタン3択ダイアログ（オフ/API投稿確認/手動投稿）が開く
-  - OK時: PluginConfig に保存 + `s_xPostDock->refresh()` でドック側 UI と同期
-  - ドックパネルが非表示でも設定変更可能
-- `STREAMING_STARTED` ハンドラに `xAutoPostMode=N (...)` のログ出力を追加
-  - ログから「設定がオフだったのか」「処理が動かなかったのか」を即座に判別できる
-- **調査結果:** `obs_frontend_add_dock_by_id()` でのデフォルト表示制御: OBS公式APIなし。
-  `QDockWidget::show()` を直接呼ぶと毎回強制表示されてしまうため非推奨。
-  ドック非表示の問題はメニューからの設定アクセスで対処済み。
-
-### XTemplate へのリンクチェック設定追加（2026-06-24）
-- `XTemplate` 構造体に `includeTwitchLink` / `includeYoutubeLink`（bool）を追加
-- `PluginConfig.cpp` の load/save に `include_twitch_link` / `include_youtube_link` キーを追加（後方互換: 既存テンプレートはデフォルト false）
-- `XTemplateSettingsDialog` の右ペインに「Twitchリンクを含める」「YouTubeリンクを含める」チェックボックスを追加
-- `XManualPostDialog::onTemplateChanged()` でテンプレートのチェック値を Twitch/YouTube チェックボックスの初期値として反映
-- `broadcastResolved` シグナル受信時はラベルのみ更新し、チェック状態は変更しない（テンプレート由来の初期値を維持）
-- **実機確認済み（2026-06-24）**
-
-### XManualPostDialog YouTube チェックボックス挙動修正（2026-06-24）
-- 「取得中」状態でもチェックボックスを有効化し、配信前から先行チェックできるように変更
-- `broadcastResolved` 受信時はラベルのみ更新し、チェック状態（ON/OFF）を変更しないように修正
-- 「ブラウザで投稿」押下時に YouTube チェック済みかつ `youtubeUrl_` が空（未取得）の場合はブロックし案内を表示
-- **実機確認済み（2026-06-24）**
-
-### YouTube 動的 URL 取得対応（2026-06-24 完了）
-- `YouTubePlatform` に `resolvedBroadcastId_` フィールド・`currentBroadcastId()` getter・`broadcastResolved(QString)` シグナルを追加
-- `fetchActiveBroadcast()` で `item.id`（動画ID）を取得して保存 → `broadcastResolved` emit
-- `fetchVideoInfo()` で `broadcastId_`（手動指定ID）を `resolvedBroadcastId_` に保存 → `broadcastResolved` emit
-- `XManualPostDialog` を `YouTubePlatform*` 引数に対応:
-  - 即座に ID が取得済み → 即時 URL 表示
-  - 未取得 → 「取得中...」＋チェック可能（先行チェック対応）＋`broadcastResolved` に接続（ダイアログ破棄で自動切断）
-  - YouTube 未接続 → config の固定IDにフォールバック
-- `plugin-main.cpp` の両呼び出し箇所（メニュー・STREAMING_STARTED）で `s_youtube` を渡すように変更
-
-### X 手動投稿機能 修正（2026-06-24）
-- `xAutoPostOnStreamStart` を `bool` → `int`（0=オフ, 1=API投稿, 2=手動投稿）に変更
-  - 後方互換マイグレーション実装済み（旧 bool キーを読んで int に変換）
-- `XPostDock` のチェックボックス → ラジオボタン3択に変更
-  （「自動表示しない」「API投稿確認ダイアログを表示」「手動投稿ダイアログを表示」）
-- `OBS_FRONTEND_EVENT_STREAMING_STARTED` ハンドラで mode=1 なら `XPostConfirmDialog`、mode=2 なら `XManualPostDialog` を起動
-- `XManualPostDialog` に Twitch/YouTube チェックボックスを追加
-  - Twitch: `PluginConfig::twitchChannel` から URL 自動構築。設定済みなら有効化
-  - YouTube: `PluginConfig::youtubeBroadcastId` が実 ID の場合のみ有効化。"me"/空は無効化（ツールチップで理由説明）
-
-### X 手動投稿機能実装（2026-06-24 完了）
-- **新規追加:** `XManualPostDialog`（X API を一切使わない Web Intent 方式）
-- テンプレート選択（既存 `XTemplate` を流用）→ 本文・リンクURL・画像を編集 → ブラウザで `x.com/intent/post` を開く
-- 画像は `QPixmap` でクリップボードにコピー（貼り付け案内付き）
-- テキストは `QUrl::toPercentEncoding` で UTF-8 パーセントエンコード
-- メニュー: `ツール → obs-live-hub → X投稿 → X手動投稿`（既存の API テスト・設定メニューとは区分けしてセパレータ挿入）
-- **実機確認済み（2026-06-24）**
-
-### X(Twitter) 投稿機能実装（2026-06-24 完了）
-- **新規追加:** `XClient`（OAuth 1.0a / BCrypt HMAC-SHA1 / WinHTTP HTTPS POST /2/tweets）
-- `PluginConfig` に `XTemplate` struct・x* フィールド（xApiKey / xApiSecret / xAccessToken / xAccessTokenSecret / xAutoPostOnStreamStart / xDefaultTemplateIndex / xTemplates）を追加
-- `XAccountSettingsDialog`（API認証情報入力、マスク表示）
-- `XTemplateSettingsDialog`（テンプレート管理：追加/削除/並び替え/編集）
-- `XPostDock`（OBS ドックパネル、常時表示可能）
-- `XPostConfirmDialog`（配信開始時の自動投稿確認）
-- `obs_frontend_add_dock_by_id("obs-live-hub-x-post-dock", ...)` でドック登録
-- `OBS_FRONTEND_EVENT_STREAMING_STARTED` 時に `xAutoPostOnStreamStart` が true なら確認ダイアログを表示
-- **スコープ外（Phase 2）:** 画像添付・リンクURL自動生成・テンプレートプレースホルダー（`imagePath` フィールドは JSON 構造体に確保済み）
-- **実機確認済み（2026-06-24）: `POST OK: HTTP 201` 確認**
-
-### VOICEROID（AssistantSeika）TTSエンジン対応（2026-06-22 完了）
-- **新規追加:** `VoiceroidClient`（POST /PLAY2/<cid> + JSON + BASIC認証）
-- `PluginConfig` に voiceroid 設定フィールドを追加（host/port/cid/username/password/enabled）
-- `EngineManager` に voiceroid ping チェック（GET /VERSION）を追加
-- `tts.html` に `voiceroid` エンジン分岐を追加（`voiceroid_speak` WebSocket メッセージ）
-- `plugin-main.cpp` に `handleVoiceroidSpeakRequest()` を追加
-- `TtsSpeechDialog` に「VOICEROID（AssistantSeika）」設定グループを追加（host/port/cid/認証情報）
-- **注意:** 接続確認は `GET /VERSION` エンドポイントで実施。今後の実機テストで動作確認が必要
-
-### 棒読みちゃん実動作確認・関連対策（2026-06-22 完了）
-- **動作確認:** `speak OK` + 音声再生を確認済み
-- `handleBouyomiSpeakRequest` / `BouyomiChanClient::talk()` にログ追加（受信・HTTP送信・成功/失敗を追跡可能に）
-- 接続確認を常時 Connected の偽実装 → 実 HTTP ping 方式に修正
-- 自動起動機能を実装（読み上げ設定ダイアログ → 棒読みちゃんセクションに「実行ファイルパス + 自動起動チェック」を追加）
-
-### WsServer ゾンビソケット対策（2026-06-21 完了）
-- **問題:** OBSクラッシュ後、ポート8765のLISTENソケットがOSレベルで残存し、新しいWsServerへの接続が古いゾンビソケット側に奪われる現象
-- **根本原因:** `SO_REUSEADDR` はWindows上で複数ソケットの同時LISTENを許容するため、ゾンビとの「サイレントな共存」が発生していた
-- **対策:** `SO_REUSEADDR` → `SO_EXCLUSIVEADDRUSE` に変更。ゾンビソケットが存在する場合は `bind()` が即座に失敗してログに明示される
-- **連携:** 接続診断ダイアログで「バインド失敗」状態を表示できるよう `ListenState` 列挙型を追加
-- **残課題:** ゾンビソケット自体を解消する手段はなく、PCの再起動が必要な場合がある。今回の改善点は「サイレントな接続横取り → 即座な失敗検知」への変化
+### X投稿機能一式（API投稿・手動投稿・テンプレート・リンク連携）（2026-06-24 完了）
+**実機確認済み（2026-06-24）**: API投稿・手動投稿・テンプレート・Twitch/YouTubeリンク連携のすべてが動作確認済み。
+- **X API 投稿**: `XClient`（OAuth 1.0a / WinHTTP HTTPS POST /2/tweets）、`XPostDock`（OBS ドック）、`XPostConfirmDialog`。`POST OK: HTTP 201` 確認
+- **X 手動投稿**: `XManualPostDialog`（Web Intent 方式・X API 不要）。テンプレート選択 → 本文編集 → ブラウザで `x.com/intent/post` を開く。画像はクリップボードコピー
+- **テンプレート管理**: `XTemplate` + `XTemplateSettingsDialog`。`includeTwitchLink`/`includeYoutubeLink` フラグでダイアログの初期チェック状態を保存
+- **配信開始時の自動投稿モード**: 0=オフ / 1=API確認 / 2=手動投稿。`STREAMING_STARTED` 連動。ドック非表示時はメニュー（`ツール → X投稿 → 配信開始時の自動投稿設定`）から設定可
+- **YouTube URL 動的取得**: `YouTubePlatform::broadcastResolved` シグナルでダイアログを開いたまま URL が自動更新。配信開始後 15〜30秒のラグは仕様
+- **スコープ外（Phase 2）**: 画像添付・リンクURL自動生成・テンプレートプレースホルダー展開（`imagePath` フィールドは構造体に確保済み）
 
 ---
 

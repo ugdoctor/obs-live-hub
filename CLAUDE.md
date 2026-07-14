@@ -137,6 +137,8 @@ public:
 | TTS パラメータ制限設定 | `AivisParamLimitDialog` / `BouyomiParamLimitDialog` | 配信者がパラメータの上下限を設定 |
 | X(Twitter) API 投稿 | `XClient` / `XPostDock` / `XAccountSettingsDialog` / `XTemplateSettingsDialog` / `XApiTestDialog` | OAuth 1.0a、テンプレート管理、配信開始時自動投稿、API テストダイアログ |
 | X 手動投稿（Web Intent） | `XManualPostDialog` | X API 認証情報不要、ブラウザで `x.com/intent/post` を開く、画像クリップボードコピー |
+| サポーター（課金）履歴 | `SupporterLedger` / `SupporterHistoryDialog` | YouTube SC/SS・メンバーシップ、Twitch Bits・サブスクを記録・表示。DPAPI暗号化。詳細は「サポーター履歴機能」セクション参照 |
+| メンバーシッププラン価格設定 | `MembershipPlanPriceDialog` | プラン名→価格・通貨のマッピングを設定。表示・集計時に動的USD換算。過去イベントにも遡及反映 |
 
 ### Phase 2（将来）：追加予定
 - [ ] NGワードフィルタリング
@@ -153,6 +155,68 @@ public:
 - DLLはOBSのプラグインフォルダに配置して動作確認
 - `CLAUDE_LOG.md` は開発履歴ログのみ。調査・参照不要。読み込まないこと。
 - `git push` / GitHub Release 作成前は必ず `RELEASE_CHECKLIST.md` の全項目を確認すること。チェック結果は「現状追跡されていないので問題なし」「過去のコミット履歴に残っている」「現在も追跡されており要対応」の3分類で報告すること。
+
+## サポーター履歴機能
+
+### 概要
+YouTube / Twitch の課金イベントを視聴者単位で追跡・記録する機能。
+配信者の個人情報（視聴者の課金金額・ユーザー名）を含む機密データを扱う。
+
+### 対応イベントと金額の扱い
+
+| イベント | 金額 | 累計USD計上 |
+|---|---|---|
+| YouTube スーパーチャット（`superChatEvent`） | `snippet.superChatDetails.amountMicros`（文字列） + currency | **あり** |
+| YouTube スーパーステッカー（`superStickerEvent`） | `snippet.superStickerDetails.amountMicros`（文字列） + currency | **あり** |
+| YouTube メンバーシップ加入（`newSponsorEvent`） | **なし**（YouTube API が返さない） | なし（件数のみ） |
+| YouTube メンバーシップ継続（`memberMilestoneChatEvent`） | **なし** | なし（件数のみ） |
+| YouTube ギフトメンバーシップ（`giftMembershipReceivedEvent`） | **なし** | なし（件数のみ） |
+| Twitch Bits（PRIVMSG の `bits` タグ） | 100 bits = $1.00 で換算 | **あり** |
+| Twitch サブスク（USERNOTICE `msg-id=sub/resub/subgift` 等） | Tier1=$4.99 / Tier2=$9.99 / Tier3=$24.99 固定 | **あり** |
+
+### データモデル
+- `SupportEventType`: イベント種別 enum（SuperChat / SuperSticker / MembershipJoin / MemberMilestone / GiftMembership / TwitchBits / TwitchSub / TwitchResub / TwitchSubGift）
+- `SupporterEvent`: 個別イベント（timestamp, platform, type, amountMicros, currency, usdAmount, note, message）
+- `SupporterLedger::UserEntry`: ユーザーごとの集計（displayName, platform, totalUsdAmount, events）
+- キー: `"platform:userId"` 形式（例: `"YouTube:UCxxx"`, `"Twitch:12345"`）
+
+### 暗号化（DPAPI）
+- 保存先: `%APPDATA%\obs-studio\plugins\obs-live-hub\supporter_ledger.dat`
+- `CryptProtectData`（`CRYPTPROTECT_UI_FORBIDDEN` フラグ）でJSON全体を暗号化して保存
+- `CryptUnprotectData` で復号（実行ユーザーアカウント固有。別PC・別アカウントでは復号不可）
+- `crypt32.lib` は CMakeLists.txt の WIN32 ブロックですでにリンク済み
+
+### USD変換
+- 固定概算レートテーブル（約40通貨）を `SupporterLedger.cpp` にハードコード
+- `amountMicros`（通貨単位の 1/1,000,000）を USD に変換: `micros / 1,000,000 × rate`
+- YouTube API は `amountMicros` を文字列として返すため `toString().toLongLong()` で変換
+
+### 配信中警告
+`obs-live-hub → サポーター履歴` をクリック時、`obs_frontend_streaming_active()` で配信中を確認。
+配信中の場合は「この画面を配信に映すと視聴者が不快に感じる可能性があります」という警告を表示し、ユーザーが「Yes」を選択した場合のみ開く。
+
+### シグナルフロー
+- `YouTubePlatform::superChatReceived` / `superStickerReceived` / `membershipReceived`
+  → `plugin-main.cpp::connectYouTubeSignals()` → `SupporterLedger::addEvent()`
+- `TwitchPlatform::bitsReceived` / `subscriptionReceived`
+  → `plugin-main.cpp::connectTwitchSignals()` → `SupporterLedger::addEvent()`
+
+### メンバーシッププラン価格の設計方針
+- **記録時に金額を確定させない**: `SupporterEvent::usdAmount = 0.0` のまま保存
+- **表示・集計時に動的計算**: `SupporterLedger::resolveMembershipUsd(ev, planUsdMap)` が `ev.planName` でマッピング参照
+- **`SupporterEvent::planName`**: メンバーシップイベントに `levelName`（例:「ファン」）を保存。非メンバーシップは空文字
+- **`UserEntry::totalUsdAmount`**: 非メンバーシップ分のみ累積。`computeTotalUsd()` でメンバーシップ解決分を加算して表示
+- マッピング未設定のプラン名は引き続き「金額情報なし」として表示
+- 設定変更はリアルタイムで過去イベント全件に遡及反映される
+
+### デバッグ・テスト方法
+- `SupporterHistoryDialog` の「テストデータ注入（デバッグ）」ボタンで `injectTestData()` を呼び出し
+- ダミーイベント8件（YouTube SC×2・SS×1・Membership×2、Twitch Bits×1・Sub×2）を注入。メンバーシップには `planName="テストメンバーレベル"` が設定される
+- `ツール → obs-live-hub → メンバーシッププラン価格設定` で「テストメンバーレベル」に価格を設定するとビューアの金額が変わることを確認可能
+- 注入後に暗号化保存→復号読み込みが正常に機能するかをビューアで確認可能
+- **実機確認済み（2026-06-26）**: テストデータ注入 → OBS再起動後復号確認 → 配信中警告ダイアログ（Yes/Cancel）→ supporter_ledger.dat 暗号化目視確認、すべて問題なし
+
+---
 
 ## X 手動投稿機能（Web Intent）
 

@@ -50,6 +50,12 @@ public:
 	void setPoints(const QString &userId, const QString &platform, int points);
 	void adjustPoints(const QString &userId, const QString &platform, int delta);
 
+	// 課金イベント（SC/Bits/Sub等）によるポイント付与。
+	// Twitchのイベントはバックグラウンドスレッドから届くため、
+	// 内部でQMetaObject::invokeMethod(Qt::QueuedConnection)によりPointManager自身の
+	// スレッドへ処理をキューイングしてから points_ を更新する（scheduleSave と同様の方式）。
+	void awardBillingPoints(const QString &userId, const QString &platform, int amount);
+
 	// 設定変更後に呼び出すと視聴タイマーを再設定する
 	void reloadSettings();
 

@@ -750,14 +750,74 @@ void YouTubePlatform::onMessagesResult(bool ok, int statusCode, const std::strin
 		emit pollSucceeded();
 	}
 
+	// amountMicros は YouTube API が文字列で返すケースがある
+	auto parseAmountMicros = [](const QJsonObject &details, const char *key) -> int64_t {
+		const QJsonValue v = details[key];
+		if (v.isString())
+			return v.toString().toLongLong();
+		return static_cast<int64_t>(v.toDouble());
+	};
+
 	for (const QJsonValue &item : root["items"].toArray()) {
-		const QJsonObject obj = item.toObject();
+		const QJsonObject obj           = item.toObject();
+		const QJsonObject snippet       = obj["snippet"].toObject();
 		const QJsonObject authorDetails = obj["authorDetails"].toObject();
-		const QString author = authorDetails["displayName"].toString();
-		const QString avatarUrl = authorDetails["profileImageUrl"].toString();
-		const QString message = obj["snippet"].toObject()["displayMessage"].toString();
-		if (!message.isEmpty())
-			emit commentReceived(author, message, avatarUrl);
+		const QString authorId   = authorDetails["channelId"].toString();
+		const QString authorName = authorDetails["displayName"].toString();
+		const QString avatarUrl  = authorDetails["profileImageUrl"].toString();
+		const QString type       = snippet["type"].toString();
+		const QString displayMsg = snippet["displayMessage"].toString();
+
+		// コメントビューワーへの表示（テキスト付きイベント全般）
+		if (!displayMsg.isEmpty())
+			emit commentReceived(authorName, displayMsg, avatarUrl);
+
+		// 課金イベントの追加シグナル
+		if (type == "superChatEvent") {
+			const QJsonObject d = snippet["superChatDetails"].toObject();
+			const int64_t micros = parseAmountMicros(d, "amountMicros");
+			const QString currency = d["currency"].toString();
+			const int tier = d["tier"].toInt(0);
+			const QString userComment = d["userComment"].toString();
+			obs_log(LOG_INFO, "[%s] superChat: author=%s %lld %s tier=%d",
+			        TAG, authorName.toUtf8().constData(),
+			        static_cast<long long>(micros), currency.toUtf8().constData(), tier);
+			emit superChatReceived(authorId, authorName, avatarUrl,
+			                       micros, currency, tier, userComment);
+
+		} else if (type == "superStickerEvent") {
+			const QJsonObject d = snippet["superStickerDetails"].toObject();
+			const int64_t micros = parseAmountMicros(d, "amountMicros");
+			const QString currency = d["currency"].toString();
+			const int tier = d["tier"].toInt(0);
+			obs_log(LOG_INFO, "[%s] superSticker: author=%s %lld %s tier=%d",
+			        TAG, authorName.toUtf8().constData(),
+			        static_cast<long long>(micros), currency.toUtf8().constData(), tier);
+			emit superStickerReceived(authorId, authorName, avatarUrl,
+			                          micros, currency, tier);
+
+		} else if (type == "newSponsorEvent") {
+			const QJsonObject d = snippet["newSponsorDetails"].toObject();
+			const QString level = d["memberLevelName"].toString();
+			obs_log(LOG_INFO, "[%s] membership join: author=%s level=%s",
+			        TAG, authorName.toUtf8().constData(), level.toUtf8().constData());
+			emit membershipReceived(authorId, authorName, avatarUrl, "join", level, 0);
+
+		} else if (type == "memberMilestoneChatEvent") {
+			const QJsonObject d = snippet["memberMilestoneChatDetails"].toObject();
+			const QString level = d["memberLevelName"].toString();
+			const int month = d["memberMonth"].toInt(0);
+			obs_log(LOG_INFO, "[%s] membership milestone: author=%s level=%s month=%d",
+			        TAG, authorName.toUtf8().constData(), level.toUtf8().constData(), month);
+			emit membershipReceived(authorId, authorName, avatarUrl, "milestone", level, month);
+
+		} else if (type == "giftMembershipReceivedEvent") {
+			const QJsonObject d = snippet["giftMembershipReceivedDetails"].toObject();
+			const QString level = d["memberLevelName"].toString();
+			obs_log(LOG_INFO, "[%s] gift membership: recipient=%s level=%s",
+			        TAG, authorName.toUtf8().constData(), level.toUtf8().constData());
+			emit membershipReceived(authorId, authorName, avatarUrl, "gift", level, 0);
+		}
 	}
 
 	if (connected_)

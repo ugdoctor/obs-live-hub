@@ -400,6 +400,13 @@ void PluginConfig::load()
 		if (pointUseCooldown < 0 || pointUseCooldown > 300)
 			pointUseCooldown = 5;
 	}
+	if (obs_data_has_user_value(data, "point_billing_enabled"))
+		pointBillingEnabled = obs_data_get_bool(data, "point_billing_enabled");
+	if (obs_data_has_user_value(data, "point_billing_rate")) {
+		pointBillingRate = obs_data_get_double(data, "point_billing_rate");
+		if (pointBillingRate < 0.0 || pointBillingRate > 1'000'000.0)
+			pointBillingRate = 100.0;
+	}
 
 	// エフェクト設定
 	if (obs_data_has_user_value(data, "effect_default_position")) {
@@ -540,6 +547,29 @@ void PluginConfig::load()
 				t.includeTwitchLink  = obs_data_get_bool(item, "include_twitch_link");
 				t.includeYoutubeLink = obs_data_get_bool(item, "include_youtube_link");
 				xTemplates.push_back(std::move(t));
+				obs_data_release(item);
+			}
+			obs_data_array_release(arr);
+		}
+	}
+
+	// メンバーシッププラン価格設定
+	{
+		obs_data_array_t *arr = obs_data_get_array(data, "membership_plan_prices");
+		if (arr) {
+			membershipPlanPrices.clear();
+			const size_t count = obs_data_array_count(arr);
+			for (size_t i = 0; i < count; ++i) {
+				obs_data_t *item = obs_data_array_item(arr, i);
+				MembershipPlanPrice p;
+				const char *s;
+				s = obs_data_get_string(item, "plan_name");
+				if (s && *s) p.planName = s;
+				p.amount = obs_data_get_double(item, "amount");
+				s = obs_data_get_string(item, "currency");
+				if (s && *s) p.currency = s;
+				if (!p.planName.empty())
+					membershipPlanPrices.push_back(std::move(p));
 				obs_data_release(item);
 			}
 			obs_data_array_release(arr);
@@ -690,6 +720,8 @@ void PluginConfig::save()
 	obs_data_set_int (data, "point_watch_amount",      pointWatchAmount);
 	obs_data_set_int (data, "point_comment_cooldown",  pointCommentCooldown);
 	obs_data_set_int (data, "point_use_cooldown",      pointUseCooldown);
+	obs_data_set_bool  (data, "point_billing_enabled", pointBillingEnabled);
+	obs_data_set_double(data, "point_billing_rate",    pointBillingRate);
 
 	// エフェクト設定
 	obs_data_set_string(data, "effect_default_position", effectDefaultPosition.c_str());
@@ -744,6 +776,21 @@ void PluginConfig::save()
 			obs_data_release(item);
 		}
 		obs_data_set_array(data, "x_templates", arr);
+		obs_data_array_release(arr);
+	}
+
+	// メンバーシッププラン価格設定
+	{
+		obs_data_array_t *arr = obs_data_array_create();
+		for (const auto &p : membershipPlanPrices) {
+			obs_data_t *item = obs_data_create();
+			obs_data_set_string(item, "plan_name", p.planName.c_str());
+			obs_data_set_double(item, "amount",    p.amount);
+			obs_data_set_string(item, "currency",  p.currency.c_str());
+			obs_data_array_push_back(arr, item);
+			obs_data_release(item);
+		}
+		obs_data_set_array(data, "membership_plan_prices", arr);
 		obs_data_array_release(arr);
 	}
 

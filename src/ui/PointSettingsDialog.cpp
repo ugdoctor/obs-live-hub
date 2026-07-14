@@ -31,6 +31,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -93,6 +94,18 @@ PointSettingsDialog::PointSettingsDialog(PointManager *manager, QWidget *parent)
 
 		fl->addRow(new QLabel(
 			"※ 視聴ポイントは初回発言後から付与間隔ごとに全ユーザーへ付与されます"));
+
+		billingEnabledCheck_ = new QCheckBox("課金連携を有効にする（SC・Bits・サブスク等）");
+		fl->addRow(billingEnabledCheck_);
+
+		billingRateSpin_ = new QDoubleSpinBox;
+		billingRateSpin_->setRange(0.0, 1'000'000.0);
+		billingRateSpin_->setDecimals(1);
+		billingRateSpin_->setSuffix(" pt / USD");
+		fl->addRow("1 USDあたりの付与ポイント数:", billingRateSpin_);
+
+		fl->addRow(new QLabel(
+			"※ 課金額（USD換算）× 上記レートを四捨五入して付与します"));
 
 		tabs->addTab(w, "設定");
 	}
@@ -195,6 +208,8 @@ void PointSettingsDialog::loadSettings()
 	watchAmtSpin_->setValue(cfg.pointWatchAmount);
 	commentCooldownSpin_->setValue(cfg.pointCommentCooldown);
 	useCooldownSpin_->setValue(cfg.pointUseCooldown);
+	billingEnabledCheck_->setChecked(cfg.pointBillingEnabled);
+	billingRateSpin_->setValue(cfg.pointBillingRate);
 }
 
 void PointSettingsDialog::accept()
@@ -206,6 +221,8 @@ void PointSettingsDialog::accept()
 	cfg.pointWatchAmount      = watchAmtSpin_->value();
 	cfg.pointCommentCooldown  = commentCooldownSpin_->value();
 	cfg.pointUseCooldown      = useCooldownSpin_->value();
+	cfg.pointBillingEnabled   = billingEnabledCheck_->isChecked();
+	cfg.pointBillingRate      = billingRateSpin_->value();
 	cfg.save();
 	if (manager_)
 		manager_->reloadSettings();

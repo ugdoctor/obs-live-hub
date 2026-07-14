@@ -294,6 +294,15 @@ void PointManager::adjustPoints(const QString &userId, const QString &platform, 
 	scheduleSave();
 }
 
+void PointManager::awardBillingPoints(const QString &userId, const QString &platform, int amount)
+{
+	if (amount <= 0)
+		return;
+	QMetaObject::invokeMethod(this, [this, userId, platform, amount]() {
+		addPoints(userId, platform, amount, QStringLiteral("billing"));
+	}, Qt::QueuedConnection);
+}
+
 void PointManager::onWatchTimer()
 {
 	const auto &cfg = PluginConfig::instance();

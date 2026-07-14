@@ -3,6 +3,12 @@
 #include <string>
 #include <vector>
 
+struct MembershipPlanPrice {
+	std::string planName;
+	double      amount   = 0.0;
+	std::string currency = "JPY"; // ISO 4217 通貨コード
+};
+
 struct XTemplate {
 	std::string name         = "デフォルト";
 	std::string text;
@@ -186,6 +192,10 @@ public:
 	int pointCommentCooldown    = 10; // コメントポイント加算クールダウン（秒、0=無効）
 	int pointUseCooldown        = 5;  // point_use実行クールダウン（秒、0=無効）
 
+	// 課金連携（SC/Bits/Sub等の課金イベントに応じたポイント自動付与）
+	bool pointBillingEnabled  = true;
+	double pointBillingRate   = 100.0; // 1 USD あたりの付与ポイント数
+
 	// デバッグパネル表示設定
 	bool debugShowConnection     = true;
 	bool debugShowTts            = true;
@@ -221,6 +231,10 @@ public:
 	int         xAutoPostOnStreamStart = 0;
 	int         xDefaultTemplateIndex  = 0;
 	std::vector<XTemplate> xTemplates;
+
+	// メンバーシッププラン価格設定（プラン名 → 価格・通貨）
+	// 表示・集計時にUSD変換して使用。記録時には金額を保存しない（遡及反映のため）。
+	std::vector<MembershipPlanPrice> membershipPlanPrices;
 
 private:
 	PluginConfig() = default;

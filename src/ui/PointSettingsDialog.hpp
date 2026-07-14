@@ -2,6 +2,7 @@
 #include <QDialog>
 
 class QCheckBox;
+class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
 class QSpinBox;
@@ -35,6 +36,8 @@ private:
 	QSpinBox  *watchAmtSpin_          = nullptr;
 	QSpinBox  *commentCooldownSpin_   = nullptr;
 	QSpinBox  *useCooldownSpin_       = nullptr;
+	QCheckBox      *billingEnabledCheck_ = nullptr;
+	QDoubleSpinBox *billingRateSpin_     = nullptr;
 
 	// アクション一覧タブ
 	QTableWidget *actionTable_ = nullptr;
