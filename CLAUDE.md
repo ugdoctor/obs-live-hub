@@ -143,6 +143,7 @@ public:
 | サポーター（課金）履歴 | `SupporterLedger` / `SupporterHistoryDialog` | YouTube SC/SS・メンバーシップ、Twitch Bits・サブスクを記録・表示。DPAPI暗号化。詳細は「サポーター履歴機能」セクション参照 |
 | メンバーシッププラン価格設定 | `MembershipPlanPriceDialog` | プラン名→価格・通貨のマッピングを設定。表示・集計時に動的USD換算。過去イベントにも遡及反映 |
 | 勝敗カウンター（対戦ゲーム向け） | `MatchCounterDock`（常設ドック・日常操作） / `MatchCounterDialog`（外観設定） / `match_counter.html` | 勝敗数・目標モード・配信画面メモを管理し WebSocket でリアルタイム配信。スロット風リール演出。詳細は「勝敗カウンター機能」セクション参照 |
+| Twitchスタンプ（エモート）画像表示 | `TwitchPlatform` / `plugin-main.cpp` / `overlay.html` | コメント本文中のTwitchスタンプを`<img>`として安全に描画。`innerHTML`不使用。詳細は「スタンプ（エモート）表示機能」セクション参照 |
 
 ### Phase 2（将来）：追加予定
 - [ ] NGワードフィルタリング
@@ -320,6 +321,63 @@ YouTube / Twitch の課金イベントを視聴者単位で追跡・記録する
 - `deploy.ps1` にも `match_counter.html` のコピー処理を追加済み
 - OBSでブラウザソースとして追加する際は `ツール → obs-live-hub → 勝敗数カウンター → カウンターページを開く`
   でパスを確認してから、ローカルファイルとして指定する
+
+---
+
+## スタンプ（エモート）表示機能
+
+### 概要
+コメント本文中のTwitchスタンプ（エモート）を、テキストではなく`<img>`画像として`overlay.html`に
+描画する機能。配信の賑わい感を維持しつつ、`innerHTML`を一切使わずDOM API
+（`createTextNode`/`createElement`）のみで組み立てることでXSSを防ぐ設計。
+
+### データフロー
+1. `TwitchPlatform::parseLine()`がIRCv3の`emotes`タグ（例: `emotes=25:0-4,6-10/34:12-16`）を
+   `parseEmotesTag()`でパースし、`CommentEvent::emotes`（`std::vector<CommentEmote>`）に格納する
+2. `plugin-main.cpp`のTwitch用EventBus購読ハンドラが`makeEmotesJson(ev.emotes)`でJSON配列化し、
+   `makeCommentJson()`の`"emotes"`キーとしてWebSocketブロードキャストする
+3. `overlay.html`の`renderCommentText()`が`data.emotes`を使い、コメント本文を「テキストノード」と
+   「`<img>`スタンプ」に分割して`.comment-text`へ追加する
+
+### 座標系についての重要な設計判断（UTF-16コード単位）
+- Twitchの`emotes`タグの`start`/`end`は、**Twitch公式Webクライアント（JS）が扱うUTF-16コード単位の
+  インデックス**を基準にしている（`end`はinclusive）
+- `CommentEvent::message`はC++側では UTF-8 の`std::string`だが、**その内部表現（バイトオフセット）に
+  対して位置を変換する処理は一切行っていない**。C++側は`start`/`end`の整数値をそのまま右から左へ
+  運ぶだけであり、これは意図的な設計判断である
+- 理由: JavaScriptの文字列は元々UTF-16コード単位で構成されており、`String.prototype.slice()`も
+  同じ単位で動作する。JSON経由でブラウザに渡った時点で文字列は自動的にJSのUTF-16表現になるため、
+  Twitchが定義した`start`/`end`をそのまま`text.slice(start, end + 1)`に使えば**変換なしで正しく
+  一致する**。日本語コメントにTwitchスタンプが混在する場合（本プラグインの主要ユースケース）でも、
+  UTF-8バイトオフセットとして誤読すると位置がずれるため、この設計判断は重要
+- `overlay.html`側では`emotes`配列を`start`昇順にソートし、範囲外・逆転・重複するレンジは
+  防御的にスキップする（不正なタグや将来の仕様変化に対する保険）
+
+### XSS対策（`innerHTML`不使用）
+- `renderCommentText()`は`container.textContent = ''`でクリアした後、
+  `document.createTextNode(text)`（プレーンテキスト部分）と
+  `document.createElement('img')`（スタンプ画像、`src`のみ設定・`innerHTML`は使わない）を
+  組み合わせてDOMツリーへ直接追加する。コメント本文の生文字列が一切HTMLとして解釈されない
+- スタンプ画像のURLは`https://static-cdn.jtvnw.net/emotes/v2/{id}/default/dark/1.0`固定で、
+  `{id}`部分はTwitchが送ってきた`emotes`タグの数値/英数字IDをそのまま`encodeURIComponent()`して
+  埋め込む（IDそのものは信頼できる配信元＝Twitch IRCサーバーからのタグ値であり、ユーザーの
+  コメント本文とは独立したデータのため、コメント本文由来のインジェクションには使われない）
+- CSS: `.comment-text img.emote`に`vertical-align: middle`と`height: 1.2em`（`max-height: 24px`）を
+  指定し、スタンプ混在時も行の高さが崩れないようにしている
+
+### YouTubeのカスタムメンバーエモートについて（調査結果・非対応）
+- `YouTubePlatform.cpp`の`liveChatMessages.list`パース箇所（`onMessagesResult`相当）に調査結果を
+  コメントとして記載済み
+- 結論: YouTube Data API v3の`snippet.displayMessage`/`textMessageDetails.messageText`は
+  **プレーン文字列のみ**を返し、Twitchの`emotes`タグに相当する画像URL・出現位置の構造化データは
+  **一切含まれない**
+- 標準Unicode絵文字（😀等）は文字そのものとして埋め込まれるため、現状のテキスト表示のままで
+  正しく描画される（対応不要）
+- チャンネル固有の「カスタムメンバーエモート」は`:_ショートコード:`形式の文字列として現れるのみで、
+  画像を取得する手段は公開APIには存在しない（YouTube公式Webクライアントが使う非公開の内部APIでのみ
+  画像URLが取得できるが、非対応・利用しない方針）
+- そのため`CommentEvent::emotes`はYouTube側では常に空のままとし、ショートコードはテキストとして
+  そのまま表示される（現状維持、退行なし）
 
 ---
 

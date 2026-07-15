@@ -768,6 +768,18 @@ void YouTubePlatform::onMessagesResult(bool ok, int statusCode, const std::strin
 		const QString type       = snippet["type"].toString();
 		const QString displayMsg = snippet["displayMessage"].toString();
 
+		// 【カスタムメンバーエモート調査結果（2026-07-15）】
+		// liveChatMessages.list（Data API v3）の snippet は displayMessage /
+		// textMessageDetails.messageText というプレーン文字列のみを返し、Twitchの
+		// emotesタグに相当する構造化データ（画像URL・出現位置の配列等）は一切含まれない。
+		// 標準Unicode絵文字はdisplayMessageに実体の文字として埋め込まれるため現状のまま
+		// テキスト表示で正しく描画される。一方チャンネル固有の「カスタムメンバーエモート」は
+		// ":_ショートコード:" 形式の文字列としてdisplayMessageに現れるのみで、画像を取得する
+		// 手段はこの公開APIには存在しない（YouTube公式Webクライアントが使う内部APIでのみ
+		// 画像URLが取得できるが、これは非公開・非対応のため本プラグインでは利用しない）。
+		// → YouTube側はTwitchのようなスタンプ画像描画には対応せず、ショートコードの
+		//   テキストのまま表示する（現状の displayMessage 描画をそのまま踏襲）。
+
 		// コメントビューワーへの表示（テキスト付きイベント全般）
 		if (!displayMsg.isEmpty())
 			emit commentReceived(authorName, displayMsg, avatarUrl);

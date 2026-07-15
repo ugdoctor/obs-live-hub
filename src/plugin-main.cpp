@@ -138,15 +138,35 @@ static std::string escapeJsonString(const std::string &s)
 	return r;
 }
 
+// Twitchスタンプ（IDと出現位置）のJSON配列を生成する。
+// start/endはTwitchのemotesタグ仕様に準拠したUTF-16コード単位インデックス（endはinclusive）。
+// C++側では値の意味を解釈せず、そのまま整数として運ぶだけ（実際のテキスト分割は
+// overlay.htmlのJS側でstring.slice()により行う。JS文字列は同じくUTF-16のため変換不要）。
+static std::string makeEmotesJson(const std::vector<CommentEmote> &emotes)
+{
+	std::string r = "[";
+	for (size_t i = 0; i < emotes.size(); ++i) {
+		if (i)
+			r += ",";
+		r += "{\"id\":\"" + escapeJsonString(emotes[i].id) + "\"," +
+		     "\"start\":" + std::to_string(emotes[i].start) + "," +
+		     "\"end\":" + std::to_string(emotes[i].end) + "}";
+	}
+	r += "]";
+	return r;
+}
+
 static std::string makeCommentJson(const std::string &user, const std::string &text,
 				   const std::string &platform, const std::string &avatar = "",
-				   const std::string &ttsJson = "")
+				   const std::string &ttsJson = "",
+				   const std::string &emotesJson = "")
 {
 	std::string r = "{\"type\":\"comment\","
 	                "\"user\":\"" + escapeJsonString(user) + "\","
 	                "\"text\":\"" + escapeJsonString(text) + "\","
 	                "\"platform\":\"" + platform + "\","
-	                "\"avatar\":\"" + escapeJsonString(avatar) + "\"";
+	                "\"avatar\":\"" + escapeJsonString(avatar) + "\","
+	                "\"emotes\":" + (emotesJson.empty() ? "[]" : emotesJson);
 	if (!ttsJson.empty())
 		r += ",\"tts\":" + ttsJson;
 	r += "}";
@@ -2201,7 +2221,8 @@ bool obs_module_load(void)
 			s_wsServer->broadcast(makeCommentJson(
 				ev.authorName, ev.message, "twitch", ev.avatarUrl,
 				buildCommentTtsJson(QString::fromStdString(ev.authorName),
-				                    QStringLiteral("twitch"))));
+				                    QStringLiteral("twitch")),
+				makeEmotesJson(ev.emotes)));
 		const QString msg        = QString::fromStdString(ev.message);
 		const QString authorName = QString::fromStdString(ev.authorName);
 		recordUserPlatform(authorName, QStringLiteral("twitch"));

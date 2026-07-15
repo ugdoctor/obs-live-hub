@@ -139,6 +139,14 @@
       overflow-wrap: anywhere;
     }
 
+    .comment-text img.emote {
+      height: 1.2em;
+      max-height: 24px;
+      width: auto;
+      vertical-align: middle;
+      margin: 0 1px;
+    }
+
     @keyframes fadeIn {
       from { opacity: 0; transform: translateY(4px); }
       to   { opacity: 1; transform: translateY(0); }
@@ -599,6 +607,53 @@
       };
     }
 
+    // --- スタンプ（エモート）の安全な描画 --------------------------------
+    // innerHTMLは一切使用しない。createTextNode / createElementのみで組み立てる。
+
+    function twitchEmoteUrl(id) {
+      return 'https://static-cdn.jtvnw.net/emotes/v2/' + encodeURIComponent(id) +
+             '/default/dark/1.0';
+    }
+
+    // コメント本文を「テキストノード」と「スタンプ画像」に分割してcontainerへ追加する。
+    // emotes の start/end はTwitchのIRC emotesタグ仕様に準拠したUTF-16コード単位
+    // インデックス（endはinclusive）。JS文字列のslice()もUTF-16コード単位で動作する
+    // ため、C++側から届いた整数をそのまま使ってよい（変換不要）。
+    function renderCommentText(container, text, emotes) {
+      container.textContent = ''; // 既存の子要素をクリア
+
+      if (!emotes || !emotes.length) {
+        container.appendChild(document.createTextNode(text));
+        return;
+      }
+
+      // 不正な範囲（負数・逆転・文字列長超過）を除外し、開始位置の昇順に整列する
+      var sorted = emotes.filter(function(e) {
+        return e && typeof e.start === 'number' && typeof e.end === 'number' &&
+               e.start >= 0 && e.end >= e.start && e.end < text.length;
+      }).sort(function(a, b) { return a.start - b.start; });
+
+      var pos = 0;
+      for (var i = 0; i < sorted.length; i++) {
+        var e = sorted[i];
+        if (e.start < pos) continue; // 直前のスタンプと重なる不正なレンジはスキップ
+
+        if (e.start > pos)
+          container.appendChild(document.createTextNode(text.slice(pos, e.start)));
+
+        var img = document.createElement('img');
+        img.className = 'emote';
+        img.src = twitchEmoteUrl(e.id);
+        img.alt = '';
+        container.appendChild(img);
+
+        pos = e.end + 1;
+      }
+
+      if (pos < text.length)
+        container.appendChild(document.createTextNode(text.slice(pos)));
+    }
+
     // --- コメントカードを追加 -------------------------------------------
 
     function addComment(data) {
@@ -646,7 +701,7 @@
 
       var commentEl = document.createElement('div');
       commentEl.className = 'comment-text';
-      commentEl.textContent = data.text || '';
+      renderCommentText(commentEl, data.text || '', data.emotes);
       var userCfg = getUserSettings(data.user);
       if (userCfg.color) commentEl.style.color = userCfg.color;
       if (userCfg.name)  usernameEl.style.color = userCfg.name;

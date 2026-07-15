@@ -287,6 +287,59 @@ void TwitchPlatform::receiverLoop()
 
 // ---- IRC PRIVMSG パース ----
 
+// Twitch IRCv3 の emotes タグ値をパースする。
+// 形式: "25:0-4,6-10/34:12-16"（emoteID:開始-終了 のカンマ区切り、'/' でID毎に区切る）
+// 開始・終了は UTF-16 コード単位インデックス（終了は inclusive）。値の解釈はせず
+// そのまま整数として運ぶだけなので、UTF-8 な message_ とのエンコーディング差異は
+// ここでは問題にならない（実際のテキスト分割は overlay.html の JS 側で行う）。
+static std::vector<CommentEmote> parseEmotesTag(const std::string &tagValue)
+{
+	std::vector<CommentEmote> result;
+	if (tagValue.empty())
+		return result;
+
+	size_t idStart = 0;
+	while (idStart < tagValue.size()) {
+		const size_t idEnd = tagValue.find('/', idStart);
+		const std::string idGroup = tagValue.substr(
+			idStart, idEnd == std::string::npos ? std::string::npos : idEnd - idStart);
+
+		const size_t colonPos = idGroup.find(':');
+		if (colonPos != std::string::npos) {
+			const std::string id = idGroup.substr(0, colonPos);
+			const std::string ranges = idGroup.substr(colonPos + 1);
+
+			size_t rangeStart = 0;
+			while (rangeStart < ranges.size()) {
+				const size_t rangeEnd = ranges.find(',', rangeStart);
+				const std::string range = ranges.substr(
+					rangeStart, rangeEnd == std::string::npos
+					                    ? std::string::npos
+					                    : rangeEnd - rangeStart);
+
+				const size_t dashPos = range.find('-');
+				if (dashPos != std::string::npos && !id.empty()) {
+					CommentEmote emote;
+					emote.id    = id;
+					emote.start = std::atoi(range.substr(0, dashPos).c_str());
+					emote.end   = std::atoi(range.substr(dashPos + 1).c_str());
+					if (emote.end >= emote.start)
+						result.push_back(std::move(emote));
+				}
+
+				if (rangeEnd == std::string::npos)
+					break;
+				rangeStart = rangeEnd + 1;
+			}
+		}
+
+		if (idEnd == std::string::npos)
+			break;
+		idStart = idEnd + 1;
+	}
+	return result;
+}
+
 void TwitchPlatform::parseLine(const std::string &line)
 {
 	// PRIVMSG コマンドを含む行のみ処理（呼び出し元フィルターの二重確認）
@@ -299,6 +352,7 @@ void TwitchPlatform::parseLine(const std::string &line)
 	std::string displayName;
 	std::string userId;
 	std::string messageText;
+	std::string emotesTag;
 
 	int bitsCount = 0;
 
@@ -311,7 +365,7 @@ void TwitchPlatform::parseLine(const std::string &line)
 		const std::string tags = line.substr(1, spacePos - 1);
 		const std::string rest = line.substr(spacePos + 1);
 
-		// display-name / user-id / bits タグを一括抽出
+		// display-name / user-id / bits / emotes タグを一括抽出
 		size_t start = 0;
 		while (start < tags.size()) {
 			const size_t end = tags.find(';', start);
@@ -327,6 +381,8 @@ void TwitchPlatform::parseLine(const std::string &line)
 					userId = val;
 				else if (key == "bits" && !val.empty())
 					bitsCount = std::atoi(val.c_str());
+				else if (key == "emotes")
+					emotesTag = val;
 			}
 			if (end == std::string::npos)
 				break;
@@ -374,6 +430,7 @@ void TwitchPlatform::parseLine(const std::string &line)
 	ev.authorName = displayName;
 	ev.message = messageText;
 	ev.avatarUrl = avatarUrl;
+	ev.emotes = parseEmotesTag(emotesTag);
 	bus_.publish(ev);
 }
 
