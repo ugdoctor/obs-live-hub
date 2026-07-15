@@ -84,6 +84,7 @@ obs-comment-viewer/
     │   ├── MatchCounterDock.hpp/cpp       # 勝敗カウンター常設ドック（日常操作用）
     │   ├── TtsDictionaryDialog.hpp/cpp    # TTS 読み上げ辞書（CSV 管理）
     │   ├── TtsSpeechDialog.hpp/cpp        # TTS エンジン設定・接続確認
+    │   ├── YouTubeEmoteSettingsDialog.hpp/cpp # YouTubeカスタムエモート辞書（D&D・CSV管理）
     │   └── VoteManagerDialog.hpp/cpp      # アンケート（投票）管理
     └── overlay/
         └── overlay.html        # ★旧バージョン。実装参照には data/overlay.html を使うこと
@@ -144,6 +145,7 @@ public:
 | メンバーシッププラン価格設定 | `MembershipPlanPriceDialog` | プラン名→価格・通貨のマッピングを設定。表示・集計時に動的USD換算。過去イベントにも遡及反映 |
 | 勝敗カウンター（対戦ゲーム向け） | `MatchCounterDock`（常設ドック・日常操作） / `MatchCounterDialog`（外観設定） / `match_counter.html` | 勝敗数・目標モード・配信画面メモを管理し WebSocket でリアルタイム配信。スロット風リール演出。詳細は「勝敗カウンター機能」セクション参照 |
 | Twitchスタンプ（エモート）画像表示 | `TwitchPlatform` / `plugin-main.cpp` / `overlay.html` | コメント本文中のTwitchスタンプを`<img>`として安全に描画。`innerHTML`不使用。詳細は「スタンプ（エモート）表示機能」セクション参照 |
+| YouTubeカスタムエモート辞書 | `YouTubeEmoteSettingsDialog` / `WsServer`（簡易HTTP画像配信） / `overlay.html` | ショートコード↔画像のマッピングをD&Dで管理。`WsServer`拡張によるローカル画像配信URL経由で`overlay.html`へ安全に描画。詳細は「YouTubeカスタムエモート辞書機能」セクション参照 |
 
 ### Phase 2（将来）：追加予定
 - [ ] NGワードフィルタリング
@@ -358,10 +360,12 @@ YouTube / Twitch の課金イベントを視聴者単位で追跡・記録する
   `document.createTextNode(text)`（プレーンテキスト部分）と
   `document.createElement('img')`（スタンプ画像、`src`のみ設定・`innerHTML`は使わない）を
   組み合わせてDOMツリーへ直接追加する。コメント本文の生文字列が一切HTMLとして解釈されない
-- スタンプ画像のURLは`https://static-cdn.jtvnw.net/emotes/v2/{id}/default/dark/1.0`固定で、
+- スタンプ画像のURLは`https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/1.0`固定で、
   `{id}`部分はTwitchが送ってきた`emotes`タグの数値/英数字IDをそのまま`encodeURIComponent()`して
   埋め込む（IDそのものは信頼できる配信元＝Twitch IRCサーバーからのタグ値であり、ユーザーの
-  コメント本文とは独立したデータのため、コメント本文由来のインジェクションには使われない）
+  コメント本文とは独立したデータのため、コメント本文由来のインジェクションには使われない）。
+  パスは`emoticons/v2`が正しい（`emotes/v2`ではない。2026-07-15にバグ修正済み — 詳細は
+  「Twitchカスタムエモートがテキストのまま表示されるバグ」の調査記録を`CLAUDE_LOG.md`参照）
 - CSS: `.comment-text img.emote`に`vertical-align: middle`と`height: 1.2em`（`max-height: 24px`）を
   指定し、スタンプ混在時も行の高さが崩れないようにしている
 
@@ -378,6 +382,96 @@ YouTube / Twitch の課金イベントを視聴者単位で追跡・記録する
   画像URLが取得できるが、非対応・利用しない方針）
 - そのため`CommentEvent::emotes`はYouTube側では常に空のままとし、ショートコードはテキストとして
   そのまま表示される（現状維持、退行なし）
+
+---
+
+## YouTubeカスタムエモート辞書機能
+
+### 概要
+「スタンプ（エモート）表示機能」で判明したYouTube Data API v3の制約（カスタムメンバーエモートの
+画像URLが取得できない）を合法的に回避するため、配信者自身がショートコード（例:「:草:」）と画像
+ファイルをOBS上で手動マッピングし、`overlay.html`側でテキストの代わりに画像として描画できる機能。
+PC操作に不慣れな配信者を想定し、ドラッグ＆ドロップによる画像自動格納・プレビュー表示付きの
+管理画面を用意した。
+
+### データモデル・永続化
+- `TtsDictionaryDialog`（読み上げ辞書）と同じ設計方針を踏襲し、**`PluginConfig`には持たせず**
+  専用のCSVファイルで完結させる（`points_actions`や`tts_dictionary.csv`と同様、可変長の
+  マッピングデータをPluginConfigの単一構造体に混在させない、という既存の設計判断に合わせた）
+- マッピングCSV: `%APPDATA%\obs-studio\plugins\obs-live-hub\youtube_emotes.csv`
+  （`YouTubeEmoteSettingsDialog::csvPath()`）。列は「ショートコード,ファイル名」の2列
+- 画像自動格納先フォルダ: `%APPDATA%\obs-studio\plugins\obs-live-hub\youtube_emotes\`
+  （`YouTubeEmoteSettingsDialog::imagesDir()`）。存在しない場合は`OBS_FRONTEND_EVENT_FINISHED_LOADING`
+  時、およびダイアログ起動時・ドロップ時に`QDir().mkpath()`で再帰作成する
+
+### UI（`YouTubeEmoteSettingsDialog`）
+`ツール → obs-live-hub → オーバーレイ → YouTubeエモート辞書設定` から開く
+（`overlay.html`のコメント描画に関わる設定のため「オーバーレイ」サブメニューに配置）。
+- テーブル3列: 「文字コード（ショートコード）」（編集可）/「画像プレビュー」（`QLabel`＋
+  スケール済み`QPixmap`をセルウィジェットとして配置。画像が見つからない場合は「？」を表示）/
+  「ファイル名」（読み取り専用）
+- **ドラッグ＆ドロップ**: ダイアログ全体（`setAcceptDrops(true)`）が画像ファイルのドロップを
+  受け付ける。上部に破線ボーダーの案内ラベルを常設し、初心者にも視覚的に分かるようにした
+- ドロップ・「画像ファイルを選んで追加...」ボタンのどちらでも同じ`importImageFiles()`を通る。
+  対応拡張子（png/jpg/jpeg/gif/webp/bmp）以外は自動格納先フォルダへコピーせずスキップし、
+  スキップしたファイル名を1つのダイアログにまとめて警告表示する
+- コピー先ファイル名は`QUuid`で生成した一意な名前（元のファイル名は使わない。日本語ファイル名や
+  記号を含むファイル名がURLパスやファイルシステムで問題を起こすのを避けるため）。コピーには
+  仕様通り`CopyFileW`（Win32 API）を使用
+- 追加直後は自動的にショートコード欄を編集状態にし、ファイル名ベースの初期値
+  （例:`kusa.png`→`:kusa:`）を提案する。「選択行を削除」は対応する画像ファイルもフォルダから
+  削除する（マッピングと画像の管理を一体化させ、孤立ファイルが溜まらないようにする設計）
+- 「保存して閉じる」（`accept()`）でCSVへ保存。`ConversationOverlayDialog`等と同じパターンで、
+  `dlg.exec() == QDialog::Accepted`のときのみ`plugin-main.cpp`側が同期ブロードキャストを行う
+  （ダイアログ自身は同期シグナルを持たず、呼び出し側が判断する既存の設計に合わせた）
+
+### WsServerの拡張（簡易HTTP画像配信）
+ブラウザの`file://`起源セキュリティ制限（ローカルファイルの直接読み込み禁止）を回避するため、
+既存のポート8765常時稼働`WsServer`をHTTP GETにも応答できるよう拡張した。
+- `WsServer::clientLoop()`は接続直後に`readHttpRequest()`でリクエストヘッダを読み込み、
+  `GET /emotes/<filename>`であれば`serveEmoteImage()`で完結させ、WebSocketへのアップグレード
+  （`completeWsHandshake()`）へは進まない
+- **セキュリティ対策**:
+  - パーセントデコード後のファイル名に対し`isSafeFileName()`で`".."`・`/`・`\`を含む値を拒否し、
+    ディレクトリトラバーサル（`GET /emotes/../../../Windows/...`等）を防止
+  - ファイルサイズ上限20MB（異常ファイル・DoS的な巨大レスポンスへの防御）
+  - 存在しないファイルは404、サイズ超過は413、読み込み失敗は500を返す
+  - `WsServer`は起動時から`INADDR_LOOPBACK`（127.0.0.1）のみにバインドされており、外部ネットワーク
+    には一切公開されない（既存の設計を継承）
+- レスポンスの`Content-Type`は拡張子から判定（png/jpg/jpeg/gif/webp/bmp、それ以外は
+  `application/octet-stream`）
+
+### WebSocketメッセージ（`youtube_emotes_sync`）
+`YouTubeEmoteSettingsDialog::makeSyncJson()`がCSVを読み込み、`PluginConfig::wsPort`を使って
+配信URLを組み立てる。新規クライアント接続時（`WsServer`の`connectCallback`）と、ダイアログで
+「保存して閉じる」を押した直後の両方でブロードキャストされる。
+
+```json
+{
+  "type": "youtube_emotes_sync",
+  "entries": [
+    { "code": ":草:", "url": "http://127.0.0.1:8765/emotes/3fae2b1c-....png" }
+  ]
+}
+```
+
+### オーバーレイでの安全な置換描画（`overlay.html`）
+- Twitchスタンプ実装（`renderWithPositionEmotes`）を踏襲しつつ、YouTube向けに
+  `renderWithShortcodeEmotes(container, text, map)`を新規実装。こちらは位置情報が無いため、
+  登録済みショートコードを本文中から**最長一致優先**で検索し、一致した部分のみ`<img>`に置換する
+  （`innerHTML`は使わず`createTextNode`/`createElement`のみ）
+- `renderCommentText(container, text, emotes, platform)`が新たに`platform`引数を受け取り、
+  Twitchの`emotes`配列があればそちらを優先、なければ`platform === 'youtube'`かつ
+  `youtubeEmoteMap`が空でない場合にショートコード置換を行う（Twitchのコメントに偶然
+  `:草:`のような文字列が含まれていてもYouTube辞書は適用されない、という設計）
+- `youtubeEmoteMap`は`type: "youtube_emotes_sync"`受信時に`updateYoutubeEmoteMap()`で
+  丸ごと置き換える
+- CSSは既存の`.comment-text img.emote`をそのまま流用（Twitch・YouTubeで共通）
+
+### 検証
+- Node.jsで`renderWithShortcodeEmotes`相当のロジックを単体テスト（基本置換、最長一致優先、
+  同一コード複数出現、非該当時の高速パス、空マップ時の安全性）し、すべて期待通りの結果を確認
+- `cmake --build --preset windows-x64`で警告・エラーなしを確認
 
 ---
 

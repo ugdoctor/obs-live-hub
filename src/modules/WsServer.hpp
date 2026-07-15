@@ -52,12 +52,21 @@ private:
 	void acceptLoop();
 	void clientLoop(SOCKET sock);
 
-	static bool doHandshake(SOCKET sock);
+	// リクエスト行＋ヘッダ（\r\n\r\nまで）を読み込む。WebSocketハンドシェイクと
+	// 簡易HTTP画像配信（GET /emotes/...）で共用する。
+	static bool readHttpRequest(SOCKET sock, std::string &outRequest);
+	static bool completeWsHandshake(SOCKET sock, const std::string &request);
 	static std::string parseWsKey(const std::string &req);
 	static std::string computeAcceptKey(const std::string &clientKey);
 	static std::string base64Encode(const uint8_t *data, size_t len);
 	static void sha1(const uint8_t *data, size_t len, uint8_t digest[20]);
 	static std::vector<uint8_t> encodeTextFrame(const std::string &text);
+
+	// 簡易HTTP画像配信（YouTubeカスタムエモート辞書用）。
+	// GET /emotes/<filename> なら true を返し outFileName にURLデコード済み・
+	// パストラバーサル検証済みのファイル名を格納する。
+	static bool parseEmoteGetPath(const std::string &request, std::string &outFileName);
+	static void serveEmoteImage(SOCKET sock, const std::string &fileName);
 
 	uint16_t port_;
 	SOCKET listenSock_ = INVALID_SOCKET;

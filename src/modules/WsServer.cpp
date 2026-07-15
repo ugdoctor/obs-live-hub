@@ -24,10 +24,93 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <cstring>
 #include <vector>
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 #include <obs-module.h>
 #include <plugin-support.h>
 
 static const char *WSTAG = "WsServer";
+
+// ─────────────────────────────────────────
+// 簡易HTTP画像配信（YouTubeカスタムエモート辞書用）ヘルパー
+// ─────────────────────────────────────────
+
+// YouTubeエモート画像の自動格納先フォルダ。
+// YouTubeEmoteSettingsDialog::imagesDir() と同一パスを指す（独立して算出する設計。
+// TtsDictionaryDialog::csvPath() 等、本プロジェクトの既存の各所と同様に
+// %APPDATA% 相対パスを都度組み立てる方式に合わせている）。
+static std::wstring emotesImagesDirW()
+{
+	wchar_t appdata[MAX_PATH] = {};
+	GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
+	return std::wstring(appdata) + L"\\obs-studio\\plugins\\obs-live-hub\\youtube_emotes";
+}
+
+static std::wstring utf8ToWide(const std::string &s)
+{
+	if (s.empty())
+		return {};
+	const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+	                                   nullptr, 0);
+	if (n <= 0)
+		return {};
+	std::wstring w(static_cast<size_t>(n), L'\0');
+	MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), &w[0], n);
+	return w;
+}
+
+static std::string urlDecode(const std::string &s)
+{
+	auto hexVal = [](char c) -> int {
+		if (c >= '0' && c <= '9') return c - '0';
+		if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+		if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+		return -1;
+	};
+	std::string out;
+	out.reserve(s.size());
+	for (size_t i = 0; i < s.size(); ++i) {
+		if (s[i] == '%' && i + 2 < s.size()) {
+			const int hi = hexVal(s[i + 1]);
+			const int lo = hexVal(s[i + 2]);
+			if (hi >= 0 && lo >= 0) {
+				out += static_cast<char>((hi << 4) | lo);
+				i += 2;
+				continue;
+			}
+		}
+		out += s[i];
+	}
+	return out;
+}
+
+// ディレクトリトラバーサル対策: ".." や区切り文字を含むファイル名は拒否する
+// （自動格納先フォルダはフラット構造のみを想定）。
+static bool isSafeFileName(const std::string &name)
+{
+	if (name.empty()) return false;
+	if (name.find("..") != std::string::npos) return false;
+	if (name.find('/') != std::string::npos) return false;
+	if (name.find('\\') != std::string::npos) return false;
+	return true;
+}
+
+static std::string contentTypeForFile(const std::string &fileName)
+{
+	const size_t dot = fileName.rfind('.');
+	std::string ext = (dot != std::string::npos) ? fileName.substr(dot + 1) : "";
+	std::transform(ext.begin(), ext.end(), ext.begin(),
+	                [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+	if (ext == "png")                return "image/png";
+	if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
+	if (ext == "gif")                return "image/gif";
+	if (ext == "webp")               return "image/webp";
+	if (ext == "bmp")                return "image/bmp";
+	return "application/octet-stream";
+}
 
 // ─────────────────────────────────────────
 // SHA-1 (RFC 3174)
@@ -149,7 +232,7 @@ std::string WsServer::computeAcceptKey(const std::string &clientKey)
 	return base64Encode(digest, 20);
 }
 
-bool WsServer::doHandshake(SOCKET sock)
+bool WsServer::readHttpRequest(SOCKET sock, std::string &outRequest)
 {
 	char buf[4096] = {};
 	int total = 0;
@@ -171,7 +254,12 @@ bool WsServer::doHandshake(SOCKET sock)
 			break;
 	}
 
-	const std::string req(buf, total);
+	outRequest.assign(buf, total);
+	return true;
+}
+
+bool WsServer::completeWsHandshake(SOCKET sock, const std::string &req)
+{
 	const std::string key = parseWsKey(req);
 	if (key.empty()) {
 		obs_log(LOG_WARNING, "[%s] Handshake: Sec-WebSocket-Key not found", WSTAG);
@@ -186,6 +274,78 @@ bool WsServer::doHandshake(SOCKET sock)
 		computeAcceptKey(key) + "\r\n\r\n";
 	return ::send(sock, resp.c_str(), static_cast<int>(resp.size()), 0) ==
 	       static_cast<int>(resp.size());
+}
+
+bool WsServer::parseEmoteGetPath(const std::string &req, std::string &outFileName)
+{
+	if (req.compare(0, 4, "GET ") != 0)
+		return false;
+	const size_t pathEnd = req.find(' ', 4);
+	if (pathEnd == std::string::npos)
+		return false;
+	const std::string rawPath = req.substr(4, pathEnd - 4);
+
+	const std::string prefix = "/emotes/";
+	if (rawPath.compare(0, prefix.size(), prefix) != 0)
+		return false;
+
+	const std::string decoded = urlDecode(rawPath.substr(prefix.size()));
+	if (!isSafeFileName(decoded))
+		return false;
+
+	outFileName = decoded;
+	return true;
+}
+
+void WsServer::serveEmoteImage(SOCKET sock, const std::string &fileName)
+{
+	static const char *resp404 =
+		"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+	const std::wstring filePath = emotesImagesDirW() + L"\\" + utf8ToWide(fileName);
+
+	HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+	                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (hFile == INVALID_HANDLE_VALUE) {
+		obs_log(LOG_INFO, "[%s] emote image not found: %s", WSTAG, fileName.c_str());
+		::send(sock, resp404, static_cast<int>(strlen(resp404)), 0);
+		return;
+	}
+
+	LARGE_INTEGER size{};
+	if (!GetFileSizeEx(hFile, &size) || size.QuadPart < 0 ||
+	    size.QuadPart > 20 * 1024 * 1024) { // 20MB上限（異常ファイルへの防御）
+		CloseHandle(hFile);
+		static const char *resp413 =
+			"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+		::send(sock, resp413, static_cast<int>(strlen(resp413)), 0);
+		return;
+	}
+
+	std::vector<char> data(static_cast<size_t>(size.QuadPart));
+	DWORD readBytes = 0;
+	const bool ok = data.empty() ||
+	                (ReadFile(hFile, data.data(), static_cast<DWORD>(data.size()), &readBytes,
+	                          nullptr) && readBytes == data.size());
+	CloseHandle(hFile);
+
+	if (!ok) {
+		static const char *resp500 =
+			"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+		::send(sock, resp500, static_cast<int>(strlen(resp500)), 0);
+		return;
+	}
+
+	const std::string header =
+		"HTTP/1.1 200 OK\r\n"
+		"Content-Type: " + contentTypeForFile(fileName) + "\r\n"
+		"Content-Length: " + std::to_string(data.size()) + "\r\n"
+		"Cache-Control: no-cache\r\n"
+		"Access-Control-Allow-Origin: *\r\n"
+		"Connection: close\r\n\r\n";
+	::send(sock, header.c_str(), static_cast<int>(header.size()), 0);
+	if (!data.empty())
+		::send(sock, data.data(), static_cast<int>(data.size()), 0);
 }
 
 // ─────────────────────────────────────────
@@ -414,7 +574,25 @@ void WsServer::clientLoop(SOCKET sock)
 {
 	++activeClients_;
 
-	if (!doHandshake(sock)) {
+	std::string request;
+	if (!readHttpRequest(sock, request)) {
+		obs_log(LOG_WARNING, "[%s] Failed to read HTTP request", WSTAG);
+		closesocket(sock);
+		--activeClients_;
+		return;
+	}
+
+	// GET /emotes/<filename> は簡易HTTPレスポンスとして画像を配信する
+	// （WebSocketへのアップグレードは行わずここで完結させる）
+	std::string emoteFileName;
+	if (parseEmoteGetPath(request, emoteFileName)) {
+		serveEmoteImage(sock, emoteFileName);
+		closesocket(sock);
+		--activeClients_;
+		return;
+	}
+
+	if (!completeWsHandshake(sock, request)) {
 		obs_log(LOG_WARNING, "[%s] Handshake failed", WSTAG);
 		closesocket(sock);
 		--activeClients_;

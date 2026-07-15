@@ -87,6 +87,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "ui/MembershipPlanPriceDialog.hpp"
 #include "ui/MatchCounterDialog.hpp"
 #include "ui/MatchCounterDock.hpp"
+#include "ui/YouTubeEmoteSettingsDialog.hpp"
 #include "ui/XAccountSettingsDialog.hpp"
 #include "ui/XTemplateSettingsDialog.hpp"
 #include "ui/XPostDock.hpp"
@@ -262,6 +263,7 @@ static void connectTwitchSignals();               // forward declaration
 static void handleWsClientMessage(const QString &json); // forward declaration
 static std::string makeTtsJson();                 // forward declaration
 static void broadcastTtsDict();                   // forward declaration
+static void broadcastYoutubeEmoteDict();          // forward declaration
 static void broadcastDebugConfig();               // forward declaration
 static std::string makeConversationConfigJson();  // forward declaration
 static void broadcastConversationConfig();        // forward declaration
@@ -302,6 +304,7 @@ static void applyWsCallbacks(WsServer *srv)
 			broadcastDebugConfig();
 			broadcastConversationConfig();
 			broadcastMatchCounterUpdate(true); // isReset=true: 初回表示はリール演出なしで即時反映
+			broadcastYoutubeEmoteDict();
 		}, Qt::QueuedConnection);
 	});
 }
@@ -1323,6 +1326,20 @@ static void onOverlayStyleMenuClick(void * /* data */)
 	}
 }
 
+static void broadcastYoutubeEmoteDict()
+{
+	if (s_wsServer)
+		s_wsServer->broadcast(YouTubeEmoteSettingsDialog::makeSyncJson());
+}
+
+static void onYoutubeEmoteSettingsMenuClick(void * /* data */)
+{
+	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	YouTubeEmoteSettingsDialog dlg(mainWindow);
+	if (dlg.exec() == QDialog::Accepted)
+		broadcastYoutubeEmoteDict();
+}
+
 static void doXPostTweet(const QString &text)
 {
 	const auto &cfg = PluginConfig::instance();
@@ -1848,6 +1865,7 @@ static void buildObsLiveHubMenu()
 	auto *ovMenu = hubMenu->addMenu("オーバーレイ");
 	ovMenu->addAction("コメントオーバーレイ設定",              []() { onOverlayStyleMenuClick(nullptr); });
 	ovMenu->addAction("コメントオーバーレイをブラウザで開く", []() { onOpenOverlayMenuClick(nullptr); });
+	ovMenu->addAction("YouTubeエモート辞書設定",              []() { onYoutubeEmoteSettingsMenuClick(nullptr); });
 	ovMenu->addAction("TTS音声ページを開く",                  []() { onOpenTtsMenuClick(nullptr); });
 	ovMenu->addSeparator();
 	ovMenu->addAction("チャットオーバーレイ設定",              []() { onConversationOverlayMenuClick(nullptr); });
@@ -2017,6 +2035,8 @@ static void onFrontendEvent(obs_frontend_event event, void * /* data */)
 		reconnectTwitch();
 		broadcastTtsDict();
 		broadcastDebugConfig();
+		// YouTubeエモート画像の自動格納先フォルダを起動時に確保する
+		QDir().mkpath(YouTubeEmoteSettingsDialog::imagesDir());
 		if (s_effectManager) {
 			const QString effectsDir = getEffectsDir();
 			if (!effectsDir.isEmpty()) {

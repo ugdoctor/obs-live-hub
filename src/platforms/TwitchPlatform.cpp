@@ -431,6 +431,17 @@ void TwitchPlatform::parseLine(const std::string &line)
 	ev.message = messageText;
 	ev.avatarUrl = avatarUrl;
 	ev.emotes = parseEmotesTag(emotesTag);
+
+	// デバッグ用: emotesタグの生値とパース結果件数を記録する。
+	// BTTV/FFZ等のサードパーティエモートはTwitchのIRCサーバーが関知しないため
+	// emotesタグ自体に現れない（emotesTagが空、またはそのカスタムエモート部分の
+	// レンジが含まれない）。このログでC++側のパースが原因か、そもそもTwitchが
+	// タグを送ってきていないのかを切り分けられる。
+	if (!emotesTag.empty()) {
+		obs_log(LOG_INFO, "[%s] emotes tag='%s' -> parsed %zu entrie(s) for message=\"%s\"",
+			TAG, emotesTag.c_str(), ev.emotes.size(), messageText.c_str());
+	}
+
 	bus_.publish(ev);
 }
 

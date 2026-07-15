@@ -188,6 +188,18 @@
 
     var activeErrors = {}; // { code: message }
 
+    // YouTubeカスタムメンバーエモート辞書（ショートコード → 画像URL）。
+    // "youtube_emotes_sync" メッセージで更新される。YouTube起源のコメントにのみ適用する。
+    var youtubeEmoteMap = {};
+
+    function updateYoutubeEmoteMap(entries) {
+      var map = {};
+      (entries || []).forEach(function(en) {
+        if (en && en.code && en.url) map[en.code] = en.url;
+      });
+      youtubeEmoteMap = map;
+    }
+
     function showErrorBanner() {
       var banner = document.getElementById('error-banner');
       var codes = Object.keys(activeErrors);
@@ -592,6 +604,8 @@
               if (data.engine) s[data.userId].engine = data.engine;
               saveUserSettings(s);
             }
+          } else if (data.type === 'youtube_emotes_sync') {
+            updateYoutubeEmoteMap(data.entries);
           } else if (data.type === 'comment') {
             addComment(data);
           } else if (data.type === 'vote_start') {
@@ -611,27 +625,31 @@
     // innerHTMLは一切使用しない。createTextNode / createElementのみで組み立てる。
 
     function twitchEmoteUrl(id) {
-      return 'https://static-cdn.jtvnw.net/emotes/v2/' + encodeURIComponent(id) +
+      // Twitch公式CDNのパスは "emoticons/v2"（"emotes/v2" ではない）。
+      // IDは"25"のような数値文字列だけでなく、新しいエモートで使われる
+      // "emotesv2_xxxxxxxx" のような英数字混在の文字列IDもそのまま渡せばよい
+      // （C++側もJS側もIDを単なる不透明な文字列として扱っており、数値変換は行わない）。
+      return 'https://static-cdn.jtvnw.net/emoticons/v2/' + encodeURIComponent(id) +
              '/default/dark/1.0';
     }
 
-    // コメント本文を「テキストノード」と「スタンプ画像」に分割してcontainerへ追加する。
-    // emotes の start/end はTwitchのIRC emotesタグ仕様に準拠したUTF-16コード単位
-    // インデックス（endはinclusive）。JS文字列のslice()もUTF-16コード単位で動作する
-    // ため、C++側から届いた整数をそのまま使ってよい（変換不要）。
-    function renderCommentText(container, text, emotes) {
-      container.textContent = ''; // 既存の子要素をクリア
-
-      if (!emotes || !emotes.length) {
-        container.appendChild(document.createTextNode(text));
-        return;
-      }
-
+    // Twitchスタンプ用: コメント本文を「テキストノード」と「スタンプ画像」に分割して
+    // containerへ追加する。emotes の start/end はTwitchのIRC emotesタグ仕様に準拠した
+    // UTF-16コード単位インデックス（endはinclusive）。JS文字列のslice()もUTF-16コード
+    // 単位で動作するため、C++側から届いた整数をそのまま使ってよい（変換不要）。
+    function renderWithPositionEmotes(container, text, emotes) {
       // 不正な範囲（負数・逆転・文字列長超過）を除外し、開始位置の昇順に整列する
       var sorted = emotes.filter(function(e) {
         return e && typeof e.start === 'number' && typeof e.end === 'number' &&
                e.start >= 0 && e.end >= e.start && e.end < text.length;
       }).sort(function(a, b) { return a.start - b.start; });
+
+      // デバッグ用: 受信したemotesが全て範囲外判定でフィルタされた場合、
+      // テキストがそのまま表示される（＝スタンプ未適用）原因を追いやすくする
+      if (emotes.length && !sorted.length) {
+        console.error('[emote] all entries filtered out as invalid range',
+                       { text: text, textLength: text.length, emotes: emotes });
+      }
 
       var pos = 0;
       for (var i = 0; i < sorted.length; i++) {
@@ -652,6 +670,67 @@
 
       if (pos < text.length)
         container.appendChild(document.createTextNode(text.slice(pos)));
+    }
+
+    // YouTubeカスタムエモート用: 位置情報がAPIから取得できないため、登録済み
+    // ショートコード文字列を本文中から検索して置換する（最長一致優先）。
+    function renderWithShortcodeEmotes(container, text, map) {
+      var codes = Object.keys(map).sort(function(a, b) { return b.length - a.length; });
+      var i = 0;
+      var buffer = '';
+      while (i < text.length) {
+        var matched = null;
+        for (var c = 0; c < codes.length; c++) {
+          if (text.startsWith(codes[c], i)) { matched = codes[c]; break; }
+        }
+        if (matched) {
+          if (buffer) {
+            container.appendChild(document.createTextNode(buffer));
+            buffer = '';
+          }
+          var img = document.createElement('img');
+          img.className = 'emote';
+          img.src = map[matched];
+          img.alt = matched;
+          container.appendChild(img);
+          i += matched.length;
+        } else {
+          buffer += text[i];
+          i++;
+        }
+      }
+      if (buffer)
+        container.appendChild(document.createTextNode(buffer));
+    }
+
+    // コメント本文の安全な描画エントリーポイント。innerHTMLは一切使用しない
+    // （createTextNode / createElementのみで組み立てる）。
+    // Twitchはemotes配列（位置情報）、YouTubeはyoutubeEmoteMap（ショートコード
+    // 文字列検索）と、プラットフォームごとに異なる方式でスタンプを検出する。
+    function renderCommentText(container, text, emotes, platform) {
+      container.textContent = ''; // 既存の子要素をクリア
+
+      try {
+        if (emotes && emotes.length) {
+          console.debug('[emote] twitch emotes received:', emotes, 'for text:', text);
+          renderWithPositionEmotes(container, text, emotes);
+          return;
+        }
+
+        if (platform === 'youtube' && Object.keys(youtubeEmoteMap).length) {
+          renderWithShortcodeEmotes(container, text, youtubeEmoteMap);
+          return;
+        }
+      } catch (err) {
+        // 描画に失敗した場合でもカードが空にならないよう、プレーンテキストへ
+        // フォールバックする。原因調査用に発生したエラーと受信データを記録する。
+        console.error('[emote] renderCommentText failed, falling back to plain text', {
+          error: err, text: text, emotes: emotes, platform: platform
+        });
+        container.textContent = '';
+      }
+
+      container.appendChild(document.createTextNode(text));
     }
 
     // --- コメントカードを追加 -------------------------------------------
@@ -701,7 +780,7 @@
 
       var commentEl = document.createElement('div');
       commentEl.className = 'comment-text';
-      renderCommentText(commentEl, data.text || '', data.emotes);
+      renderCommentText(commentEl, data.text || '', data.emotes, platform);
       var userCfg = getUserSettings(data.user);
       if (userCfg.color) commentEl.style.color = userCfg.color;
       if (userCfg.name)  usernameEl.style.color = userCfg.name;
