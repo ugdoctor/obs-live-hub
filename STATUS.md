@@ -2,8 +2,9 @@
 
 ## 現在の状態
 
-- **v0.3.0 リリース済み（2026-06-19）**
+- **v0.3.3 リリース済み（2026-07-15）**
 - 主要機能（TTS複数エンジン、棒読みちゃん、視聴者コマンド、ポイント、エフェクト等）は安定動作を確認済み
+- 勝敗数カウンター機能（常設ドック・目標モード・画面メモ）は実機検証完了（2026-07-15）
 
 ---
 
@@ -41,6 +42,25 @@
 ---
 
 ## 最近完了した対策（参照用）
+
+### 勝敗カウンター機能（MatchCounter）実装＋ドック化リファクタリング（2026-07-15）
+- **初回実装**: `PluginConfig`に`matchWins`/`matchLosses`/`matchHistory`（最大10件）/`matchTargetWins`/
+  `matchTargetWinRate`/外観設定を追加。`MatchCounterDialog`（勝敗操作＋外観設定の一体型ダイアログ）と
+  `data/match_counter.html`（WebSocket受信専用ブラウザソース、スロット風リール演出）を新規実装
+- **同日中にリファクタリング**: 日常操作（勝敗+1/-1・手入力・目標・メモ）を新規`MatchCounterDock`
+  （`obs_frontend_add_dock_by_id`で登録する常設ドック）に移管し、`MatchCounterDialog`は外観設定
+  （幅・色・フォント・透明度）専用に縮小
+- `PluginConfig`に`matchMemo`（配信画面表示用の1行メモ）/`matchTargetMode`（0=なし,1=勝利数,2=勝率の
+  排他モード）を追加
+- `data/match_counter.html`: メモ表示欄を目標表示の1行上に追加。`targetMode`に応じて「あと何勝」表示と
+  勝率の黒字/赤字色分けを排他的に出し分け（`0`=両方非表示、`1`=あと何勝のみ、`2`=勝率色分けのみ）
+- `plugin-main.cpp`: メニューを`ツール → obs-live-hub → 勝敗数カウンター`サブメニューに集約
+  （カウンタードックを表示／カウンター外観設定／カウンターページを開く）。ドック表示トグルは
+  `QDockWidget::toggleViewAction()`を流用
+- `CMakeLists.txt`に`MatchCounterDock.cpp/hpp`を追加
+- **実機検証完了（2026-07-15）**: ドック表示/非表示トグル、+1/-1・手入力・目標モード3択・メモ入力、
+  外観設定ダイアログの分離、目標モードごとのオーバーレイ出し分け、全リセット、すべて問題なし
+- **v0.3.3としてリリース済み（2026-07-15）**
 
 ### ポイントシステム課金連携機能実装（2026-07-14）
 - `PluginConfig::pointBillingEnabled`（デフォルトtrue）/ `pointBillingRate`（デフォルト100.0 pt/USD）を追加
