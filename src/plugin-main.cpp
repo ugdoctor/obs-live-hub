@@ -85,6 +85,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "modules/XClient.hpp"
 #include "ui/SupporterHistoryDialog.hpp"
 #include "ui/MembershipPlanPriceDialog.hpp"
+#include "ui/MatchCounterDialog.hpp"
+#include "ui/MatchCounterDock.hpp"
 #include "ui/XAccountSettingsDialog.hpp"
 #include "ui/XTemplateSettingsDialog.hpp"
 #include "ui/XPostDock.hpp"
@@ -102,7 +104,9 @@ static WsServer *s_wsServer = nullptr;
 static EffectManager *s_effectManager = nullptr;
 static PointManager *s_pointManager = nullptr;
 static XPostDock *s_xPostDock = nullptr;
+static MatchCounterDock *s_matchCounterDock = nullptr;
 static QPointer<SupporterHistoryDialog> s_supporterHistoryDialog;
+static QPointer<MatchCounterDialog> s_matchCounterDialog;
 
 // userId → platform マップ（overlay.html の WS メッセージにはプラットフォームが含まれないため）
 static QMutex              s_userPlatformMutex;
@@ -241,6 +245,8 @@ static void broadcastTtsDict();                   // forward declaration
 static void broadcastDebugConfig();               // forward declaration
 static std::string makeConversationConfigJson();  // forward declaration
 static void broadcastConversationConfig();        // forward declaration
+static std::string makeMatchCounterJson(bool isReset); // forward declaration
+static void broadcastMatchCounterUpdate(bool isReset); // forward declaration
 static void processEffectOlhCommand(const QString &message, const QString &user = {}); // forward declaration
 static void processPointOlhCommand(const QString &userId, const QString &platform,
                                    const QString &displayName,
@@ -275,6 +281,7 @@ static void applyWsCallbacks(WsServer *srv)
 			s_wsServer->broadcast(TtsDictionaryDialog::makeDictJson());
 			broadcastDebugConfig();
 			broadcastConversationConfig();
+			broadcastMatchCounterUpdate(true); // isReset=true: 初回表示はリール演出なしで即時反映
 		}, Qt::QueuedConnection);
 	});
 }
@@ -1181,6 +1188,83 @@ static void broadcastConversationConfig()
 		s_wsServer->broadcast(makeConversationConfigJson());
 }
 
+static std::string makeMatchCounterJson(bool isReset)
+{
+	const auto &cfg = PluginConfig::instance();
+	const int total = cfg.matchWins + cfg.matchLosses;
+	const double winRate = total > 0 ? (cfg.matchWins * 100.0 / total) : 0.0;
+
+	auto fixedN = [](double v, int decimals) -> std::string {
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%.*f", decimals, v);
+		for (char *p = buf; *p; ++p)
+			if (*p == ',') *p = '.';
+		return buf;
+	};
+	auto fixed1 = [&fixedN](double v) -> std::string { return fixedN(v, 1); };
+
+	std::string history = "[";
+	for (size_t i = 0; i < cfg.matchHistory.size(); ++i) {
+		if (i) history += ",";
+		history += "\"" + cfg.matchHistory[i] + "\"";
+	}
+	history += "]";
+
+	return std::string("{\"type\":\"match_update\",") +
+	       "\"wins\":" + std::to_string(cfg.matchWins) + "," +
+	       "\"losses\":" + std::to_string(cfg.matchLosses) + "," +
+	       "\"total\":" + std::to_string(total) + "," +
+	       "\"winRate\":" + fixed1(winRate) + "," +
+	       "\"targetWins\":" + std::to_string(cfg.matchTargetWins) + "," +
+	       "\"targetWinRate\":" + fixed1(cfg.matchTargetWinRate) + "," +
+	       "\"targetMode\":" + std::to_string(cfg.matchTargetMode) + "," +
+	       "\"memo\":\"" + escapeJsonString(cfg.matchMemo) + "\"," +
+	       "\"history\":" + history + "," +
+	       "\"isReset\":" + (isReset ? "true" : "false") + "," +
+	       "\"style\":{" +
+	           "\"width\":" + std::to_string(cfg.matchWidth) + "," +
+	           "\"bgColor\":\"" + escapeJsonString(cfg.matchBgColor) + "\"," +
+	           "\"bgOpacity\":" + fixedN(cfg.matchBgOpacity, 2) + "," +
+	           "\"textColor\":\"" + escapeJsonString(cfg.matchTextColor) + "\"," +
+	           "\"warnColor\":\"" + escapeJsonString(cfg.matchWarnColor) + "\"," +
+	           "\"fontFamily\":\"" + escapeJsonString(cfg.matchFontFamily) + "\"," +
+	           "\"fontSize\":" + std::to_string(cfg.matchFontSize) +
+	       "}}";
+}
+
+static void broadcastMatchCounterUpdate(bool isReset)
+{
+	if (s_wsServer)
+		s_wsServer->broadcast(makeMatchCounterJson(isReset));
+}
+
+static void onMatchCounterMenuClick(void * /* data */)
+{
+	auto *mainWin = static_cast<QWidget *>(obs_frontend_get_main_window());
+
+	if (!s_matchCounterDialog) {
+		s_matchCounterDialog = new MatchCounterDialog(mainWin);
+		QObject::connect(s_matchCounterDialog, &MatchCounterDialog::matchDataChanged,
+		                 [](bool isReset) { broadcastMatchCounterUpdate(isReset); });
+	}
+	s_matchCounterDialog->refresh();
+	s_matchCounterDialog->show();
+	s_matchCounterDialog->raise();
+	s_matchCounterDialog->activateWindow();
+}
+
+static void onOpenMatchCounterMenuClick(void * /* data */)
+{
+#ifdef _WIN32
+	char appdata[MAX_PATH] = {};
+	if (GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH) == 0)
+		return;
+	const std::string path =
+		std::string(appdata) + "\\obs-studio\\plugins\\obs-live-hub\\match_counter.html";
+	ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#endif
+}
+
 static void onConversationOverlayMenuClick(void * /* data */)
 {
 	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
@@ -1768,6 +1852,15 @@ static void buildObsLiveHubMenu()
 	hubMenu->addAction("サポーター履歴", []() { onSupporterHistoryMenuClick(nullptr); });
 	hubMenu->addAction("メンバーシッププラン価格設定", []() { onMembershipPlanPriceMenuClick(nullptr); });
 
+	auto *matchMenu = hubMenu->addMenu("勝敗数カウンター");
+	if (s_matchCounterDock) {
+		QAction *toggleAct = s_matchCounterDock->toggleViewAction();
+		toggleAct->setText("カウンタードックを表示");
+		matchMenu->addAction(toggleAct);
+	}
+	matchMenu->addAction("カウンター外観設定", []() { onMatchCounterMenuClick(nullptr); });
+	matchMenu->addAction("カウンターページを開く", []() { onOpenMatchCounterMenuClick(nullptr); });
+
 	auto *xMenu = hubMenu->addMenu("X投稿");
 	xMenu->addAction("X手動投稿",               []() { onXManualPostMenuClick(nullptr); });
 	xMenu->addAction("配信開始時の自動投稿設定", []() { onXAutoPostModeMenuClick(nullptr); });
@@ -1996,6 +2089,7 @@ bool obs_module_load(void)
 	ensureHtmlFileInAppData(L"debug.html");
 	ensureHtmlFileInAppData(L"effect.html");
 	ensureHtmlFileInAppData(L"conversation_overlay.html");
+	ensureHtmlFileInAppData(L"match_counter.html");
 #endif
 
 	PluginConfig::instance().load();
@@ -2065,6 +2159,13 @@ bool obs_module_load(void)
 	obs_frontend_add_dock_by_id("obs-live-hub-x-post-dock", "X投稿", s_xPostDock);
 	QObject::connect(s_xPostDock, &XPostDock::postRequested,
 	                 [](const QString &text) { doXPostTweet(text); });
+
+	// 勝敗数カウンタードック
+	s_matchCounterDock = new MatchCounterDock();
+	obs_frontend_add_dock_by_id("obs-live-hub-match-counter-dock", "勝敗数カウンター",
+	                            s_matchCounterDock);
+	QObject::connect(s_matchCounterDock, &MatchCounterDock::matchDataChanged,
+	                 [](bool isReset) { broadcastMatchCounterUpdate(isReset); });
 
 	// WebSocket サーバー起動
 	s_wsServer = new WsServer(static_cast<uint16_t>(cfg.wsPort));

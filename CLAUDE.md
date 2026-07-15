@@ -43,7 +43,8 @@ obs-comment-viewer/
 │   ├── overlay.html        # コメントオーバーレイ ★実装参照はこちら
 │   ├── tts.html            # TTS 読み上げ用
 │   ├── effect.html         # エフェクト表示用
-│   └── debug.html          # デバッグ用
+│   ├── debug.html          # デバッグ用
+│   └── match_counter.html  # 勝敗カウンター表示用
 └── src/
     ├── plugin-main.cpp         # エントリーポイント・WebSocket ハンドラ群
     ├── plugin-main.c           # OBS モジュール宣言スタブ（テンプレート由来）
@@ -79,6 +80,8 @@ obs-comment-viewer/
     │   ├── PointSettingsDialog.hpp/cpp    # ポイントシステム設定
     │   ├── SettingsDialog.hpp/cpp         # 接続設定・OAuth 認証フロー
     │   ├── StreamSettingsDialog.hpp/cpp   # 配信情報一括設定（タイトル・カテゴリ等）
+    │   ├── MatchCounterDialog.hpp/cpp     # 勝敗カウンター外観設定専用ダイアログ
+    │   ├── MatchCounterDock.hpp/cpp       # 勝敗カウンター常設ドック（日常操作用）
     │   ├── TtsDictionaryDialog.hpp/cpp    # TTS 読み上げ辞書（CSV 管理）
     │   ├── TtsSpeechDialog.hpp/cpp        # TTS エンジン設定・接続確認
     │   └── VoteManagerDialog.hpp/cpp      # アンケート（投票）管理
@@ -139,6 +142,7 @@ public:
 | X 手動投稿（Web Intent） | `XManualPostDialog` | X API 認証情報不要、ブラウザで `x.com/intent/post` を開く、画像クリップボードコピー |
 | サポーター（課金）履歴 | `SupporterLedger` / `SupporterHistoryDialog` | YouTube SC/SS・メンバーシップ、Twitch Bits・サブスクを記録・表示。DPAPI暗号化。詳細は「サポーター履歴機能」セクション参照 |
 | メンバーシッププラン価格設定 | `MembershipPlanPriceDialog` | プラン名→価格・通貨のマッピングを設定。表示・集計時に動的USD換算。過去イベントにも遡及反映 |
+| 勝敗カウンター（対戦ゲーム向け） | `MatchCounterDock`（常設ドック・日常操作） / `MatchCounterDialog`（外観設定） / `match_counter.html` | 勝敗数・目標モード・配信画面メモを管理し WebSocket でリアルタイム配信。スロット風リール演出。詳細は「勝敗カウンター機能」セクション参照 |
 
 ### Phase 2（将来）：追加予定
 - [ ] NGワードフィルタリング
@@ -215,6 +219,107 @@ YouTube / Twitch の課金イベントを視聴者単位で追跡・記録する
 - `ツール → obs-live-hub → メンバーシッププラン価格設定` で「テストメンバーレベル」に価格を設定するとビューアの金額が変わることを確認可能
 - 注入後に暗号化保存→復号読み込みが正常に機能するかをビューアで確認可能
 - **実機確認済み（2026-06-26）**: テストデータ注入 → OBS再起動後復号確認 → 配信中警告ダイアログ（Yes/Cancel）→ supporter_ledger.dat 暗号化目視確認、すべて問題なし
+
+---
+
+## 勝敗カウンター機能（MatchCounter）
+
+### 概要
+対戦ゲーム配信向けに、勝敗数・目標モード・配信画面メモを管理し WebSocket 経由で `match_counter.html`
+（ブラウザソース）へリアルタイム表示する機能。日常操作（勝敗+1/-1・目標・メモ）は常設ドック
+`MatchCounterDock`（`表示 → ドック → 勝敗数カウンター` または `ツール → obs-live-hub → 勝敗数カウンター →
+カウンタードックを表示`）が担当し、外観設定（色・フォント・透明度等、頻繁には変更しない設定）は
+`ツール → obs-live-hub → 勝敗数カウンター → カウンター外観設定` から開く `MatchCounterDialog` が担当する
+（**この2つは役割分担しており、勝敗操作は必ずドック側で行う**）。
+
+### データモデル・永続化（`PluginConfig`）
+- `matchWins` / `matchLosses`（int）: 現在の勝敗数
+- `matchHistory`（`std::vector<std::string>`、要素は `"W"`/`"L"`、最大10件、**古い→新しい順**）
+  - `config.json` には `match_history` キーにカンマ区切り文字列（例: `"W,L,W,W,L"`）として保存
+- `matchTargetWins`（int, デフォルト0）/ `matchTargetWinRate`（double, デフォルト50.0）: 目標値そのもの
+- `matchTargetMode`（int, デフォルト0）: **どちらの目標値を使うかの排他モード**。`0`=目標なし、
+  `1`=勝利数目標を使用、`2`=勝率目標を使用。目標値と表示モードを分離することで、両方の目標値を
+  入力済みのまま表示だけをワンクリックで切り替えられる設計にした
+- `matchMemo`（std::string, デフォルト空）: 配信画面に表示する任意の1行メモ
+- 外観設定: `matchWidth` / `matchBgColor` / `matchBgOpacity` / `matchTextColor`（黒字色）/
+  `matchWarnColor`（赤字色）/ `matchFontFamily` / `matchFontSize`
+
+### UI
+
+#### `MatchCounterDock`（常設ドック・日常操作用）
+- `CommentDock`/`XPostDock` と同様に `QDockWidget` 継承、`obs_frontend_add_dock_by_id` でOBSに登録
+  （`s_matchCounterDock`はplugin-main.cppのグローバル生ポインタ。ドックは登録後も破棄されないため
+  `SupporterHistoryDialog`のような`QPointer`は使わず、`CommentDock`/`XPostDock`と同じ管理方式にした）
+- 「勝利 +1」「敗北 +1」: カウントを増やし `matchHistory` に結果を追加（`isReset=false`、overlay側でリール演出）
+- 「勝利 -1」「敗北 -1」: 誤操作削除用。カウントを減らし、`matchHistory` の**末尾が同じ結果の場合のみ**取り除く
+  （ベストエフォートの取り消し。間に他の操作が挟まっている場合は履歴を書き換えない）
+- 勝利数・敗北数の `QSpinBox` は **`editingFinished`**（ユーザーの直接編集確定時のみ発火。`setValue()` 単体では
+  発火しない）で検知し、値が変化していれば `matchHistory` をクリアする（手入力で履歴の整合性が崩れるため）。
+  `isReset=true` で送信し、overlay側はリール演出をスキップして即座に書き換える
+- 目標モード（`QButtonGroup`にIDとして0/1/2を割り当てたラジオボタン3択）: 選択に応じて対応する目標値欄
+  （勝利数 or 勝率）のみを `setEnabled(true)` にする。目標値欄自体は `editingFinished` で保存
+- **メモ欄**: `QLineEdit::textEdited` で検知するが、1文字ごとの保存/ブロードキャストを避けるため
+  `QTimer`（250ms, singleShot）でデバウンスしてから確定する。「リアルタイムに通知」という要件と、
+  タイピング中の連続ディスク書き込み・WS送信を避ける実用性の両立を狙った設計
+- 「すべてリセット」ボタン: 確認ダイアログ後、勝敗数・目標値・目標モード・メモ・履歴をすべて初期値に戻す
+  （`isReset=true`）
+
+#### `MatchCounterDialog`（外観設定専用ダイアログ）
+- 非モーダル（`show()`、`QPointer`で単一インスタンス管理）。幅・背景色・背景透明度・文字色・警告色・
+  フォント・フォントサイズのみを扱う。変更は即座に `PluginConfig` へ保存し `matchDataChanged(false)` を emit
+  （外観変更はカウント数を変えないため常に `isReset=false`）
+
+### WebSocketメッセージ（`match_update`）
+`plugin-main.cpp` の `makeMatchCounterJson(bool isReset)` が生成し、`broadcastMatchCounterUpdate(bool isReset)`
+で全クライアントに送信する。新規クライアント接続時（`WsServer` の `connectCallback`）にも `isReset=true` で
+現在値を送信する。`MatchCounterDock`・`MatchCounterDialog` それぞれの `matchDataChanged` シグナルが
+このブロードキャスト関数に接続されている。
+
+```json
+{
+  "type": "match_update",
+  "wins": 10, "losses": 5, "total": 15,
+  "winRate": 66.7,
+  "targetWins": 15, "targetWinRate": 60.0, "targetMode": 1,
+  "memo": "本日の目標：ダイヤ昇格戦！",
+  "history": ["W", "W", "L", "W", "L"],
+  "isReset": false,
+  "style": {
+    "width": 360, "bgColor": "#1e1e1e", "bgOpacity": 0.85,
+    "textColor": "#ffffff", "warnColor": "#ff4444",
+    "fontFamily": "Arial", "fontSize": 24
+  }
+}
+```
+
+### フロントエンド（`data/match_counter.html`）
+- `ws://127.0.0.1:8765` に接続し `type:"match_update"` を受信して描画する単純な受信専用ページ
+  （視聴者コメントコマンドの送受信は行わない）
+- **メモ表示**: `#memoWrap` を目標表示欄の1行上に配置。`memo` が空なら非表示
+- **targetMode による排他表示**（3モードは同時に成立しない）:
+  - `0`（目標なし）: `#winRateWrap` は黒字/赤字クラスを付けず、`#goalWrap`（あと何勝表示）も非表示
+  - `1`（勝利数目標）: `#goalWrap` を表示し「目標達成まで あと N 勝」/「🎉 目標達成！」を出し分ける。
+    勝率表示は色分けしない（通常色のまま）
+  - `2`（勝率目標）: `winRate >= targetWinRate` で `#winRateWrap` に `.target-met`、未満で `.target-unmet`
+    を付与（同値は黒字扱い）。`#goalWrap` は非表示（勝率モードでは「あと何勝」という概念がないため）
+- **スロット風リールアニメーション**: 0-9を縦に並べた `.reel-strip` を `translateY(-Nem)` で送る自作コンポーネント
+  （`updateReel()`）。文字数・種別が前回と同じ場合は要素を使い回して `transform` だけ更新するため滑らかに
+  アニメーションする。`isReset=true` の場合は `transition-duration:0s` を一時適用して瞬時に書き換える
+- 履歴アイコンは `history` 配列の順序（古い→新しい）のまま左から並べて表示する
+
+### メニュー構成
+`ツール → obs-live-hub → 勝敗数カウンター` サブメニューに集約:
+- 「カウンタードックを表示」: `s_matchCounterDock->toggleViewAction()` を流用（Qt標準のドック表示/非表示
+  トグル。チェック状態がドックの実際の表示状態と自動同期する）
+- 「カウンター外観設定」: `MatchCounterDialog` を開く
+- 「カウンターページを開く」: `match_counter.html` を既定ブラウザで開く（OBSブラウザソース登録時のパス確認用）
+
+### ファイル配置・自動デプロイ
+- `ensureHtmlFileInAppData(L"match_counter.html")` を `obs_module_load()` に追加済み（他のHTMLと同様に
+  DLL隣接フォルダ → `%APPDATA%\obs-studio\plugins\obs-live-hub\` へ起動時強制上書きコピー）
+- `deploy.ps1` にも `match_counter.html` のコピー処理を追加済み
+- OBSでブラウザソースとして追加する際は `ツール → obs-live-hub → 勝敗数カウンター → カウンターページを開く`
+  でパスを確認してから、ローカルファイルとして指定する
 
 ---
 

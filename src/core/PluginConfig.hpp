@@ -236,6 +236,28 @@ public:
 	// 表示・集計時にUSD変換して使用。記録時には金額を保存しない（遡及反映のため）。
 	std::vector<MembershipPlanPrice> membershipPlanPrices;
 
+	// 勝敗カウンター設定（MatchCounter）
+	int matchWins   = 0;
+	int matchLosses = 0;
+	// 直近の勝敗履歴（"W"/"L"、最大10件、古い→新しい順）
+	std::vector<std::string> matchHistory;
+	// 目標設定（matchTargetWins=0 は「目標なし」として扱う）
+	int    matchTargetWins    = 0;
+	double matchTargetWinRate = 50.0;
+	// 目標モード: 0=目標なし, 1=勝利数目標を使用, 2=勝率目標を使用
+	int matchTargetMode = 0;
+	// 配信画面に表示する任意の1行メモ
+	std::string matchMemo;
+
+	// 勝敗カウンター外観設定
+	int         matchWidth      = 360;
+	std::string matchBgColor    = "#1e1e1e";
+	float       matchBgOpacity  = 0.85f;
+	std::string matchTextColor  = "#ffffff"; // 目標達成時（黒字）の色
+	std::string matchWarnColor  = "#ff4444"; // 目標未達成時（赤字）の色
+	std::string matchFontFamily = "Arial";
+	int         matchFontSize   = 24;
+
 private:
 	PluginConfig() = default;
 };

@@ -576,6 +576,86 @@ void PluginConfig::load()
 		}
 	}
 
+	// 勝敗カウンター設定
+	if (obs_data_has_user_value(data, "match_wins")) {
+		matchWins = static_cast<int>(obs_data_get_int(data, "match_wins"));
+		if (matchWins < 0) matchWins = 0;
+	}
+	if (obs_data_has_user_value(data, "match_losses")) {
+		matchLosses = static_cast<int>(obs_data_get_int(data, "match_losses"));
+		if (matchLosses < 0) matchLosses = 0;
+	}
+	{
+		const char *s = obs_data_get_string(data, "match_history");
+		matchHistory.clear();
+		if (s && *s) {
+			const std::string str(s);
+			size_t start = 0;
+			while (start <= str.size()) {
+				const size_t comma = str.find(',', start);
+				const std::string tok = str.substr(
+					start, comma == std::string::npos ? std::string::npos
+					                                   : comma - start);
+				if (tok == "W" || tok == "L")
+					matchHistory.push_back(tok);
+				if (comma == std::string::npos)
+					break;
+				start = comma + 1;
+			}
+			if (matchHistory.size() > 10)
+				matchHistory.erase(matchHistory.begin(), matchHistory.end() - 10);
+		}
+	}
+	if (obs_data_has_user_value(data, "match_target_wins")) {
+		matchTargetWins = static_cast<int>(obs_data_get_int(data, "match_target_wins"));
+		if (matchTargetWins < 0) matchTargetWins = 0;
+	}
+	if (obs_data_has_user_value(data, "match_target_win_rate")) {
+		matchTargetWinRate = obs_data_get_double(data, "match_target_win_rate");
+		if (matchTargetWinRate < 0.0 || matchTargetWinRate > 100.0)
+			matchTargetWinRate = 50.0;
+	}
+	if (obs_data_has_user_value(data, "match_target_mode")) {
+		matchTargetMode = static_cast<int>(obs_data_get_int(data, "match_target_mode"));
+		if (matchTargetMode < 0 || matchTargetMode > 2)
+			matchTargetMode = 0;
+	}
+	{
+		const char *s = obs_data_get_string(data, "match_memo");
+		if (s) matchMemo = s;
+	}
+	if (obs_data_has_user_value(data, "match_width")) {
+		matchWidth = static_cast<int>(obs_data_get_int(data, "match_width"));
+		if (matchWidth < 100 || matchWidth > 1920)
+			matchWidth = 360;
+	}
+	{
+		const char *s = obs_data_get_string(data, "match_bg_color");
+		if (s && *s) matchBgColor = s;
+	}
+	if (obs_data_has_user_value(data, "match_bg_opacity")) {
+		matchBgOpacity = static_cast<float>(obs_data_get_double(data, "match_bg_opacity"));
+		if (matchBgOpacity < 0.0f || matchBgOpacity > 1.0f)
+			matchBgOpacity = 0.85f;
+	}
+	{
+		const char *s = obs_data_get_string(data, "match_text_color");
+		if (s && *s) matchTextColor = s;
+	}
+	{
+		const char *s = obs_data_get_string(data, "match_warn_color");
+		if (s && *s) matchWarnColor = s;
+	}
+	{
+		const char *s = obs_data_get_string(data, "match_font_family");
+		if (s && *s) matchFontFamily = s;
+	}
+	if (obs_data_has_user_value(data, "match_font_size")) {
+		matchFontSize = static_cast<int>(obs_data_get_int(data, "match_font_size"));
+		if (matchFontSize < 8 || matchFontSize > 96)
+			matchFontSize = 24;
+	}
+
 	obs_data_release(data);
 }
 
@@ -792,6 +872,29 @@ void PluginConfig::save()
 		}
 		obs_data_set_array(data, "membership_plan_prices", arr);
 		obs_data_array_release(arr);
+	}
+
+	// 勝敗カウンター設定
+	obs_data_set_int   (data, "match_wins",             matchWins);
+	obs_data_set_int   (data, "match_losses",           matchLosses);
+	obs_data_set_int   (data, "match_target_wins",      matchTargetWins);
+	obs_data_set_double(data, "match_target_win_rate",  matchTargetWinRate);
+	obs_data_set_int   (data, "match_target_mode",      matchTargetMode);
+	obs_data_set_string(data, "match_memo",             matchMemo.c_str());
+	obs_data_set_int   (data, "match_width",            matchWidth);
+	obs_data_set_string(data, "match_bg_color",         matchBgColor.c_str());
+	obs_data_set_double(data, "match_bg_opacity",       matchBgOpacity);
+	obs_data_set_string(data, "match_text_color",       matchTextColor.c_str());
+	obs_data_set_string(data, "match_warn_color",       matchWarnColor.c_str());
+	obs_data_set_string(data, "match_font_family",      matchFontFamily.c_str());
+	obs_data_set_int   (data, "match_font_size",        matchFontSize);
+	{
+		std::string joined;
+		for (size_t i = 0; i < matchHistory.size(); ++i) {
+			if (i) joined += ",";
+			joined += matchHistory[i];
+		}
+		obs_data_set_string(data, "match_history", joined.c_str());
 	}
 
 	obs_data_save_json_safe(data, path, "tmp", "bak");

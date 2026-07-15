@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>obs-live-hub Match Counter</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 100%; height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+#stage {
+  display: inline-block;
+  padding: 16px 20px;
+  border-radius: 8px;
+  font-family: Arial, sans-serif;
+  color: #ffffff;
+  background: #1e1e1e;
+  font-variant-numeric: tabular-nums;
+}
+.row { display: flex; align-items: baseline; gap: 0.4em; margin-bottom: 0.3em; }
+.label { font-size: 0.6em; opacity: 0.8; }
+.score { font-weight: bold; font-size: 1.4em; }
+.total { font-size: 0.8em; opacity: 0.85; }
+.winrate { font-weight: bold; }
+.winrate.target-met   { color: var(--match-text-color, #ffffff); }
+.winrate.target-unmet { color: var(--match-warn-color, #ff4444); }
+.memo { font-size: 0.85em; opacity: 0.9; }
+.goal { font-size: 0.8em; margin-top: 0.2em; }
+.history { display: flex; gap: 4px; margin-top: 0.4em; }
+.hist-item {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.3em; height: 1.3em; border-radius: 3px;
+  font-size: 0.7em; font-weight: bold; color: #ffffff;
+}
+.hist-win  { background: #2e8b57; }
+.hist-lose { background: #b22222; }
+
+/* スロット風リール（数字の増減を縦回転で表現） */
+.reel-digit {
+  display: inline-block;
+  overflow: hidden;
+  height: 1em;
+  line-height: 1em;
+  vertical-align: baseline;
+  text-align: center;
+  min-width: 0.62em;
+}
+.reel-strip {
+  display: block;
+  transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.reel-num { display: block; height: 1em; line-height: 1em; }
+.reel-static { display: inline-block; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="row">
+    <span class="label">勝利</span><span class="score" id="winsVal">0</span>
+    <span class="label">敗北</span><span class="score" id="lossesVal">0</span>
+  </div>
+  <div class="row total">Total: <span id="totalVal">0</span></div>
+  <div class="row">
+    <span class="label">勝率</span>
+    <span class="winrate" id="winRateWrap"><span id="winRateVal">0.0</span>%</span>
+  </div>
+  <div class="row memo" id="memoWrap" style="display:none;"></div>
+  <div class="row goal" id="goalWrap" style="display:none;">
+    <span id="goalNormal">目標達成まで あと <span id="goalCountVal">0</span> 勝</span>
+    <span id="goalAchieved" style="display:none;">🎉 目標達成！</span>
+  </div>
+  <div class="history" id="history"></div>
+</div>
+<script>
+'use strict';
+
+var WS_URL = 'ws://127.0.0.1:8765';
+var ws = null;
+
+function connectWs() {
+  if (ws && (ws.readyState === WebSocket.CONNECTING ||
+             ws.readyState === WebSocket.OPEN)) return;
+
+  ws = new WebSocket(WS_URL);
+  var thisWs = ws;
+
+  ws.onerror = function() { if (ws === thisWs) ws = null; };
+  ws.onclose = function() { if (ws === thisWs) ws = null; };
+  ws.onmessage = function(e) {
+    try {
+      var data = JSON.parse(e.data);
+      if (data.type === 'match_update') onMatchUpdate(data);
+    } catch (_) {}
+  };
+}
+
+// ── リール演出（数字ごとに0-9を縦に並べたストリップをtranslateYで送る） ──────
+
+function makeReelChar(ch) {
+  if (/[0-9]/.test(ch)) {
+    var wrap = document.createElement('span');
+    wrap.className = 'reel-digit';
+    wrap.dataset.kind = 'digit';
+    var strip = document.createElement('span');
+    strip.className = 'reel-strip';
+    for (var d = 0; d <= 9; d++) {
+      var num = document.createElement('span');
+      num.className = 'reel-num';
+      num.textContent = String(d);
+      strip.appendChild(num);
+    }
+    wrap.appendChild(strip);
+    strip.style.transform = 'translateY(0em)';
+    return wrap;
+  }
+  var s = document.createElement('span');
+  s.className = 'reel-static';
+  s.dataset.kind = 'static';
+  s.textContent = ch;
+  return s;
+}
+
+function setDigit(wrap, ch, skipAnim) {
+  var strip = wrap.querySelector('.reel-strip');
+  if (skipAnim) {
+    strip.style.transitionDuration = '0s';
+    strip.style.transform = 'translateY(-' + ch + 'em)';
+    void strip.offsetHeight; // 強制リフロー（transition:none を確実に適用させる）
+    strip.style.transitionDuration = '';
+  } else {
+    strip.style.transform = 'translateY(-' + ch + 'em)';
+  }
+}
+
+// container の中身を text（数字・記号の混在文字列）に合わせて更新する。
+// 文字数・種別が変わらない限り既存要素を使い回し、transformだけ更新してアニメーションさせる。
+function updateReel(container, text, skipAnim) {
+  if (!container) return;
+  var chars = text.split('');
+  if (container.children.length !== chars.length) {
+    container.innerHTML = '';
+    chars.forEach(function(ch) { container.appendChild(makeReelChar(ch)); });
+  }
+  for (var i = 0; i < chars.length; i++) {
+    var ch = chars[i];
+    var el = container.children[i];
+    var isDigit = /[0-9]/.test(ch);
+    if ((isDigit && el.dataset.kind !== 'digit') ||
+        (!isDigit && (el.dataset.kind !== 'static' || el.textContent !== ch))) {
+      var fresh = makeReelChar(ch);
+      container.replaceChild(fresh, el);
+      el = fresh;
+    }
+    if (isDigit) setDigit(el, ch, skipAnim);
+  }
+}
+
+function renderHistory(history) {
+  var wrap = document.getElementById('history');
+  wrap.innerHTML = '';
+  (history || []).forEach(function(r) {
+    var el = document.createElement('span');
+    el.className = 'hist-item ' + (r === 'W' ? 'hist-win' : 'hist-lose');
+    el.textContent = (r === 'W') ? 'W' : 'L';
+    wrap.appendChild(el);
+  });
+}
+
+function hexToRgba(hex, opacity) {
+  var h = (hex || '#1e1e1e').replace('#', '');
+  if (h.length === 3) h = h.split('').map(function(c) { return c + c; }).join('');
+  var r = parseInt(h.substr(0, 2), 16) || 0;
+  var g = parseInt(h.substr(2, 2), 16) || 0;
+  var b = parseInt(h.substr(4, 2), 16) || 0;
+  var a = (typeof opacity === 'number') ? opacity : 1;
+  return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+}
+
+function applyStyle(style) {
+  style = style || {};
+  var stage = document.getElementById('stage');
+  if (style.width)      stage.style.width = style.width + 'px';
+  if (style.bgColor)    stage.style.background = hexToRgba(style.bgColor, style.bgOpacity);
+  if (style.fontFamily) stage.style.fontFamily = style.fontFamily;
+  if (style.fontSize)   stage.style.fontSize = style.fontSize + 'px';
+  stage.style.color = style.textColor || '#ffffff';
+  var root = document.documentElement;
+  if (style.textColor) root.style.setProperty('--match-text-color', style.textColor);
+  if (style.warnColor) root.style.setProperty('--match-warn-color', style.warnColor);
+}
+
+function onMatchUpdate(data) {
+  applyStyle(data.style);
+
+  updateReel(document.getElementById('winsVal'),   String(data.wins   || 0), data.isReset);
+  updateReel(document.getElementById('lossesVal'), String(data.losses || 0), data.isReset);
+  updateReel(document.getElementById('totalVal'),  String(data.total  || 0), data.isReset);
+
+  var winRate    = (typeof data.winRate === 'number') ? data.winRate : 0;
+  var targetRate = (typeof data.targetWinRate === 'number') ? data.targetWinRate : 0;
+  updateReel(document.getElementById('winRateVal'), winRate.toFixed(1), data.isReset);
+
+  // targetMode: 0=目標なし, 1=勝利数目標, 2=勝率目標（3モードは排他）
+  var targetMode = data.targetMode || 0;
+
+  var rateWrap = document.getElementById('winRateWrap');
+  rateWrap.classList.remove('target-met', 'target-unmet');
+  if (targetMode === 2) {
+    rateWrap.classList.add(winRate >= targetRate ? 'target-met' : 'target-unmet');
+  }
+
+  var goalWrap = document.getElementById('goalWrap');
+  if (targetMode === 1) {
+    goalWrap.style.display = '';
+    var targetWins = data.targetWins || 0;
+    var normalEl    = document.getElementById('goalNormal');
+    var achievedEl  = document.getElementById('goalAchieved');
+    if (data.wins >= targetWins) {
+      normalEl.style.display   = 'none';
+      achievedEl.style.display = '';
+    } else {
+      normalEl.style.display   = '';
+      achievedEl.style.display = 'none';
+      updateReel(document.getElementById('goalCountVal'),
+                 String(targetWins - data.wins), data.isReset);
+    }
+  } else {
+    goalWrap.style.display = 'none';
+  }
+
+  var memoWrap = document.getElementById('memoWrap');
+  if (data.memo) {
+    memoWrap.style.display = '';
+    memoWrap.textContent = data.memo;
+  } else {
+    memoWrap.style.display = 'none';
+  }
+
+  renderHistory(data.history);
+}
+
+connectWs();
+setInterval(function() {
+  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+    connectWs();
+  }
+}, 1000);
+</script>
+</body>
+</html>

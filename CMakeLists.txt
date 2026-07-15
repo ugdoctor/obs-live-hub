@@ -115,6 +115,10 @@ target_sources(
     src/ui/SupporterHistoryDialog.hpp
     src/ui/MembershipPlanPriceDialog.cpp
     src/ui/MembershipPlanPriceDialog.hpp
+    src/ui/MatchCounterDialog.cpp
+    src/ui/MatchCounterDialog.hpp
+    src/ui/MatchCounterDock.cpp
+    src/ui/MatchCounterDock.hpp
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
