@@ -128,6 +128,29 @@ html.mode-display #uiToggleTab {
   font-variant-numeric: tabular-nums;
 }
 
+#debugPanel {
+  margin-top: 8px;
+  border-top: 1px solid rgba(255,255,255,0.15);
+  padding-top: 8px;
+}
+#debugPanel summary {
+  cursor: pointer;
+  opacity: 0.9;
+  margin-bottom: 6px;
+}
+.debugSection {
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed rgba(255,255,255,0.12);
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 10.5px;
+}
+.debugRow {
+  opacity: 0.85;
+  white-space: normal;
+  word-break: break-all;
+}
+
 /* パネルが隠れていても常に触れる開閉タブ */
 #uiToggleTab {
   position: fixed; right: 0; top: 12px;
@@ -211,6 +234,40 @@ html.mode-display #uiToggleTab {
     </div>
     <div class="uiRow">
       <button class="small-btn" id="transformResetBtn">位置・画角をリセット</button>
+    </div>
+  </details>
+
+  <details id="debugPanel">
+    <summary>🦴 ボーン・トラッキング診断</summary>
+    <div class="debugSection">
+      <div class="debugRow">VRM: <span id="dbgVrmVersion">-</span></div>
+    </div>
+    <div class="debugSection">
+      <div class="debugRow">head:  <span id="dbgBoneHead">-</span></div>
+      <div class="debugRow">neck:  <span id="dbgBoneNeck">-</span></div>
+      <div class="debugRow">chest: <span id="dbgBoneChest">-</span></div>
+      <div class="debugRow">spine: <span id="dbgBoneSpine">-</span></div>
+    </div>
+    <div class="debugSection">
+      <div class="debugRow">生値(P/Y/R):    <span id="dbgRawAngles">-</span></div>
+      <div class="debugRow">head配分角:     <span id="dbgHeadAngles">-</span></div>
+      <div class="debugRow">neck配分角:     <span id="dbgNeckAngles">-</span></div>
+      <div class="debugRow">spine配分角:    <span id="dbgSpineAngles">-</span></div>
+      <div class="debugRow">chest配分角:    <span id="dbgChestAngles">-</span></div>
+    </div>
+    <div class="debugSection">
+      <div class="debugRow">head実角度:  <span id="dbgHeadActual">-</span></div>
+      <div class="debugRow">neck実角度:  <span id="dbgNeckActual">-</span></div>
+      <div class="debugRow">spine実角度: <span id="dbgSpineActual">-</span></div>
+      <div class="debugRow">chest実角度: <span id="dbgChestActual">-</span></div>
+    </div>
+    <div class="uiRow transformRow">
+      <label for="tTorsoMul">胴体連動倍率</label>
+      <input type="range" id="tTorsoMul" min="0" max="3" step="0.1" value="1">
+      <span class="transformVal" id="tTorsoMulVal">1.0</span>
+    </div>
+    <div class="uiRow">
+      <button class="small-btn" id="testSwingBtn">胴体を左右に揺らす（Test Swing）</button>
     </div>
   </details>
 </div>
@@ -338,6 +395,9 @@ function animate() {
   requestAnimationFrame(animate);
   var delta = clock.getDelta();
   if (currentVrm) {
+    // Test Swing中はカメラ/トラッキングの結果を無視し、疑似的な頭部rigで
+    // head/neck（→lastHeadRig経由でspine/chestにも）を強制的に動かす
+    if (testSwingActive) applyFaceRig({ head: getTestSwingRig(clock.elapsedTime) });
     applySpineChestFollow(lastHeadRig, clock.elapsedTime);
     var mouthTarget = isDisplayMode ? lastReceivedMouthTarget : computeMicMouthTarget();
     applyMouthOpenToVrm(currentVrm, mouthTarget, LIPSYNC_LERP);
@@ -347,15 +407,85 @@ function animate() {
   renderer.render(scene, camera);
 }
 
+// ── ボーン解決（VRM0/1両対応フォールバック、spine/chest欠落時の配分引き上げ） ──
+// getNormalizedBoneNode() が本来（three-vrm標準API）だが、モデルによっては
+// 正規化リグが組めておらず取得できないケースに備え、getBoneNode()/getRawBoneNode()へ
+// 段階的にフォールバックする。取得できたボーンには全てここでYXZのEuler順序を設定し、
+// ヨー（Y）とピッチ（X）を同時に動かした際にロール（Z）成分が混ざる
+// gimbal-lock的な見た目のブレを防ぐ（three.jsのEuler既定順序はXYZ）。
+var BONE_NAMES = ['head', 'neck', 'chest', 'spine',
+                   'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm'];
+var currentBones = {}; // name -> { node, source } | undefined
+var torsoFollow = { spine: SPINE_FOLLOW, chest: CHEST_FOLLOW }; // spine/chest欠落時に再配分される
+var currentVrmVersionLabel = '未読込';
+
+function resolveBoneWithFallback(humanoid, name) {
+  if (!humanoid) return null;
+  var node = null, source = null;
+  if (typeof humanoid.getNormalizedBoneNode === 'function') {
+    node = humanoid.getNormalizedBoneNode(name);
+    if (node) source = 'normalized';
+  }
+  if (!node && typeof humanoid.getBoneNode === 'function') {
+    node = humanoid.getBoneNode(name);
+    if (node) source = 'getBoneNode(legacy)';
+  }
+  if (!node && typeof humanoid.getRawBoneNode === 'function') {
+    node = humanoid.getRawBoneNode(name);
+    if (node) source = 'raw';
+  }
+  if (!node) return null;
+  if (node.rotation) node.rotation.order = 'YXZ';
+  return { node: node, source: source };
+}
+
+function resolveBonesForCurrentVrm() {
+  currentBones = {};
+  if (!currentVrm || !currentVrm.humanoid) return;
+  BONE_NAMES.forEach(function(name) {
+    currentBones[name] = resolveBoneWithFallback(currentVrm.humanoid, name);
+  });
+
+  // spine/chestのどちらか一方しか存在しないモデルでは、要件の「30〜40%」の総量を
+  // 存在する側へ丸ごと寄せる（欠落側が0%になり全体の追従量が減ってしまうのを防ぐ）
+  var hasSpine = !!currentBones.spine;
+  var hasChest = !!currentBones.chest;
+  var total = SPINE_FOLLOW + CHEST_FOLLOW;
+  if (hasSpine && hasChest)      torsoFollow = { spine: SPINE_FOLLOW, chest: CHEST_FOLLOW };
+  else if (hasSpine && !hasChest) torsoFollow = { spine: total, chest: 0 };
+  else if (!hasSpine && hasChest) torsoFollow = { spine: 0, chest: total };
+  else                             torsoFollow = { spine: 0, chest: 0 };
+
+  logBoneResolution();
+}
+
+function logBoneResolution() {
+  var prefix = '[vrm_stage:' + (isDisplayMode ? 'Display' : 'Controller') + ']';
+  ['head', 'neck', 'chest', 'spine'].forEach(function(name) {
+    var res = currentBones[name];
+    if (res) {
+      console.info(prefix + ' bone "' + name + '" OK (' + (res.node.name || '?') + ' via ' + res.source + ')');
+    } else {
+      console.warn(prefix + ' bone "' + name + '" NOT FOUND — このモデルでは追従しません');
+    }
+  });
+}
+
+function detectVrmVersion(vrm) {
+  var meta = vrm && vrm.meta;
+  if (!meta) { currentVrmVersionLabel = '不明（metaなし）'; return; }
+  if (meta.metaVersion === '0')      currentVrmVersionLabel = 'VRM 0.x';
+  else if (meta.metaVersion === '1') currentVrmVersionLabel = 'VRM 1.0';
+  else                                currentVrmVersionLabel = '不明 (metaVersion=' + meta.metaVersion + ')';
+}
+
 // ── Tポーズ解消（初期姿勢） ──────────────────────────────────────────────
 
-function applyRestPose(vrm) {
-  var humanoid = vrm.humanoid;
-  if (!humanoid) return;
-  var lUpper = humanoid.getNormalizedBoneNode('leftUpperArm');
-  var rUpper = humanoid.getNormalizedBoneNode('rightUpperArm');
-  var lLower = humanoid.getNormalizedBoneNode('leftLowerArm');
-  var rLower = humanoid.getNormalizedBoneNode('rightLowerArm');
+function applyRestPose() {
+  var lUpper = currentBones.leftUpperArm  && currentBones.leftUpperArm.node;
+  var rUpper = currentBones.rightUpperArm && currentBones.rightUpperArm.node;
+  var lLower = currentBones.leftLowerArm  && currentBones.leftLowerArm.node;
+  var rLower = currentBones.rightLowerArm && currentBones.rightLowerArm.node;
   // 正規化ボーン空間ではTポーズは腕が水平（Z回転0）。Z軸回転で腕を体側まで下ろす。
   if (lUpper) lUpper.rotation.z =  ARM_DOWN_Z;
   if (rUpper) rUpper.rotation.z = -ARM_DOWN_Z;
@@ -366,27 +496,37 @@ function applyRestPose(vrm) {
 // ── 頭部連動の背骨・胸の傾き + アイドル呼吸モーション ────────────────────
 
 var lastHeadRig = { x: 0, y: 0, z: 0 };
+var lastSpineTarget = { x: 0, y: 0, z: 0 }; // デバッグパネル表示用
+var lastChestTarget = { x: 0, y: 0, z: 0 };
 
 function applySpineChestFollow(headRig, elapsedTime) {
-  if (!currentVrm || !currentVrm.humanoid) return;
-  var spine = currentVrm.humanoid.getNormalizedBoneNode('spine');
-  var chest = currentVrm.humanoid.getNormalizedBoneNode('chest');
+  if (!currentVrm) return;
+  var spine = currentBones.spine && currentBones.spine.node;
+  var chest = currentBones.chest && currentBones.chest.node;
   if (!spine && !chest) return;
 
   var breath = Math.sin(elapsedTime * BREATH_SPEED) * BREATH_AMPLITUDE;
   var h = headRig || { x: 0, y: 0, z: 0 };
 
-  applyHeadRotation(spine, {
-    x: h.x * SPINE_FOLLOW + breath * 0.5,
-    y: h.y * SPINE_FOLLOW,
-    z: h.z * SPINE_FOLLOW
-  }, HEAD_LERP);
+  // torsoMul: デバッグパネルの「胴体連動倍率」スライダー（0.0〜3.0x）。
+  // 手動で効き目を強めて、ボーンが物理的に回転できているか目視確認するために使う。
+  var mul = (typeof vrmTransform.torsoMul === 'number') ? vrmTransform.torsoMul : 1.0;
+  var spineFollow = torsoFollow.spine * mul;
+  var chestFollow = torsoFollow.chest * mul;
 
-  applyHeadRotation(chest, {
-    x: h.x * CHEST_FOLLOW + breath,
-    y: h.y * CHEST_FOLLOW,
-    z: h.z * CHEST_FOLLOW
-  }, HEAD_LERP);
+  lastSpineTarget = {
+    x: h.x * spineFollow + breath * 0.5,
+    y: h.y * spineFollow,
+    z: h.z * spineFollow
+  };
+  lastChestTarget = {
+    x: h.x * chestFollow + breath,
+    y: h.y * chestFollow,
+    z: h.z * chestFollow
+  };
+
+  applyHeadRotation(spine, lastSpineTarget, HEAD_LERP);
+  applyHeadRotation(chest, lastChestTarget, HEAD_LERP);
 }
 
 // ── モデル位置・カメラ調整（Controllerで操作、WebSocketでDisplayへ即時反映） ──
@@ -396,10 +536,14 @@ var TRANSFORM_DEFAULTS = {
   yaw: 0,
   scale: 1,
   camDistance: 1.2,
-  camFov: 30
+  camFov: 30,
+  torsoMul: 1.0 // 胴体（spine/chest）連動の手動倍率。デバッグパネルのスライダーから操作する
 };
 var vrmTransform = Object.assign({}, TRANSFORM_DEFAULTS);
 var TRANSFORM_LS_KEY = 'vrmStageTransform';
+// torsoMulはデバッグパネル内のスライダー（#tTorsoMul）だが、既存の位置・画角と同じ
+// 仕組み（localStorage保存・vrm_transform_updateでのDisplay同期）に乗せるため
+// TRANSFORM_SLIDERSに含める（配列に追加するだけで自動的に配線される）。
 var TRANSFORM_SLIDERS = [
   { id: 'tPosX',        key: 'posX',        decimals: 2 },
   { id: 'tPosY',         key: 'posY',        decimals: 2 },
@@ -407,7 +551,8 @@ var TRANSFORM_SLIDERS = [
   { id: 'tYaw',          key: 'yaw',         decimals: 0 },
   { id: 'tScale',        key: 'scale',       decimals: 2 },
   { id: 'tCamDistance',  key: 'camDistance', decimals: 2 },
-  { id: 'tCamFov',       key: 'camFov',      decimals: 0 }
+  { id: 'tCamFov',       key: 'camFov',      decimals: 0 },
+  { id: 'tTorsoMul',     key: 'torsoMul',    decimals: 1 }
 ];
 
 // Controller/Displayの両方から、モデル読み込み直後・スライダー変更時・受信時に呼ばれる
@@ -501,6 +646,79 @@ function initTransformPanel() {
   }
 }
 
+// ── ボーン・トラッキング診断パネル ────────────────────────────────────────
+
+function radToDeg(r) { return (r || 0) * 180 / Math.PI; }
+
+function fmtAngles(rig) {
+  if (!rig) return '-';
+  return 'P' + radToDeg(rig.x).toFixed(1) + '° Y' + radToDeg(rig.y).toFixed(1) +
+         '° R' + radToDeg(rig.z).toFixed(1) + '°';
+}
+
+function fmtBoneActual(res) {
+  if (!res || !res.node) return '-';
+  var rot = res.node.rotation;
+  return 'P' + radToDeg(rot.x).toFixed(1) + '° Y' + radToDeg(rot.y).toFixed(1) +
+         '° R' + radToDeg(rot.z).toFixed(1) + '°';
+}
+
+function fmtBoneStatus(res) {
+  if (!res || !res.node) return 'NULL / 未検出';
+  return 'OK (' + (res.node.name || '?') + ' / ' + res.source + ')';
+}
+
+function setDebugText(id, text) {
+  var el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+function updateDebugPanel() {
+  setDebugText('dbgVrmVersion', currentVrm ? currentVrmVersionLabel : '未読込');
+
+  setDebugText('dbgBoneHead',  fmtBoneStatus(currentBones.head));
+  setDebugText('dbgBoneNeck',  fmtBoneStatus(currentBones.neck));
+  setDebugText('dbgBoneChest', fmtBoneStatus(currentBones.chest));
+  setDebugText('dbgBoneSpine', fmtBoneStatus(currentBones.spine));
+
+  setDebugText('dbgRawAngles',   fmtAngles(lastHeadRig));
+  setDebugText('dbgHeadAngles',  fmtAngles(lastHeadTarget));
+  setDebugText('dbgNeckAngles',  fmtAngles(lastNeckTarget));
+  setDebugText('dbgSpineAngles', fmtAngles(lastSpineTarget));
+  setDebugText('dbgChestAngles', fmtAngles(lastChestTarget));
+
+  setDebugText('dbgHeadActual',  fmtBoneActual(currentBones.head));
+  setDebugText('dbgNeckActual',  fmtBoneActual(currentBones.neck));
+  setDebugText('dbgSpineActual', fmtBoneActual(currentBones.spine));
+  setDebugText('dbgChestActual', fmtBoneActual(currentBones.chest));
+}
+
+// Test Swing: カメラ・トラッキングを一切使わず、頭部rig相当の値を疑似的にサイン波で
+// 生成してapplyFaceRig()へ流し込む（=lastHeadRigが更新され、そのままapplySpineChestFollow
+// にも伝播する）。これにより「Kalidokit/MediaPipeが正しく動いているか」と「Three.js上で
+// ボーンが物理的に回転できるか」を切り分けて確認できる。
+var testSwingActive = false;
+var TEST_SWING_AMPLITUDE_DEG = 35; // 目視確認しやすいよう大きめに振る
+var TEST_SWING_SPEED = 2.0;
+
+function getTestSwingRig(elapsedTime) {
+  var rad = (TEST_SWING_AMPLITUDE_DEG * Math.PI / 180) * Math.sin(elapsedTime * TEST_SWING_SPEED);
+  return { x: 0, y: rad, z: 0 }; // Yaw方向（左右振り）に大きく振る
+}
+
+function initDebugPanel() {
+  var swingBtn = document.getElementById('testSwingBtn');
+  if (swingBtn) {
+    swingBtn.addEventListener('click', function() {
+      testSwingActive = !testSwingActive;
+      swingBtn.textContent = testSwingActive
+        ? '揺らすのを止める（Test Swing中…）'
+        : '胴体を左右に揺らす（Test Swing）';
+    });
+  }
+  if (!isDisplayMode) setInterval(updateDebugPanel, 100); // 約10Hz。Displayは非表示のため更新しない
+}
+
 // ── VRMモデル読み込み（ファイル / IndexedDBキャッシュ 共通処理） ─────────
 
 function disposeCurrentVrm() {
@@ -508,6 +726,8 @@ function disposeCurrentVrm() {
   scene.remove(currentVrm.scene);
   VRMUtils.deepDispose(currentVrm.scene);
   currentVrm = null;
+  currentBones = {};
+  currentVrmVersionLabel = '未読込';
 }
 
 function loadVrmBinary(arrayBuffer, fileName, opts) {
@@ -531,10 +751,12 @@ function loadVrmBinary(arrayBuffer, fileName, opts) {
     currentVrm = vrm;
     scene.add(vrm.scene);
     if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
-    applyRestPose(vrm);
+    detectVrmVersion(vrm);
+    resolveBonesForCurrentVrm(); // currentBones/torsoFollowを更新し、取得成否をconsoleへ出力する
+    applyRestPose();
     applyTransform(vrmTransform);
 
-    setStatus('VRM読み込み完了: ' + fileName);
+    setStatus('VRM読み込み完了: ' + fileName + '（' + currentVrmVersionLabel + '）');
     if (opts.persist !== false) saveVrmToCache(arrayBuffer, fileName);
     if (opts.upload !== false && !isDisplayMode) uploadVrmToPlugin(arrayBuffer, fileName);
   }, undefined, function(err) {
@@ -711,23 +933,27 @@ function applyHeadRotation(bone, rig, t) {
 
 // riggedFace は Kalidokit.Face.solve() の戻り値、または WebSocket 経由で受信した
 // 同じ形状（head/eye/pupil）のオブジェクトのどちらでも受け付ける（Controller/Display共用）。
+var lastHeadTarget = { x: 0, y: 0, z: 0 }; // デバッグパネル表示用
+var lastNeckTarget = { x: 0, y: 0, z: 0 };
+
 function applyFaceRig(riggedFace) {
   if (!currentVrm || !riggedFace) return;
-  var humanoid = currentVrm.humanoid;
-  var expr     = currentVrm.expressionManager;
+  var expr = currentVrm.expressionManager;
 
   if (riggedFace.head) lastHeadRig = riggedFace.head;
 
-  if (humanoid && riggedFace.head) {
+  if (riggedFace.head) {
     // head/neck/spine/chestの4ボーンは親子関係で連結されており回転が世界座標で積み重なるため、
     // ここではheadに生の角度を渡さずHEAD_FOLLOW/NECK_FOLLOWで按分する
     // （spine/chest分はapplySpineChestFollowが担当。4者の合計が100%になるよう定数側で調整済み）
-    applyHeadRotation(humanoid.getNormalizedBoneNode('head'), {
+    lastHeadTarget = {
       x: riggedFace.head.x * HEAD_FOLLOW, y: riggedFace.head.y * HEAD_FOLLOW, z: riggedFace.head.z * HEAD_FOLLOW
-    }, HEAD_LERP);
-    applyHeadRotation(humanoid.getNormalizedBoneNode('neck'), {
+    };
+    lastNeckTarget = {
       x: riggedFace.head.x * NECK_FOLLOW, y: riggedFace.head.y * NECK_FOLLOW, z: riggedFace.head.z * NECK_FOLLOW
-    }, HEAD_LERP);
+    };
+    applyHeadRotation(currentBones.head && currentBones.head.node, lastHeadTarget, HEAD_LERP);
+    applyHeadRotation(currentBones.neck && currentBones.neck.node, lastNeckTarget, HEAD_LERP);
   }
 
   if (expr && riggedFace.eye) {
@@ -948,6 +1174,7 @@ function init() {
   initVrmDropUi();
   initUiToggle();
   initTransformPanel();
+  initDebugPanel();
   initModelForMode();
   connectWsWatchdog();
 
