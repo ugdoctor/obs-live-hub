@@ -34,16 +34,25 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <ws2tcpip.h>
 
 // VMCプロトコル（VirtualMotionCapture Protocol、OSC over UDP）受信機。
-// VSeeFace等の外部トラッキングソフトが送信するボーン姿勢・ブレンドシェイプ値を
-// UDPで受信し、約30〜60Hzに間引いてJSON化したスナップショットをコールバックで通知する。
-// 実際のWebSocketブロードキャストは呼び出し側（plugin-main.cpp）が担当し、
-// 本クラス自体はWsServerに依存しない（単体で完結する）。
+// VSeeFace / Webcam Motion Capture（WMC）等の外部トラッキングソフトが送信する
+// ボーン姿勢・ブレンドシェイプ値をUDPで受信し、約30〜60Hzに間引いてJSON化した
+// スナップショットをコールバックで通知する。実際のWebSocketブロードキャストは
+// 呼び出し側（plugin-main.cpp）が担当し、本クラス自体はWsServerに依存しない。
 //
-// セキュリティ: WsServerと同様にループバック（127.0.0.1）のみで待ち受け、
-// 外部ネットワークには公開しない。VSeeFace等を別PCで動かし本機能へ送信したい場合は
-// 対応していない（既知の制約）。
+// セキュリティ: INADDR_ANY（0.0.0.0）でバインドする。送信元がローカルPC上の
+// 127.0.0.1からだけでなく、同一PCの別ネットワークインターフェース経由（例:
+// 仮想アダプタ経由でのループバック相当の通信）で送られてくるツールにも対応する
+// ための仕様変更（2026-08-24）。UDPは応答を返さない受信専用のため、悪用されても
+// 外部からデータを取得される経路にはならないが、LAN内の他ホストからも本ポートへ
+// パケットを送りつけられるようになる点は既知のトレードオフとして明記しておく。
 class VmcReceiver {
 public:
+	// json: 集約済みスナップショット（type: "vrm_vmc_update"）
+	// rawBytes: 直近に受信した生UDPパケットのバイト数
+	// boneCount / morphCount: スナップショットに含まれるボーン数・モーフ数
+	using UpdateCallback =
+		std::function<void(const std::string &json, size_t rawBytes, size_t boneCount, size_t morphCount)>;
+
 	explicit VmcReceiver(uint16_t port);
 	~VmcReceiver();
 
@@ -52,9 +61,8 @@ public:
 	bool isRunning() const { return running_.load(); }
 	uint16_t port() const { return port_; }
 
-	// 集約済みJSONスナップショット（type: "vrm_vmc_update"）の通知コールバック。
 	// VmcReceiver自身の受信スレッドから呼ばれる（呼び出し側でスレッドセーフに処理すること）。
-	void setUpdateCallback(std::function<void(const std::string &)> cb);
+	void setUpdateCallback(UpdateCallback cb);
 
 private:
 	struct BoneSample {
@@ -64,13 +72,14 @@ private:
 	using OscArg = std::variant<float, int32_t, std::string, bool>;
 
 	void recvLoop();
-	void handlePacket(const uint8_t *data, size_t len);
-	void maybeFlush();
+	bool handlePacket(const uint8_t *data, size_t len); // 戻り値: パース成功したか
+	void maybeFlush(size_t lastPacketBytes);
+	void logParseErrorRateLimited(const char *reason);
 
-	// OSC パケット解析（例外を投げない。壊れたパケットは黙って無視する）
-	void parseOscPacket(const uint8_t *data, size_t len);
-	void parseOscBundle(const uint8_t *data, size_t len);
-	void parseOscMessage(const uint8_t *data, size_t len);
+	// OSC パケット解析（例外を投げない。壊れたパケットは黙って無視する。戻り値は成功可否）
+	bool parseOscPacket(const uint8_t *data, size_t len);
+	bool parseOscBundle(const uint8_t *data, size_t len);
+	bool parseOscMessage(const uint8_t *data, size_t len);
 	void dispatchOscMessage(const std::string &address, const std::vector<OscArg> &args);
 
 	// stateMutex_ を保持した状態で呼ぶこと（内部専用）
@@ -90,8 +99,12 @@ private:
 	bool dirty_ = false;
 	uint64_t lastFlushMs_ = 0;
 
+	// 受信スレッド（recvLoop）だけが読み書きするため排他制御は不要
+	uint64_t lastRawLogMs_ = 0;
+	uint64_t lastErrorLogMs_ = 0;
+
 	std::mutex callbackMutex_;
-	std::function<void(const std::string &)> updateCallback_;
+	UpdateCallback updateCallback_;
 };
 
 #endif // _WIN32

@@ -150,6 +150,8 @@ html.mode-display #uiToggleTab {
   white-space: normal;
   word-break: break-all;
 }
+.vmcActive   { color: #4caf50; font-weight: bold; }
+.vmcInactive { color: #ff5555; }
 
 /* パネルが隠れていても常に触れる開閉タブ */
 #uiToggleTab {
@@ -241,6 +243,12 @@ html.mode-display #uiToggleTab {
     <summary>🦴 ボーン・トラッキング診断</summary>
     <div class="debugSection">
       <div class="debugRow">VRM: <span id="dbgVrmVersion">-</span></div>
+    </div>
+    <div class="debugSection">
+      <div class="debugRow">VMCステータス: <span id="dbgVmcStatus" class="vmcInactive">未受信</span></div>
+      <div class="debugRow">受信ボーン数/モーフ数: <span id="dbgVmcCounts">- / -</span></div>
+      <div class="debugRow">Head(q):          <span id="dbgVmcHead">-</span></div>
+      <div class="debugRow">RightUpperArm(q): <span id="dbgVmcRUArm">-</span></div>
     </div>
     <div class="debugSection">
       <div class="debugRow">head:  <span id="dbgBoneHead">-</span></div>
@@ -678,8 +686,23 @@ function setDebugText(id, text) {
   if (el) el.textContent = text;
 }
 
+function fmtVmcQuat(b) {
+  if (!b || typeof b.qx !== 'number') return '-';
+  return 'x' + b.qx.toFixed(2) + ' y' + b.qy.toFixed(2) + ' z' + b.qz.toFixed(2) + ' w' + b.qw.toFixed(2);
+}
+
 function updateDebugPanel() {
   setDebugText('dbgVrmVersion', currentVrm ? currentVrmVersionLabel : '未読込');
+
+  var vmcOn = isVmcActive();
+  var vmcStatusEl = document.getElementById('dbgVmcStatus');
+  if (vmcStatusEl) {
+    vmcStatusEl.textContent = vmcOn ? ('受信中 (' + vmcFps + ' fps)') : '未受信';
+    vmcStatusEl.className = vmcOn ? 'vmcActive' : 'vmcInactive';
+  }
+  setDebugText('dbgVmcCounts', vmcLastBoneCount + ' / ' + vmcLastMorphCount);
+  setDebugText('dbgVmcHead',  fmtVmcQuat(vmcLastBoneSamples['Head']));
+  setDebugText('dbgVmcRUArm', fmtVmcQuat(vmcLastBoneSamples['RightUpperArm']));
 
   setDebugText('dbgBoneHead',  fmtBoneStatus(currentBones.head));
   setDebugText('dbgBoneNeck',  fmtBoneStatus(currentBones.neck));
@@ -758,7 +781,9 @@ function loadVrmBinary(arrayBuffer, fileName, opts) {
     if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
     detectVrmVersion(vrm);
     resolveBonesForCurrentVrm(); // currentBones/torsoFollowを更新し、取得成否をconsoleへ出力する
-    applyRestPose();
+    // VMCが既にアクティブな状態で（再）読み込みした場合、直後のVMCパケットで上書きされるまでの
+    // 一瞬だけ「T-pose解消の腕下げ姿勢」が出るのを避ける（要件: 初期ポーズがVMCを妨害しないように）
+    if (!isVmcActive()) applyRestPose();
     applyTransform(vrmTransform);
 
     setStatus('VRM読み込み完了: ' + fileName + '（' + currentVrmVersionLabel + '）');
@@ -1120,9 +1145,25 @@ function isVmcActive() {
   return !!lastVmcReceivedAt && (performance.now() - lastVmcReceivedAt) < VMC_STALE_TIMEOUT_MS;
 }
 
+// VMC/OSC（Unity）はY-up・左手系、Three.js/three-vrmはY-up・右手系のため、
+// ローカル回転クォータニオンをそのまま渡すと軸が反転して見える（実際には動くが
+// 左右・前後が逆・鏡像になる）。Z軸を反転させる基底変換に対応するクォータニオン変換は
+// (x,y,z,w) -> (-x,-y,z,w)（1軸だけ反転させる場合の標準的な変換）。
+// 参考: 位置(px/py/pz)は本実装では未適用のため変換不要（回転のみ反映する設計）。
+function unityQuatToThree(qx, qy, qz, qw) {
+  return { x: -qx, y: -qy, z: qz, w: qw };
+}
+
+var vmcMsgCount = 0;   // 直近1秒間に受信したvrm_vmc_updateの件数（fps算出用）
+var vmcFps = 0;
+var vmcLastBoneCount = 0;
+var vmcLastMorphCount = 0;
+var vmcLastBoneSamples = {}; // デバッグパネル表示用（主要ボーンの受信値をそのまま保持）
+
 function onVmcUpdateReceived(data) {
   if (!currentVrm) return;
   lastVmcReceivedAt = performance.now();
+  vmcMsgCount++;
 
   // Controller側のみ: VMCデータが来ている間はWebカメラ/MediaPipeを一時停止し、CPU負荷を減らす
   // （要件3「自動で一時停止」。停止済みかは vmcPauseApplied で判定し毎フレーム呼ばないようにする）
@@ -1133,34 +1174,48 @@ function onVmcUpdateReceived(data) {
   }
 
   var humanoid = currentVrm.humanoid;
+  var boneCount = 0;
   if (humanoid && data.bones) {
     Object.keys(data.bones).forEach(function(vmcName) {
+      var b = data.bones[vmcName];
+      vmcLastBoneSamples[vmcName] = b; // 診断パネル用（マッピング成否に関わらず生値を保持）
       var vrmName = vmcBoneNameToVrm(vmcName);
       var node = vrmName && humanoid.getNormalizedBoneNode(vrmName);
       if (!node) return;
-      var b = data.bones[vmcName];
-      if (typeof b.qx === 'number') node.quaternion.set(b.qx, b.qy, b.qz, b.qw);
+      boneCount++;
+      if (typeof b.qx === 'number') {
+        var q = unityQuatToThree(b.qx, b.qy, b.qz, b.qw);
+        node.quaternion.set(q.x, q.y, q.z, q.w);
+      }
       // 位置(px/py/pz)はモデルの体格差でスケールが崩れるため、回転のみ反映する
     });
   }
+  vmcLastBoneCount = boneCount;
 
+  var morphCount = 0;
   if (currentVrm.expressionManager && data.blendShapes) {
     var expr = currentVrm.expressionManager;
     Object.keys(data.blendShapes).forEach(function(name) {
       var v = data.blendShapes[name];
       if (typeof v !== 'number') return;
+      morphCount++;
       // VMC側のブレンドシェイプ名をそのままVRM表情名として渡す（ベストエフォート。
       // 送信元モデルとController側の読み込みモデルで命名規則が異なる場合は反映されない）
       try { expr.setValue(name, clamp01(v)); } catch (_) {}
     });
   }
+  vmcLastMorphCount = morphCount;
 }
 
 function initVmcWatchdog() {
   // VMCデータが一定時間途絶えたら「一時停止済み」フラグを解除し、
   // 手動でWebカメラトラッキングを再開できる状態に戻す（自動再開はしない。
   // カメラ権限プロンプトを勝手に再度出す等、ユーザーの意図しない動作を避けるため）
+  // 同じ1秒間隔でVMCの受信fps（診断パネル表示用）も算出する。
   setInterval(function() {
+    vmcFps = vmcMsgCount;
+    vmcMsgCount = 0;
+
     if (!isDisplayMode && vmcPauseApplied && lastVmcReceivedAt &&
         performance.now() - lastVmcReceivedAt > VMC_STALE_TIMEOUT_MS) {
       vmcPauseApplied = false;

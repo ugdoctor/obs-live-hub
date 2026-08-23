@@ -360,10 +360,27 @@ static void applyVmcCallback(VmcReceiver *recv)
 {
 	if (!recv)
 		return;
-	recv->setUpdateCallback([](const std::string &json) {
-		QMetaObject::invokeMethod(qApp, [json]() {
+	recv->setUpdateCallback([](const std::string &json, size_t rawBytes, size_t boneCount,
+				    size_t morphCount) {
+		QMetaObject::invokeMethod(qApp, [json, rawBytes, boneCount, morphCount]() {
+			const int clientCount = s_wsServer ? s_wsServer->clientCount() : 0;
 			if (s_wsServer)
 				s_wsServer->broadcast(json);
+
+			// VmcReceiver::maybeFlush()側のRAW受信ログと対になる、WS中継結果のログ。
+			// VmcReceiverはWsServerを知らない設計のため、クライアント数はこちら側でしか
+			// 分からない。同じく1秒に1回までに制限する（broadcast()自体は毎回全文を
+			// LOG_INFOで出す実装のため、VMCのような高頻度データではさらにログが埋もれる。
+			// 本ログは要約として別途出す）。
+			static uint64_t s_lastVmcWsLogMs = 0;
+			const uint64_t now = GetTickCount64();
+			if (s_lastVmcWsLogMs == 0 || now - s_lastVmcWsLogMs >= 1000) {
+				s_lastVmcWsLogMs = now;
+				obs_log(LOG_INFO,
+					"[VmcReceiver] RAW UDP recv: %zu bytes | parsed: %zu bones, "
+					"%zu morphs | WS broadcast to %d clients",
+					rawBytes, boneCount, morphCount, clientCount);
+			}
 		}, Qt::QueuedConnection);
 	});
 }

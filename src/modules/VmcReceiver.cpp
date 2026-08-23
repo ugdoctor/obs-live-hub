@@ -35,6 +35,8 @@ static const char *VMCTAG = "VmcReceiver";
 
 // 集約スナップショットの送出間隔。要件の「約30〜60Hz」の中間を採用。
 static constexpr int kFlushIntervalMs = 22; // 約45Hz
+// 診断ログ（RAW受信・パースエラー）のレート制限間隔。
+static constexpr uint64_t kDiagLogIntervalMs = 1000; // 1秒に1回まで
 
 // ─────────────────────────────────────────
 // OSC パケット読み取りヘルパー（境界チェック付き、失敗時は false を返すのみで例外は投げない）
@@ -147,7 +149,11 @@ bool VmcReceiver::start()
 
 	sockaddr_in addr{};
 	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // 外部ネットワークには公開しない
+	// INADDR_ANY(0.0.0.0)でバインドする。送信元がループバック(127.0.0.1)経由でも
+	// ローカルNIC経由でも受信できるようにするための仕様（2026-08-24変更、詳細はai_logs参照）。
+	// UDPは受信専用（応答を返さない）ため、外部から本ポートへパケットを送りつけられる
+	// リスクはあるが、データを外部へ漏らす経路にはならない。
+	addr.sin_addr.s_addr = htonl(INADDR_ANY);
 	addr.sin_port = htons(port_);
 
 	if (bind(sock_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == SOCKET_ERROR) {
@@ -163,7 +169,7 @@ bool VmcReceiver::start()
 
 	running_.store(true);
 	thread_ = std::thread(&VmcReceiver::recvLoop, this);
-	obs_log(LOG_INFO, "[%s] Listening for VMC/OSC on udp://127.0.0.1:%u", VMCTAG, port_);
+	obs_log(LOG_INFO, "[%s] Listening on UDP port %u (INADDR_ANY)", VMCTAG, port_);
 	return true;
 }
 
@@ -182,7 +188,7 @@ void VmcReceiver::stop()
 	obs_log(LOG_INFO, "[%s] Stopped.", VMCTAG);
 }
 
-void VmcReceiver::setUpdateCallback(std::function<void(const std::string &)> cb)
+void VmcReceiver::setUpdateCallback(UpdateCallback cb)
 {
 	std::lock_guard<std::mutex> lock(callbackMutex_);
 	updateCallback_ = std::move(cb);
@@ -214,65 +220,88 @@ void VmcReceiver::recvLoop()
 			continue;
 
 		// 要件: パケット破棄やポート競合でOBS全体をクラッシュさせない（例外安全）
+		bool parseOk = false;
 		try {
-			handlePacket(buf.data(), static_cast<size_t>(n));
+			parseOk = handlePacket(buf.data(), static_cast<size_t>(n));
 		} catch (const std::exception &e) {
+			parseOk = false;
 			obs_log(LOG_WARNING, "[%s] packet parse threw: %s — 無視します", VMCTAG, e.what());
 		} catch (...) {
+			parseOk = false;
 			obs_log(LOG_WARNING, "[%s] packet parse threw unknown exception — 無視します", VMCTAG);
 		}
+		if (!parseOk)
+			logParseErrorRateLimited("OSCパースに失敗したパケットを受信しました（形式不正または未対応）");
 
-		maybeFlush();
+		maybeFlush(static_cast<size_t>(n));
 	}
 
 	obs_log(LOG_INFO, "[%s] recvLoop() exiting", VMCTAG);
 }
 
-void VmcReceiver::handlePacket(const uint8_t *data, size_t len)
+bool VmcReceiver::handlePacket(const uint8_t *data, size_t len)
 {
-	parseOscPacket(data, len);
+	return parseOscPacket(data, len);
 }
 
-void VmcReceiver::parseOscPacket(const uint8_t *data, size_t len)
+void VmcReceiver::logParseErrorRateLimited(const char *reason)
+{
+	// recvLoop()のスレッドからのみ呼ばれるため排他制御は不要
+	const uint64_t now = GetTickCount64();
+	if (lastErrorLogMs_ != 0 && now - lastErrorLogMs_ < kDiagLogIntervalMs)
+		return;
+	lastErrorLogMs_ = now;
+	obs_log(LOG_WARNING, "[%s] OSC parse error: %s", VMCTAG, reason);
+}
+
+bool VmcReceiver::parseOscPacket(const uint8_t *data, size_t len)
 {
 	if (len < 4)
-		return;
-	if (len >= 16 && std::memcmp(data, "#bundle", 7) == 0) {
-		parseOscBundle(data, len);
-	} else if (data[0] == '/') {
-		parseOscMessage(data, len);
-	}
-	// それ以外（不正な形式・未対応形式）は黙って無視する
+		return false;
+	if (len >= 16 && std::memcmp(data, "#bundle", 7) == 0)
+		return parseOscBundle(data, len);
+	if (data[0] == '/')
+		return parseOscMessage(data, len);
+	// アドレスが'/'で始まらず#bundleでもない = OSCとして不正な形式
+	return false;
 }
 
-void VmcReceiver::parseOscBundle(const uint8_t *data, size_t len)
+bool VmcReceiver::parseOscBundle(const uint8_t *data, size_t len)
 {
 	// "#bundle\0"（8バイト）+ タイムスタンプ（8バイト）の後、
 	// [4バイト長][要素データ] の繰り返し。要素は個別メッセージまたは入れ子のバンドル。
+	// WMC（Webcam Motion Capture）等はこの形式で複数ボーン更新を1パケットにまとめて送ってくる。
 	size_t offset = 16;
+	bool allOk = true;
 	while (offset + 4 <= len) {
 		int32_t elemLen = 0;
-		if (!oscReadInt32(data, len, offset, elemLen))
+		if (!oscReadInt32(data, len, offset, elemLen)) {
+			allOk = false;
 			break;
-		if (elemLen < 0 || static_cast<size_t>(elemLen) > len - offset)
-			break; // 壊れた長さフィールド。これ以上パースを続けない
-		parseOscPacket(data + offset, static_cast<size_t>(elemLen));
+		}
+		if (elemLen < 0 || static_cast<size_t>(elemLen) > len - offset) {
+			allOk = false; // 壊れた長さフィールド。これ以上パースを続けない
+			break;
+		}
+		if (!parseOscPacket(data + offset, static_cast<size_t>(elemLen)))
+			allOk = false; // この要素は失敗したが、後続の要素は引き続き試す
 		offset += static_cast<size_t>(elemLen);
 	}
+	return allOk;
 }
 
-void VmcReceiver::parseOscMessage(const uint8_t *data, size_t len)
+bool VmcReceiver::parseOscMessage(const uint8_t *data, size_t len)
 {
 	size_t offset = 0;
 	std::string address;
 	if (!oscReadString(data, len, offset, address))
-		return;
+		return false;
 
 	std::string typeTags;
 	if (!oscReadString(data, len, offset, typeTags))
-		return;
+		return false;
 	if (typeTags.empty() || typeTags[0] != ',')
-		return;
+		return false;
 
 	std::vector<OscArg> args;
 	args.reserve(typeTags.size() - 1);
@@ -281,27 +310,28 @@ void VmcReceiver::parseOscMessage(const uint8_t *data, size_t len)
 		if (t == 'f') {
 			float v = 0;
 			if (!oscReadFloat32(data, len, offset, v))
-				return;
+				return false;
 			args.emplace_back(v);
 		} else if (t == 'i') {
 			int32_t v = 0;
 			if (!oscReadInt32(data, len, offset, v))
-				return;
+				return false;
 			args.emplace_back(v);
 		} else if (t == 's') {
 			std::string v;
 			if (!oscReadString(data, len, offset, v))
-				return;
+				return false;
 			args.emplace_back(std::move(v));
 		} else if (t == 'T' || t == 'F') {
 			args.emplace_back(t == 'T');
 		} else {
 			// blob等、VMCで使われない型タグ。安全に諦める（クラッシュしない）
-			return;
+			return false;
 		}
 	}
 
 	dispatchOscMessage(address, args);
+	return true;
 }
 
 static bool getArgFloatImpl(const std::variant<float, int32_t, std::string, bool> &arg, float &out)
@@ -320,7 +350,7 @@ static bool getArgFloatImpl(const std::variant<float, int32_t, std::string, bool
 void VmcReceiver::dispatchOscMessage(const std::string &address, const std::vector<OscArg> &args)
 {
 	if (address == "/VMC/Ext/Bone/Pos" || address == "/VMC/Ext/Root/Pos") {
-		// (string boneName, float px,py,pz, float qx,qy,qz,qw) の8引数を期待する
+		// (string boneName, float px,py,pz, float qx,qy,qz,qw) の8引数（型タグ "sfffffff"）を期待する
 		if (args.size() < 8)
 			return;
 		const std::string *name = std::get_if<std::string>(&args[0]);
@@ -361,28 +391,44 @@ void VmcReceiver::dispatchOscMessage(const std::string &address, const std::vect
 	// （Blend/Valが届いた時点でblendShapes_へ反映済みであり、Applyの発火を待つ必要がない）
 }
 
-void VmcReceiver::maybeFlush()
+void VmcReceiver::maybeFlush(size_t lastPacketBytes)
 {
 	std::string json;
+	size_t boneCount = 0, morphCount = 0;
+	bool doFlush = false;
 	{
 		std::lock_guard<std::mutex> lock(stateMutex_);
-		if (!dirty_)
-			return;
-		const uint64_t now = GetTickCount64();
-		if (lastFlushMs_ != 0 && now - lastFlushMs_ < static_cast<uint64_t>(kFlushIntervalMs))
-			return;
-		lastFlushMs_ = now;
-		dirty_ = false;
-		json = buildSnapshotJsonLocked();
+		boneCount = bones_.size();
+		morphCount = blendShapes_.size();
+		if (dirty_) {
+			const uint64_t now = GetTickCount64();
+			if (lastFlushMs_ == 0 || now - lastFlushMs_ >= static_cast<uint64_t>(kFlushIntervalMs)) {
+				lastFlushMs_ = now;
+				dirty_ = false;
+				json = buildSnapshotJsonLocked();
+				doFlush = true;
+			}
+		}
 	}
 
-	std::function<void(const std::string &)> cb;
+	// RAW受信ログ（1秒に1回まで）。フラッシュの有無に関わらず、パケットを受信した事実自体を記録する。
+	const uint64_t nowMs = GetTickCount64();
+	if (lastRawLogMs_ == 0 || nowMs - lastRawLogMs_ >= kDiagLogIntervalMs) {
+		lastRawLogMs_ = nowMs;
+		obs_log(LOG_INFO, "[%s] RAW UDP recv: %zu bytes | parsed: %zu bones, %zu morphs", VMCTAG,
+			lastPacketBytes, boneCount, morphCount);
+	}
+
+	if (!doFlush)
+		return;
+
+	UpdateCallback cb;
 	{
 		std::lock_guard<std::mutex> lock(callbackMutex_);
 		cb = updateCallback_;
 	}
 	if (cb)
-		cb(json);
+		cb(json, lastPacketBytes, boneCount, morphCount);
 }
 
 std::string VmcReceiver::boneSampleJson(const BoneSample &b)
