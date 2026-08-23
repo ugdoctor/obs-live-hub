@@ -395,12 +395,17 @@ function animate() {
   requestAnimationFrame(animate);
   var delta = clock.getDelta();
   if (currentVrm) {
-    // Test Swing中はカメラ/トラッキングの結果を無視し、疑似的な頭部rigで
-    // head/neck（→lastHeadRig経由でspine/chestにも）を強制的に動かす
-    if (testSwingActive) applyFaceRig({ head: getTestSwingRig(clock.elapsedTime) });
-    applySpineChestFollow(lastHeadRig, clock.elapsedTime);
-    var mouthTarget = isDisplayMode ? lastReceivedMouthTarget : computeMicMouthTarget();
-    applyMouthOpenToVrm(currentVrm, mouthTarget, LIPSYNC_LERP);
+    // VMC（VSeeFace等）が全身ボーンを直接駆動している間は、Kalidokit由来の
+    // 頭部連動背骨/呼吸モーション・マイク由来リップシンクを止め、VMCデータと
+    // 競合して見た目がガタつくのを防ぐ（onVmcUpdateReceived参照）
+    if (!isVmcActive()) {
+      // Test Swing中はカメラ/トラッキングの結果を無視し、疑似的な頭部rigで
+      // head/neck（→lastHeadRig経由でspine/chestにも）を強制的に動かす
+      if (testSwingActive) applyFaceRig({ head: getTestSwingRig(clock.elapsedTime) });
+      applySpineChestFollow(lastHeadRig, clock.elapsedTime);
+      var mouthTarget = isDisplayMode ? lastReceivedMouthTarget : computeMicMouthTarget();
+      applyMouthOpenToVrm(currentVrm, mouthTarget, LIPSYNC_LERP);
+    }
     currentVrm.update(delta);
   }
   maybeSendPoseUpdate();
@@ -1081,6 +1086,89 @@ function applyMouthOpenToVrm(vrm, targetOpen, lerpAmount) {
   expr.setValue('ou', currentMouthOpen * 0.25);
 }
 
+// ── VMC（VSeeFace等の外部トラッキングソフト）連携 ─────────────────────────
+// VmcReceiver（C++側）がUDPで受信したVMC/OSCデータをWsServerが全クライアントへ
+// ブロードキャストする（type: "vrm_vmc_update"）。Controller/Displayとも対等な
+// WebSocketクライアントとしてこれを受け取り、Kalidokitのhead/neck/spine/chest配分計算を
+// 経由せず、送られてきたボーンのQuaternionをVRMへ直接反映する（VSeeFace側で
+// 全身の姿勢計算が完結しているため、二重に計算し直す必要がない設計）。
+
+// VMC（Unity Humanoid命名）→ three-vrm（VRM Humanoid）ボーン名マッピング。
+// 大半のボーンは先頭を小文字化するだけで一致するが、代表的なものは明示的にテーブル化しておく。
+// 例外: 親指（Thumb）はUnity側がProximal/Intermediate/Distal、VRM1側がMetacarpal/Proximal/Distal
+// と1段ずれているため、下のフォールバック（先頭小文字化）だけでは正しく解決できない（既知の制限）。
+var VMC_BONE_MAP = {
+  Hips: 'hips', Spine: 'spine', Chest: 'chest', UpperChest: 'upperChest',
+  Neck: 'neck', Head: 'head', LeftEye: 'leftEye', RightEye: 'rightEye', Jaw: 'jaw',
+  LeftShoulder: 'leftShoulder', LeftUpperArm: 'leftUpperArm', LeftLowerArm: 'leftLowerArm', LeftHand: 'leftHand',
+  RightShoulder: 'rightShoulder', RightUpperArm: 'rightUpperArm', RightLowerArm: 'rightLowerArm', RightHand: 'rightHand',
+  LeftUpperLeg: 'leftUpperLeg', LeftLowerLeg: 'leftLowerLeg', LeftFoot: 'leftFoot', LeftToes: 'leftToes',
+  RightUpperLeg: 'rightUpperLeg', RightLowerLeg: 'rightLowerLeg', RightFoot: 'rightFoot', RightToes: 'rightToes'
+};
+
+function vmcBoneNameToVrm(vmcName) {
+  if (VMC_BONE_MAP[vmcName]) return VMC_BONE_MAP[vmcName];
+  if (!vmcName) return null;
+  return vmcName.charAt(0).toLowerCase() + vmcName.slice(1);
+}
+
+var lastVmcReceivedAt = 0;
+var VMC_STALE_TIMEOUT_MS = 2000; // この時間新しいVMCデータが来なければ非アクティブとみなす
+var vmcPauseApplied = false;     // Webカメラトラッキングを自動停止済みかどうか（Controllerのみ使用）
+
+function isVmcActive() {
+  return !!lastVmcReceivedAt && (performance.now() - lastVmcReceivedAt) < VMC_STALE_TIMEOUT_MS;
+}
+
+function onVmcUpdateReceived(data) {
+  if (!currentVrm) return;
+  lastVmcReceivedAt = performance.now();
+
+  // Controller側のみ: VMCデータが来ている間はWebカメラ/MediaPipeを一時停止し、CPU負荷を減らす
+  // （要件3「自動で一時停止」。停止済みかは vmcPauseApplied で判定し毎フレーム呼ばないようにする）
+  if (!isDisplayMode && !vmcPauseApplied && (mpCamera || faceMesh)) {
+    vmcPauseApplied = true;
+    stopTracking();
+    setStatus('VMCデータを受信中のため、Webカメラトラッキングを一時停止しました。');
+  }
+
+  var humanoid = currentVrm.humanoid;
+  if (humanoid && data.bones) {
+    Object.keys(data.bones).forEach(function(vmcName) {
+      var vrmName = vmcBoneNameToVrm(vmcName);
+      var node = vrmName && humanoid.getNormalizedBoneNode(vrmName);
+      if (!node) return;
+      var b = data.bones[vmcName];
+      if (typeof b.qx === 'number') node.quaternion.set(b.qx, b.qy, b.qz, b.qw);
+      // 位置(px/py/pz)はモデルの体格差でスケールが崩れるため、回転のみ反映する
+    });
+  }
+
+  if (currentVrm.expressionManager && data.blendShapes) {
+    var expr = currentVrm.expressionManager;
+    Object.keys(data.blendShapes).forEach(function(name) {
+      var v = data.blendShapes[name];
+      if (typeof v !== 'number') return;
+      // VMC側のブレンドシェイプ名をそのままVRM表情名として渡す（ベストエフォート。
+      // 送信元モデルとController側の読み込みモデルで命名規則が異なる場合は反映されない）
+      try { expr.setValue(name, clamp01(v)); } catch (_) {}
+    });
+  }
+}
+
+function initVmcWatchdog() {
+  // VMCデータが一定時間途絶えたら「一時停止済み」フラグを解除し、
+  // 手動でWebカメラトラッキングを再開できる状態に戻す（自動再開はしない。
+  // カメラ権限プロンプトを勝手に再度出す等、ユーザーの意図しない動作を避けるため）
+  setInterval(function() {
+    if (!isDisplayMode && vmcPauseApplied && lastVmcReceivedAt &&
+        performance.now() - lastVmcReceivedAt > VMC_STALE_TIMEOUT_MS) {
+      vmcPauseApplied = false;
+      setStatus('VMCデータの受信が途絶えました。必要であれば「カメラ/マイクを開始」を押してください。');
+    }
+  }, 1000);
+}
+
 // ── WebSocket連携（Controller: 送信 / Display: 受信） ────────────────────
 
 var WS_URL = 'ws://127.0.0.1:' + WS_PORT;
@@ -1100,9 +1188,13 @@ function connectWs() {
     if (!isDisplayMode) sendTransformUpdate(true);
   };
   ws.onmessage = function(e) {
-    if (!isDisplayMode) return; // Controllerは他クライアント（自分自身のecho含む）のデータを無視する
     try {
       var data = JSON.parse(e.data);
+      // vrm_vmc_update はプラグイン（VmcReceiver）が発信元であり、ControllerもDisplayも
+      // 対等なWebSocketクライアントとして受け取る（自分自身のechoではないため両方で処理する）
+      if (data.type === 'vrm_vmc_update') { onVmcUpdateReceived(data); return; }
+
+      if (!isDisplayMode) return; // 以下はController自身が発信したデータのechoなので無視する
       if (data.type === 'vrm_pose_update') onPoseUpdateReceived(data);
       else if (data.type === 'vrm_model_sync') fetchVrmModelFromServer(data.name);
       else if (data.type === 'vrm_transform_update') onTransformUpdateReceived(data);
@@ -1118,6 +1210,7 @@ function onPoseUpdateReceived(data) {
 
 function maybeSendPoseUpdate() {
   if (isDisplayMode || !currentVrm) return;
+  if (isVmcActive()) return; // VMC受信中はWebカメラ由来の（一時停止済み・古い）姿勢を送らない
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   var now = performance.now();
   if (now - lastPoseSendTime < POSE_SEND_INTERVAL_MS) return;
@@ -1175,6 +1268,7 @@ function init() {
   initUiToggle();
   initTransformPanel();
   initDebugPanel();
+  initVmcWatchdog();
   initModelForMode();
   connectWsWatchdog();
 

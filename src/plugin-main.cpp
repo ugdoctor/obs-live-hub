@@ -33,14 +33,17 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <QApplication>
 #include <QButtonGroup>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
+#include <QFormLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
 #include <QList>
 #include <QMainWindow>
 #include <QMap>
@@ -51,6 +54,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QPointer>
 #include <QProcess>
 #include <QRadioButton>
+#include <QSpinBox>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -64,6 +68,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "modules/VoiceroidClient.hpp"
 #include "modules/ViewerTtsSettings.hpp"
 #include "modules/WsServer.hpp"
+#include "modules/VmcReceiver.hpp"
 #include "platforms/TwitchPlatform.hpp"
 #include "platforms/YouTubePlatform.hpp"
 #include "ui/CommentDock.hpp"
@@ -103,6 +108,7 @@ static CommentDock *s_dock = nullptr;
 static YouTubePlatform *s_youtube = nullptr;
 static TwitchPlatform *s_twitch = nullptr;
 static WsServer *s_wsServer = nullptr;
+static VmcReceiver *s_vmcReceiver = nullptr;
 static EffectManager *s_effectManager = nullptr;
 static PointManager *s_pointManager = nullptr;
 static XPostDock *s_xPostDock = nullptr;
@@ -343,6 +349,45 @@ static void restartWsServer()
 			"接続診断ダイアログで詳細を確認してください", newPort);
 		// インスタンスは保持する。isRunning()==false のため broadcast は no-op 。
 		// listenState() でバインド失敗の理由を接続診断ダイアログに表示するために必要。
+	}
+}
+
+// VmcReceiver（VSeeFace等からのVMC/OSC受信）が受け取った集約スナップショットを、
+// WsServerの全クライアント（vrm_stage.htmlのController/Display）へ中継する。
+// VmcReceiver自身のスレッドから呼ばれるため、WsServerへの参照はQtメインスレッド経由で
+// 触る（他のWsServerコールバックと同じ規約に揃える）。
+static void applyVmcCallback(VmcReceiver *recv)
+{
+	if (!recv)
+		return;
+	recv->setUpdateCallback([](const std::string &json) {
+		QMetaObject::invokeMethod(qApp, [json]() {
+			if (s_wsServer)
+				s_wsServer->broadcast(json);
+		}, Qt::QueuedConnection);
+	});
+}
+
+static void restartVmcReceiver()
+{
+	const auto &cfg = PluginConfig::instance();
+
+	if (s_vmcReceiver) {
+		s_vmcReceiver->stop();
+		delete s_vmcReceiver;
+		s_vmcReceiver = nullptr;
+	}
+
+	if (!cfg.vmcEnabled) {
+		obs_log(LOG_INFO, "VmcReceiver: disabled by config, not starting");
+		return;
+	}
+
+	s_vmcReceiver = new VmcReceiver(static_cast<uint16_t>(cfg.vmcPort));
+	applyVmcCallback(s_vmcReceiver);
+	if (!s_vmcReceiver->start()) {
+		obs_log(LOG_WARNING, "VmcReceiver: Failed to start on UDP port %d", cfg.vmcPort);
+		// インスタンスは保持する（WsServerと同様の方針）。isRunning()==falseのまま。
 	}
 }
 
@@ -762,6 +807,7 @@ static void reloadAndReconnect()
 	obs_log(LOG_INFO, "Reloading config and reconnecting all platforms...");
 	PluginConfig::instance().load();
 	restartWsServer();
+	restartVmcReceiver();
 	reconnectTwitch();
 	reconnectYouTube();
 }
@@ -1345,6 +1391,46 @@ static void onOpenVrmStageMenuClick(void * /* data */)
 	if (box.clickedButton() == copyBtn)
 		QApplication::clipboard()->setText(QString::fromStdString(displayUrl));
 #endif
+}
+
+static void onVrmStageSettingsMenuClick(void * /* data */)
+{
+	auto *mainWin = static_cast<QWidget *>(obs_frontend_get_main_window());
+	auto &cfg = PluginConfig::instance();
+
+	QDialog dlg(mainWin);
+	dlg.setWindowTitle("VRMステージ設定");
+	dlg.setFixedWidth(360);
+
+	auto *vmcEnabledChk = new QCheckBox("VMC受信を有効にする（VSeeFace等の外部トラッキングソフト）", &dlg);
+	vmcEnabledChk->setChecked(cfg.vmcEnabled);
+
+	auto *vmcPortSpin = new QSpinBox(&dlg);
+	vmcPortSpin->setRange(1, 65535);
+	vmcPortSpin->setValue(cfg.vmcPort);
+
+	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+	QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+	QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+	auto *form = new QFormLayout();
+	form->addRow(vmcEnabledChk);
+	form->addRow("VMC受信ポート（UDP）:", vmcPortSpin);
+
+	auto *layout = new QVBoxLayout(&dlg);
+	layout->addLayout(form);
+	layout->addWidget(new QLabel(
+		"VSeeFace側の「OSC/VMC」送信先を 127.0.0.1・上記ポートに設定してください。\n"
+		"vrm_stage.html のControllerで受信中は、Webカメラトラッキングより優先されます。", &dlg));
+	layout->addSpacing(8);
+	layout->addWidget(buttons);
+
+	if (dlg.exec() == QDialog::Accepted) {
+		cfg.vmcEnabled = vmcEnabledChk->isChecked();
+		cfg.vmcPort    = vmcPortSpin->value();
+		cfg.save();
+		restartVmcReceiver();
+	}
 }
 
 static void onConversationOverlayMenuClick(void * /* data */)
@@ -1958,7 +2044,9 @@ static void buildObsLiveHubMenu()
 	matchMenu->addAction("カウンター外観設定", []() { onMatchCounterMenuClick(nullptr); });
 	matchMenu->addAction("カウンターページを開く", []() { onOpenMatchCounterMenuClick(nullptr); });
 
-	hubMenu->addAction("VRMステージページを開く", []() { onOpenVrmStageMenuClick(nullptr); });
+	auto *vrmMenu = hubMenu->addMenu("VRMステージ");
+	vrmMenu->addAction("ページを開く", []() { onOpenVrmStageMenuClick(nullptr); });
+	vrmMenu->addAction("VRMステージ設定（VMC受信）", []() { onVrmStageSettingsMenuClick(nullptr); });
 
 	auto *xMenu = hubMenu->addMenu("X投稿");
 	xMenu->addAction("X手動投稿",               []() { onXManualPostMenuClick(nullptr); });
@@ -2278,6 +2366,9 @@ bool obs_module_load(void)
 		s_wsServer = nullptr;
 	}
 
+	// VMC（VSeeFace等の外部トラッキングソフト）受信開始
+	restartVmcReceiver();
+
 	// YouTube（Qt シグナル直結、配信開始で connect()）
 	s_youtube = new YouTubePlatform(QString::fromStdString(cfg.youtubeApiKey),
 					QString::fromStdString(cfg.youtubeBroadcastId),
@@ -2351,6 +2442,12 @@ void obs_module_unload(void)
 		s_wsServer->stop();
 		delete s_wsServer;
 		s_wsServer = nullptr;
+	}
+
+	if (s_vmcReceiver) {
+		s_vmcReceiver->stop();
+		delete s_vmcReceiver;
+		s_vmcReceiver = nullptr;
 	}
 
 	obs_log(LOG_INFO, "plugin unloaded");

@@ -53,6 +53,10 @@ public:
 	// WebSocket
 	int wsPort = 8765;
 
+	// VMC（VSeeFace等の外部トラッキングソフトからのOSC over UDP受信、vrm_stage.html用）
+	bool vmcEnabled = true;
+	int  vmcPort    = 39539;
+
 	// オーバーレイ外観設定
 	int overlayWidth  = 400;
 	int overlayHeight = 0; // 0 = 100vh

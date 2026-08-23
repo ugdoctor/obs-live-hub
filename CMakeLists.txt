@@ -69,6 +69,8 @@ target_sources(
     src/ui/AivisParamLimitDialog.hpp
     src/modules/WsServer.cpp
     src/modules/WsServer.hpp
+    src/modules/VmcReceiver.cpp
+    src/modules/VmcReceiver.hpp
     src/modules/AivisEngine.cpp
     src/modules/AivisEngine.hpp
     src/modules/AivisStyleCache.cpp

@@ -70,6 +70,15 @@ void PluginConfig::load()
 	if (wsPort <= 0 || wsPort > 65535)
 		wsPort = 8765;
 
+	// VMC
+	if (obs_data_has_user_value(data, "vmc_enabled"))
+		vmcEnabled = obs_data_get_bool(data, "vmc_enabled");
+	if (obs_data_has_user_value(data, "vmc_port")) {
+		vmcPort = static_cast<int>(obs_data_get_int(data, "vmc_port"));
+		if (vmcPort <= 0 || vmcPort > 65535)
+			vmcPort = 39539;
+	}
+
 	// オーバーレイ外観設定（キーが存在する場合のみ上書き）
 	if (obs_data_has_user_value(data, "overlay_width")) {
 		overlayWidth = static_cast<int>(obs_data_get_int(data, "overlay_width"));
@@ -693,6 +702,10 @@ void PluginConfig::save()
 
 	// WebSocket
 	obs_data_set_int(data, "ws_port", wsPort);
+
+	// VMC
+	obs_data_set_bool(data, "vmc_enabled", vmcEnabled);
+	obs_data_set_int(data, "vmc_port", vmcPort);
 
 	// オーバーレイ外観設定
 	obs_data_set_int(data, "overlay_width",  overlayWidth);
