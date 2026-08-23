@@ -33,6 +33,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <QApplication>
 #include <QButtonGroup>
+#include <QClipboard>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -1303,25 +1304,31 @@ static void onOpenVrmStageMenuClick(void * /* data */)
 		std::string(appdata) + "\\obs-studio\\plugins\\obs-live-hub\\vrm_stage.html";
 
 	// 通常ブラウザでは常にControllerモード（トラッキング送信側）として開く。
-	// Displayモード（OBSブラウザソース受信側）はURLに ?mode=display を付けて別途登録する。
+	// Displayモード（OBSブラウザソース受信側）は WsServer が配信する
+	// http://127.0.0.1:<port>/vrm_stage.html?mode=display に統一する
+	// （file:// ではなく WsServer 経由にすることで、/vrm/model 等への fetch() が
+	// 同一オリジンになりCORSの懸念なく動作する）。
 	ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 
-	std::string displayUrl = "file:///" + path;
-	for (char &c : displayUrl) {
-		if (c == '\\')
-			c = '/';
-	}
-	displayUrl += "?mode=display";
+	const int port = PluginConfig::instance().wsPort;
+	const std::string displayUrl =
+		"http://127.0.0.1:" + std::to_string(port) + "/vrm_stage.html?mode=display";
 
 	auto *mainWin = static_cast<QWidget *>(obs_frontend_get_main_window());
-	QMessageBox::information(
-		mainWin, "VRM Stage",
-		QString::fromStdString(
-			"コントローラー画面（Webカメラ・マイクでのトラッキング送信用）を"
-			"ブラウザで開きました。\n\n"
-			"OBSの「ブラウザ」ソースには、下記のURLを「ローカルファイル」の"
-			"チェックを外して登録してください（Displayモード・受信専用・背景透過）:\n\n" +
-			displayUrl));
+	QMessageBox box(mainWin);
+	box.setIcon(QMessageBox::Information);
+	box.setWindowTitle("VRM Stage");
+	box.setText(QString::fromStdString(
+		"コントローラー画面（Webカメラ・マイクでのトラッキング送信用）を"
+		"ブラウザで開きました。\n\n"
+		"OBSの「ブラウザ」ソースには、下記のURLを「ローカルファイル」の"
+		"チェックを外して登録してください（Displayモード・受信専用・背景透過）:\n\n" +
+		displayUrl));
+	auto *copyBtn  = box.addButton("URLをコピー", QMessageBox::ActionRole);
+	box.addButton("閉じる", QMessageBox::AcceptRole);
+	box.exec();
+	if (box.clickedButton() == copyBtn)
+		QApplication::clipboard()->setText(QString::fromStdString(displayUrl));
 #endif
 }
 

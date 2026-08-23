@@ -297,27 +297,32 @@ bool WsServer::parseEmoteGetPath(const std::string &req, std::string &outFileNam
 	return true;
 }
 
-void WsServer::serveEmoteImage(SOCKET sock, const std::string &fileName)
+// ディスク上のファイルを読み込みHTTPレスポンスとして返す共通ヘルパー
+// （/emotes/<file> と /vrm_stage.html の配信で共用する）。
+static void sendFileResponse(SOCKET sock, const std::wstring &filePath,
+                              const std::string &contentType, size_t maxSize,
+                              const char *notFoundLogTag = nullptr)
 {
 	static const char *resp404 =
 		"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-
-	const std::wstring filePath = emotesImagesDirW() + L"\\" + utf8ToWide(fileName);
+	static const char *resp413 =
+		"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+	static const char *resp500 =
+		"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 	HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
 	                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 	if (hFile == INVALID_HANDLE_VALUE) {
-		obs_log(LOG_INFO, "[%s] emote image not found: %s", WSTAG, fileName.c_str());
+		if (notFoundLogTag)
+			obs_log(LOG_INFO, "[%s] file not found: %s", WSTAG, notFoundLogTag);
 		::send(sock, resp404, static_cast<int>(strlen(resp404)), 0);
 		return;
 	}
 
 	LARGE_INTEGER size{};
 	if (!GetFileSizeEx(hFile, &size) || size.QuadPart < 0 ||
-	    size.QuadPart > 20 * 1024 * 1024) { // 20MB上限（異常ファイルへの防御）
+	    static_cast<size_t>(size.QuadPart) > maxSize) {
 		CloseHandle(hFile);
-		static const char *resp413 =
-			"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 		::send(sock, resp413, static_cast<int>(strlen(resp413)), 0);
 		return;
 	}
@@ -330,15 +335,13 @@ void WsServer::serveEmoteImage(SOCKET sock, const std::string &fileName)
 	CloseHandle(hFile);
 
 	if (!ok) {
-		static const char *resp500 =
-			"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 		::send(sock, resp500, static_cast<int>(strlen(resp500)), 0);
 		return;
 	}
 
 	const std::string header =
 		"HTTP/1.1 200 OK\r\n"
-		"Content-Type: " + contentTypeForFile(fileName) + "\r\n"
+		"Content-Type: " + contentType + "\r\n"
 		"Content-Length: " + std::to_string(data.size()) + "\r\n"
 		"Cache-Control: no-cache\r\n"
 		"Access-Control-Allow-Origin: *\r\n"
@@ -346,6 +349,204 @@ void WsServer::serveEmoteImage(SOCKET sock, const std::string &fileName)
 	::send(sock, header.c_str(), static_cast<int>(header.size()), 0);
 	if (!data.empty())
 		::send(sock, data.data(), static_cast<int>(data.size()), 0);
+}
+
+// メモリ上のバイナリをHTTPレスポンスとして返す共通ヘルパー（/vrm/model の配信で使用）。
+static void sendBufferResponse(SOCKET sock, const std::vector<uint8_t> &data,
+                                const std::string &contentType)
+{
+	const std::string header =
+		"HTTP/1.1 200 OK\r\n"
+		"Content-Type: " + contentType + "\r\n"
+		"Content-Length: " + std::to_string(data.size()) + "\r\n"
+		"Cache-Control: no-cache\r\n"
+		"Access-Control-Allow-Origin: *\r\n"
+		"Connection: close\r\n\r\n";
+	::send(sock, header.c_str(), static_cast<int>(header.size()), 0);
+	if (!data.empty())
+		::send(sock, reinterpret_cast<const char *>(data.data()),
+		       static_cast<int>(data.size()), 0);
+}
+
+void WsServer::serveEmoteImage(SOCKET sock, const std::string &fileName)
+{
+	const std::wstring filePath = emotesImagesDirW() + L"\\" + utf8ToWide(fileName);
+	sendFileResponse(sock, filePath, contentTypeForFile(fileName), 20 * 1024 * 1024,
+	                  fileName.c_str());
+}
+
+// ─────────────────────────────────────────
+// VRM Stage 連携ヘルパー
+// ─────────────────────────────────────────
+
+// vrm_stage.html の配置先。ensureHtmlFileInAppData() がコピーする先と同一パスを指す
+// （独立して算出する設計。emotesImagesDirW() 等、本ファイルの既存の各所と同様）。
+static std::wstring vrmStageHtmlPathW()
+{
+	wchar_t appdata[MAX_PATH] = {};
+	GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
+	return std::wstring(appdata) + L"\\obs-studio\\plugins\\obs-live-hub\\vrm_stage.html";
+}
+
+// リクエスト行が "<method> <path>"（クエリ文字列があれば無視）と厳密一致するか判定する。
+static bool isRequestForPath(const std::string &req, const char *method, const char *path)
+{
+	const std::string methodPrefix = std::string(method) + " ";
+	if (req.compare(0, methodPrefix.size(), methodPrefix) != 0)
+		return false;
+	const size_t pathStart = methodPrefix.size();
+	const size_t pathEnd = req.find_first_of(" ?", pathStart);
+	if (pathEnd == std::string::npos)
+		return false;
+	return req.compare(pathStart, pathEnd - pathStart, path) == 0;
+}
+
+static long parseContentLength(const std::string &req)
+{
+	std::string lower = req;
+	std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+	const std::string hdr = "content-length:";
+	const size_t pos = lower.find(hdr);
+	if (pos == std::string::npos)
+		return -1;
+	size_t start = pos + hdr.size();
+	while (start < req.size() && req[start] == ' ')
+		++start;
+	size_t end = req.find('\r', start);
+	if (end == std::string::npos)
+		end = req.size();
+	try {
+		return std::stol(req.substr(start, end - start));
+	} catch (...) {
+		return -1;
+	}
+}
+
+// ヘッダ名（小文字）を指定して値を取り出す汎用ヘルパー（Content-Length以外の任意ヘッダ用）。
+static std::string parseHeaderValue(const std::string &req, const std::string &headerNameLower)
+{
+	std::string lower = req;
+	std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+	const std::string hdr = headerNameLower + ":";
+	const size_t pos = lower.find(hdr);
+	if (pos == std::string::npos)
+		return {};
+	size_t start = pos + hdr.size();
+	while (start < req.size() && req[start] == ' ')
+		++start;
+	size_t end = req.find('\r', start);
+	if (end == std::string::npos)
+		end = req.size();
+	return req.substr(start, end - start);
+}
+
+static std::string jsonEscape(const std::string &s)
+{
+	std::string r;
+	r.reserve(s.size() + 16);
+	for (unsigned char c : s) {
+		if (c == '"')       r += "\\\"";
+		else if (c == '\\') r += "\\\\";
+		else if (c == '\n') r += "\\n";
+		else if (c == '\r') r += "\\r";
+		else if (c >= 0x20) r += static_cast<char>(c);
+	}
+	return r;
+}
+
+void WsServer::serveVrmStagePage(SOCKET sock)
+{
+	sendFileResponse(sock, vrmStageHtmlPathW(), "text/html; charset=UTF-8", 5 * 1024 * 1024,
+	                  "vrm_stage.html");
+}
+
+void WsServer::serveVrmModel(SOCKET sock)
+{
+	std::vector<uint8_t> data;
+	{
+		std::lock_guard<std::mutex> lock(modelMutex_);
+		data = vrmModelData_; // ロック区間を短くするためコピーする
+	}
+	if (data.empty()) {
+		static const char *resp404 =
+			"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+		::send(sock, resp404, static_cast<int>(strlen(resp404)), 0);
+		return;
+	}
+	sendBufferResponse(sock, data, "application/octet-stream");
+}
+
+void WsServer::handleVrmModelUpload(SOCKET sock, const std::string &request)
+{
+	static const char *resp400 =
+		"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+	static const char *resp413 =
+		"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+	static const char *resp500 =
+		"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+	static const char *resp200 =
+		"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
+
+	const long contentLength = parseContentLength(request);
+	const size_t kMaxVrmSize = 256 * 1024 * 1024; // 256MB上限（異常アップロードへの防御）
+	if (contentLength < 0 || static_cast<size_t>(contentLength) > kMaxVrmSize) {
+		::send(sock, resp400, static_cast<int>(strlen(resp400)), 0);
+		return;
+	}
+
+	// readHttpRequest() が読んだバッファの中に、ヘッダに続くボディの先頭部分（スピルオーバー）が
+	// 既に含まれている場合があるため、それを起点に残りをrecv()で読み進める。
+	std::vector<uint8_t> body;
+	body.reserve(static_cast<size_t>(contentLength));
+	const size_t headerEnd = request.find("\r\n\r\n");
+	if (headerEnd != std::string::npos) {
+		const size_t spillStart = headerEnd + 4;
+		if (spillStart < request.size())
+			body.assign(request.begin() + spillStart, request.end());
+	}
+	if (body.size() > static_cast<size_t>(contentLength))
+		body.resize(static_cast<size_t>(contentLength));
+
+	while (body.size() < static_cast<size_t>(contentLength)) {
+		fd_set fds;
+		FD_ZERO(&fds);
+		FD_SET(sock, &fds);
+		timeval tv{10, 0};
+		if (select(0, &fds, nullptr, nullptr, &tv) <= 0) {
+			obs_log(LOG_WARNING, "[%s] VRMアップロード: recv timeout/error", WSTAG);
+			::send(sock, resp500, static_cast<int>(strlen(resp500)), 0);
+			return;
+		}
+		char tmp[65536];
+		const int n = recv(sock, tmp, sizeof(tmp), 0);
+		if (n <= 0) {
+			::send(sock, resp500, static_cast<int>(strlen(resp500)), 0);
+			return;
+		}
+		body.insert(body.end(), tmp, tmp + n);
+	}
+	if (body.size() > static_cast<size_t>(contentLength))
+		body.resize(static_cast<size_t>(contentLength));
+
+	std::string name = urlDecode(parseHeaderValue(request, "x-vrm-name"));
+	if (name.empty())
+		name = "model.vrm";
+
+	{
+		std::lock_guard<std::mutex> lock(modelMutex_);
+		vrmModelData_ = std::move(body);
+		vrmModelName_ = name;
+	}
+
+	obs_log(LOG_INFO, "[%s] VRMモデルをキャッシュしました: %s (%ld bytes)", WSTAG, name.c_str(),
+	        contentLength);
+
+	::send(sock, resp200, static_cast<int>(strlen(resp200)), 0);
+
+	// Displayクライアント（OBSブラウザソース等）へモデル更新を通知する
+	const std::string syncJson =
+		"{\"type\":\"vrm_model_sync\",\"name\":\"" + jsonEscape(name) + "\"}";
+	broadcast(syncJson);
 }
 
 // ─────────────────────────────────────────
@@ -587,6 +788,44 @@ void WsServer::clientLoop(SOCKET sock)
 	std::string emoteFileName;
 	if (parseEmoteGetPath(request, emoteFileName)) {
 		serveEmoteImage(sock, emoteFileName);
+		closesocket(sock);
+		--activeClients_;
+		return;
+	}
+
+	// VRM Stage連携: vrm_stage.html本体・VRMモデルのHTTP配信/アップロードも
+	// WebSocketへのアップグレードを行わずここで完結させる
+	if (isRequestForPath(request, "GET", "/vrm_stage.html")) {
+		serveVrmStagePage(sock);
+		closesocket(sock);
+		--activeClients_;
+		return;
+	}
+	if (isRequestForPath(request, "GET", "/vrm/model")) {
+		serveVrmModel(sock);
+		closesocket(sock);
+		--activeClients_;
+		return;
+	}
+	if (isRequestForPath(request, "POST", "/vrm/model")) {
+		handleVrmModelUpload(sock, request);
+		closesocket(sock);
+		--activeClients_;
+		return;
+	}
+	// Controller（file://等の別オリジン）からの POST /vrm/model はカスタムヘッダー
+	// （X-Vrm-Name）とContent-Type:application/octet-streamの組み合わせによりCORS
+	// プリフライト（OPTIONS）が飛ぶため、これに応答してからでないと本POSTが送られない。
+	if (isRequestForPath(request, "OPTIONS", "/vrm/model")) {
+		static const char *respOptions =
+			"HTTP/1.1 204 No Content\r\n"
+			"Access-Control-Allow-Origin: *\r\n"
+			"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+			"Access-Control-Allow-Headers: Content-Type, X-Vrm-Name\r\n"
+			"Access-Control-Max-Age: 86400\r\n"
+			"Content-Length: 0\r\n"
+			"Connection: close\r\n\r\n";
+		::send(sock, respOptions, static_cast<int>(strlen(respOptions)), 0);
 		closesocket(sock);
 		--activeClients_;
 		return;

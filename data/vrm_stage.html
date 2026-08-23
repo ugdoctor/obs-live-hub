@@ -101,6 +101,33 @@ html.mode-display #uiToggleTab {
 }
 .small-btn:hover { background: rgba(255,255,255,0.22); }
 
+#transformPanel {
+  margin-top: 8px;
+  border-top: 1px solid rgba(255,255,255,0.15);
+  padding-top: 8px;
+}
+#transformPanel summary {
+  cursor: pointer;
+  opacity: 0.9;
+  margin-bottom: 6px;
+}
+.transformRow label {
+  width: 68px;
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+.transformRow input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.transformVal {
+  width: 3.2em;
+  flex: 0 0 auto;
+  text-align: right;
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
+
 /* パネルが隠れていても常に触れる開閉タブ */
 #uiToggleTab {
   position: fixed; right: 0; top: 12px;
@@ -144,6 +171,48 @@ html.mode-display #uiToggleTab {
       通常はOBS側で <code>?mode=display</code> を付けたURLを使用）</label>
   </div>
   <video id="cameraPreview" autoplay playsinline muted></video>
+
+  <details id="transformPanel">
+    <summary>位置・画角調整</summary>
+    <div class="uiRow transformRow">
+      <label for="tPosX">位置X</label>
+      <input type="range" id="tPosX" min="-1" max="1" step="0.01" value="0">
+      <span class="transformVal" id="tPosXVal">0.00</span>
+    </div>
+    <div class="uiRow transformRow">
+      <label for="tPosY">位置Y</label>
+      <input type="range" id="tPosY" min="-1" max="1" step="0.01" value="0">
+      <span class="transformVal" id="tPosYVal">0.00</span>
+    </div>
+    <div class="uiRow transformRow">
+      <label for="tPosZ">位置Z</label>
+      <input type="range" id="tPosZ" min="-1" max="1" step="0.01" value="0">
+      <span class="transformVal" id="tPosZVal">0.00</span>
+    </div>
+    <div class="uiRow transformRow">
+      <label for="tYaw">向き(Yaw)</label>
+      <input type="range" id="tYaw" min="-180" max="180" step="1" value="0">
+      <span class="transformVal" id="tYawVal">0</span>
+    </div>
+    <div class="uiRow transformRow">
+      <label for="tScale">拡大率</label>
+      <input type="range" id="tScale" min="0.5" max="2" step="0.01" value="1">
+      <span class="transformVal" id="tScaleVal">1.00</span>
+    </div>
+    <div class="uiRow transformRow">
+      <label for="tCamDistance">カメラ距離</label>
+      <input type="range" id="tCamDistance" min="0.5" max="5" step="0.01" value="1.6">
+      <span class="transformVal" id="tCamDistanceVal">1.60</span>
+    </div>
+    <div class="uiRow transformRow">
+      <label for="tCamFov">画角(FOV)</label>
+      <input type="range" id="tCamFov" min="15" max="60" step="1" value="30">
+      <span class="transformVal" id="tCamFovVal">30</span>
+    </div>
+    <div class="uiRow">
+      <button class="small-btn" id="transformResetBtn">位置・画角をリセット</button>
+    </div>
+  </details>
 </div>
 
 <!--
@@ -178,6 +247,12 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 // Display   : トラッキングは行わず、WebSocketで受信した姿勢データをVRMへ反映するだけ（受信側、
 //             OBSブラウザソースに ?mode=display 付きURLを登録して使う）。
 var isDisplayMode = new URLSearchParams(window.location.search).get('mode') === 'display';
+
+// WsServer（プラグイン）が待ち受けるポート。WebSocketだけでなく、
+// vrm_stage.html本体・/vrm/model のHTTP配信も同じポートで行う。
+var WS_PORT      = 8765;
+var HTTP_BASE    = 'http://127.0.0.1:' + WS_PORT;
+var VRM_MODEL_URL = HTTP_BASE + '/vrm/model';
 
 // ── 定数（実測して調整可能なチューニング値） ──────────────────────────────
 var HEAD_LERP            = 0.45; // 頭部回転の追従の速さ（0-1、大きいほど追従が速い）
@@ -302,6 +377,116 @@ function applySpineChestFollow(headRig, elapsedTime) {
   }, HEAD_LERP);
 }
 
+// ── モデル位置・カメラ調整（Controllerで操作、WebSocketでDisplayへ即時反映） ──
+
+var TRANSFORM_DEFAULTS = {
+  posX: 0, posY: 0, posZ: 0,
+  yaw: 0,
+  scale: 1,
+  camDistance: 1.6,
+  camFov: 30
+};
+var vrmTransform = Object.assign({}, TRANSFORM_DEFAULTS);
+var TRANSFORM_LS_KEY = 'vrmStageTransform';
+var TRANSFORM_SLIDERS = [
+  { id: 'tPosX',        key: 'posX',        decimals: 2 },
+  { id: 'tPosY',         key: 'posY',        decimals: 2 },
+  { id: 'tPosZ',         key: 'posZ',        decimals: 2 },
+  { id: 'tYaw',          key: 'yaw',         decimals: 0 },
+  { id: 'tScale',        key: 'scale',       decimals: 2 },
+  { id: 'tCamDistance',  key: 'camDistance', decimals: 2 },
+  { id: 'tCamFov',       key: 'camFov',      decimals: 0 }
+];
+
+// Controller/Displayの両方から、モデル読み込み直後・スライダー変更時・受信時に呼ばれる
+function applyTransform(t) {
+  if (currentVrm) {
+    currentVrm.scene.position.set(t.posX, t.posY, t.posZ);
+    currentVrm.scene.rotation.y = t.yaw * Math.PI / 180;
+    currentVrm.scene.scale.setScalar(t.scale);
+  }
+  if (camera) {
+    camera.position.set(0, 1.35, t.camDistance);
+    camera.lookAt(0, 1.3, 0);
+    camera.fov = t.camFov;
+    camera.updateProjectionMatrix();
+  }
+}
+
+function saveTransformToLocalStorage() {
+  try { localStorage.setItem(TRANSFORM_LS_KEY, JSON.stringify(vrmTransform)); } catch (_) {}
+}
+
+function loadTransformFromLocalStorage() {
+  try {
+    var raw = localStorage.getItem(TRANSFORM_LS_KEY);
+    if (!raw) return;
+    var parsed = JSON.parse(raw);
+    TRANSFORM_SLIDERS.forEach(function(cfg) {
+      if (typeof parsed[cfg.key] === 'number') vrmTransform[cfg.key] = parsed[cfg.key];
+    });
+  } catch (_) {}
+}
+
+function syncTransformUiFromState() {
+  TRANSFORM_SLIDERS.forEach(function(cfg) {
+    var el    = document.getElementById(cfg.id);
+    var valEl = document.getElementById(cfg.id + 'Val');
+    if (el) el.value = vrmTransform[cfg.key];
+    if (valEl) valEl.textContent = Number(vrmTransform[cfg.key]).toFixed(cfg.decimals);
+  });
+}
+
+var lastTransformSendTime = 0;
+var TRANSFORM_SEND_INTERVAL_MS = 100; // スライダードラッグ中の送信頻度を間引く
+
+function sendTransformUpdate(force) {
+  if (isDisplayMode) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  var now = performance.now();
+  if (!force && now - lastTransformSendTime < TRANSFORM_SEND_INTERVAL_MS) return;
+  lastTransformSendTime = now;
+  var payload = Object.assign({ type: 'vrm_transform_update' }, vrmTransform);
+  ws.send(JSON.stringify(payload));
+}
+
+function onTransformUpdateReceived(data) {
+  TRANSFORM_SLIDERS.forEach(function(cfg) {
+    if (typeof data[cfg.key] === 'number') vrmTransform[cfg.key] = data[cfg.key];
+  });
+  applyTransform(vrmTransform);
+  saveTransformToLocalStorage(); // Display側でも次回起動用に保存しておく
+}
+
+function initTransformPanel() {
+  loadTransformFromLocalStorage();
+  syncTransformUiFromState();
+  applyTransform(vrmTransform); // localStorageから復元した値をカメラへ即時反映する
+
+  TRANSFORM_SLIDERS.forEach(function(cfg) {
+    var el = document.getElementById(cfg.id);
+    if (!el) return;
+    el.addEventListener('input', function() {
+      vrmTransform[cfg.key] = parseFloat(el.value);
+      syncTransformUiFromState();
+      applyTransform(vrmTransform);
+      saveTransformToLocalStorage();
+      sendTransformUpdate(false);
+    });
+  });
+
+  var resetBtn = document.getElementById('transformResetBtn');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function() {
+      vrmTransform = Object.assign({}, TRANSFORM_DEFAULTS);
+      syncTransformUiFromState();
+      applyTransform(vrmTransform);
+      saveTransformToLocalStorage();
+      sendTransformUpdate(true);
+    });
+  }
+}
+
 // ── VRMモデル読み込み（ファイル / IndexedDBキャッシュ 共通処理） ─────────
 
 function disposeCurrentVrm() {
@@ -333,15 +518,20 @@ function loadVrmBinary(arrayBuffer, fileName, opts) {
     scene.add(vrm.scene);
     if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
     applyRestPose(vrm);
+    applyTransform(vrmTransform);
 
     setStatus('VRM読み込み完了: ' + fileName);
     if (opts.persist !== false) saveVrmToCache(arrayBuffer, fileName);
+    if (opts.upload !== false && !isDisplayMode) uploadVrmToPlugin(arrayBuffer, fileName);
   }, undefined, function(err) {
     URL.revokeObjectURL(blobUrl);
     setStatus('VRM読み込み失敗: ' + (err && err.message ? err.message : String(err)));
   });
 }
 
+// ユーザーが直接ファイルを指定した場合（D&D・ファイル選択・OBS「操作」モードでの直接ドロップ）の
+// 読み込み。IndexedDBキャッシュへの保存・プラグインへのアップロードの両方を行う
+// （Displayモードではアップロードは行わない。loadVrmBinary側のガード参照）。
 function loadVrmFile(file) {
   if (!file) return;
   file.arrayBuffer().then(function(buf) {
@@ -395,12 +585,48 @@ function loadVrmFromCache() {
 function autoLoadCachedVrm() {
   loadVrmFromCache().then(function(rec) {
     if (rec && rec.data) {
-      loadVrmBinary(rec.data, rec.name || 'cached.vrm', { persist: false });
+      // Controllerが自分のIndexedDBから復元した場合は、OBS/プラグイン再起動で消えている
+      // 可能性のあるプラグイン側メモリキャッシュも最新化するため再アップロードする
+      loadVrmBinary(rec.data, rec.name || 'cached.vrm', { persist: false, upload: !isDisplayMode });
     } else if (isDisplayMode) {
       setStatus('VRM未設定です。OBSの「操作」モードでこの画面にVRMファイルをドロップしてください。');
     }
   }).catch(function(err) {
     console.warn('[vrm_stage] VRMキャッシュ読込失敗:', err);
+  });
+}
+
+// ── プラグイン（WsServer）経由のVRM自動同期 ──────────────────────────────
+// Controller: VRM読み込み時にプラグインへHTTP POSTでキャッシュさせる（loadVrmBinary参照）。
+// Display   : 起動時・"vrm_model_sync" 受信時にプラグインから GET /vrm/model で取得する。
+// これによりOBS側での手動D&Dが不要になる（Controller/DisplayはIndexedDBを共有できないため、
+// プラグインを仲介した配布が唯一のOBS側自動ロード手段となる）。
+
+function uploadVrmToPlugin(arrayBuffer, fileName) {
+  fetch(VRM_MODEL_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'X-Vrm-Name': encodeURIComponent(fileName)
+    },
+    body: arrayBuffer
+  }).then(function(res) {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+  }).catch(function(err) {
+    console.warn('[vrm_stage] VRMのOBS側同期に失敗:', err);
+  });
+}
+
+function fetchVrmModelFromServer(name) {
+  setStatus('VRMをOBS側キャッシュから取得中…');
+  return fetch(VRM_MODEL_URL).then(function(res) {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.arrayBuffer();
+  }).then(function(buf) {
+    loadVrmBinary(buf, name || 'model.vrm', { persist: false, upload: false });
+  }).catch(function(err) {
+    setStatus('VRM取得に失敗しました: ' + (err && err.message ? err.message : String(err)));
+    throw err;
   });
 }
 
@@ -613,7 +839,7 @@ function applyMouthOpenToVrm(vrm, targetOpen, lerpAmount) {
 
 // ── WebSocket連携（Controller: 送信 / Display: 受信） ────────────────────
 
-var WS_URL = 'ws://127.0.0.1:8765';
+var WS_URL = 'ws://127.0.0.1:' + WS_PORT;
 var ws = null;
 var lastPoseSendTime = 0;
 
@@ -625,11 +851,17 @@ function connectWs() {
 
   ws.onerror = function() { if (ws === thisWs) ws = null; };
   ws.onclose = function() { if (ws === thisWs) ws = null; };
+  ws.onopen  = function() {
+    // 再接続時にも、Controllerが把握している現在の位置・画角を即座にDisplayへ再送する
+    if (!isDisplayMode) sendTransformUpdate(true);
+  };
   ws.onmessage = function(e) {
-    if (!isDisplayMode) return; // Controllerは他クライアント（自分自身のecho含む）の姿勢データを無視する
+    if (!isDisplayMode) return; // Controllerは他クライアント（自分自身のecho含む）のデータを無視する
     try {
       var data = JSON.parse(e.data);
       if (data.type === 'vrm_pose_update') onPoseUpdateReceived(data);
+      else if (data.type === 'vrm_model_sync') fetchVrmModelFromServer(data.name);
+      else if (data.type === 'vrm_transform_update') onTransformUpdateReceived(data);
     } catch (_) {}
   };
 }
@@ -680,11 +912,25 @@ function setDisplayMode(flag) {
 
 // ── 初期化 ──────────────────────────────────────────────────────────────
 
+// Display: まずプラグイン側キャッシュ（GET /vrm/model）を試し、未アップロードなら
+//          自分自身のIndexedDBキャッシュ（過去にOBS「操作」モードで直接ドロップした分）へ
+//          フォールバックする。
+// Controller: 常に自分のIndexedDBキャッシュから復元する（復元後、プラグイン側キャッシュも
+//          再アップロードで最新化される。autoLoadCachedVrm参照）。
+function initModelForMode() {
+  if (isDisplayMode) {
+    fetchVrmModelFromServer().catch(function() { autoLoadCachedVrm(); });
+  } else {
+    autoLoadCachedVrm();
+  }
+}
+
 function init() {
   initScene();
   initVrmDropUi();
   initUiToggle();
-  autoLoadCachedVrm();
+  initTransformPanel();
+  initModelForMode();
   connectWsWatchdog();
 
   document.getElementById('startTrackingBtn').addEventListener('click', startTracking);

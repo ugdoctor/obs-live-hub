@@ -68,6 +68,17 @@ private:
 	static bool parseEmoteGetPath(const std::string &request, std::string &outFileName);
 	static void serveEmoteImage(SOCKET sock, const std::string &fileName);
 
+	// VRM Stage連携（vrm_stage.htmlのHTTP配信 + Controllerが読み込んだVRMバイナリの
+	// プラグイン側キャッシュ・Display側への配信）。
+	// GET  /vrm_stage.html : vrm_stage.html を text/html として配信する
+	//                        （OBSブラウザソースを http://127.0.0.1:<port>/... で統一するため）
+	// GET  /vrm/model       : 最後にアップロードされたVRMバイナリを配信する（未アップロード時は404）
+	// POST /vrm/model       : VRMバイナリ本体をリクエストボディで受け取りメモリキャッシュし、
+	//                        全WebSocketクライアントへ "vrm_model_sync" をブロードキャストする
+	void serveVrmStagePage(SOCKET sock);
+	void serveVrmModel(SOCKET sock);
+	void handleVrmModelUpload(SOCKET sock, const std::string &request);
+
 	uint16_t port_;
 	SOCKET listenSock_ = INVALID_SOCKET;
 	std::atomic<bool> running_{false};
@@ -79,6 +90,12 @@ private:
 	std::function<void(const std::string &)> messageCallback_;
 	std::function<void()>                    connectCallback_;
 	std::mutex callbackMutex_;
+
+	// VRM Stage: Controllerがアップロードした最新のVRMバイナリ（メモリキャッシュのみ、
+	// ディスク永続化はしない。OBS/プラグイン再起動後はControllerの再読み込み時に再アップロードされる）
+	std::mutex modelMutex_;
+	std::vector<uint8_t> vrmModelData_;
+	std::string vrmModelName_;
 };
 
 #endif // _WIN32
