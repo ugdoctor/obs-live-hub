@@ -16,7 +16,8 @@
 !LICENSE
 !README.md
 !CLAUDE.md
-!STATUS.md
+!CLAUDE_DETAIL.md
+!CLAUDE_STATUS.md
 !RELEASE_CHECKLIST.md
 !GETTING_STARTED.md
 !config.json.example
@@ -32,3 +33,7 @@ config.json
 
 # Exclude CMake build number cache
 /cmake/.CMakeBuildNumber
+
+# Claude Code & AI management files
+CLAUDE*.md
+ai_logs/
