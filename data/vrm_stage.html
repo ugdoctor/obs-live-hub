@@ -201,8 +201,8 @@ html.mode-display #uiToggleTab {
     </div>
     <div class="uiRow transformRow">
       <label for="tCamDistance">カメラ距離</label>
-      <input type="range" id="tCamDistance" min="0.5" max="5" step="0.01" value="1.6">
-      <span class="transformVal" id="tCamDistanceVal">1.60</span>
+      <input type="range" id="tCamDistance" min="0.5" max="5" step="0.01" value="1.2">
+      <span class="transformVal" id="tCamDistanceVal">1.20</span>
     </div>
     <div class="uiRow transformRow">
       <label for="tCamFov">画角(FOV)</label>
@@ -268,9 +268,18 @@ var LIPSYNC_LERP         = 0.6;
 var ARM_DOWN_Z    = 1.15; // 約66度。水平だった腕を下げる角度
 var ELBOW_BEND_Y  = 0.35; // 肘を軽く曲げる角度
 
-// 頭部の動きに連動して背骨・胸を傾ける割合（要件の「約30〜40%」をspine/chestで分担）
-var SPINE_FOLLOW = 0.18;
-var CHEST_FOLLOW = 0.17;
+// 頭部トラッキングの回転量（Kalidokit由来の生値）を、頭部だけで100%消費せず
+// spine/chest/neck/headの4ボーンに配分する。ボーンは親子関係（spine→chest→neck→head）
+// で連結されており、各ボーンのローカル回転は世界座標で加算的に積み重なるため、
+// 単純に「head=100%＋neck=30%＋spine=18%＋chest=17%」のように各ボーンへ生値を
+// そのまま与えると合計165%相当の過剰回転になり、頭が実際の首振り角度より
+// 大きく・不自然に動く不具合の原因になっていた。4つの配分を合計100%に
+// 揃えることで、実際の頭部角度と最終的な見た目の角度を一致させる。
+// spine+chestの合計35%が要件の「背骨が約30〜40%追従する」に対応する。
+var HEAD_FOLLOW  = 0.40; // 頭部ボーン自体
+var NECK_FOLLOW  = 0.25;
+var SPINE_FOLLOW = 0.20; // ── ここから下、spine+chestで35%（要件の30〜40%レンジ）
+var CHEST_FOLLOW = 0.15;
 
 // アイドル時の呼吸モーション
 var BREATH_SPEED     = 1.1;   // 呼吸の周期に相当する係数
@@ -293,8 +302,11 @@ function initScene() {
 
   scene = new THREE.Scene();
 
+  // VRMは正面が+Z（VRM0系はloadVrmBinary内でVRMUtils.rotateVRM0により+Zへ統一済み）を
+  // 向くため、カメラは+Z側（モデルの正面）に置く。Controller/Displayとも同一の初期値
+  // を使うことで、位置・画角調整パネル未操作時でも常に同じアングルで描画される。
   camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 20);
-  camera.position.set(0, 1.35, 1.6);
+  camera.position.set(0, 1.4, 1.2);
   camera.lookAt(0, 1.3, 0);
 
   var dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
@@ -383,7 +395,7 @@ var TRANSFORM_DEFAULTS = {
   posX: 0, posY: 0, posZ: 0,
   yaw: 0,
   scale: 1,
-  camDistance: 1.6,
+  camDistance: 1.2,
   camFov: 30
 };
 var vrmTransform = Object.assign({}, TRANSFORM_DEFAULTS);
@@ -406,7 +418,9 @@ function applyTransform(t) {
     currentVrm.scene.scale.setScalar(t.scale);
   }
   if (camera) {
-    camera.position.set(0, 1.35, t.camDistance);
+    // initScene()の初期カメラ位置と同じY/lookAtを使用し、Controller/Displayで
+    // アングルが食い違わないようにする（カメラ距離のみtで可変）
+    camera.position.set(0, 1.4, t.camDistance);
     camera.lookAt(0, 1.3, 0);
     camera.fov = t.camFov;
     camera.updateProjectionMatrix();
@@ -705,10 +719,14 @@ function applyFaceRig(riggedFace) {
   if (riggedFace.head) lastHeadRig = riggedFace.head;
 
   if (humanoid && riggedFace.head) {
-    applyHeadRotation(humanoid.getNormalizedBoneNode('head'), riggedFace.head, HEAD_LERP);
-    // 首も一部追従させ、頭だけが不自然に回転しないようにする
+    // head/neck/spine/chestの4ボーンは親子関係で連結されており回転が世界座標で積み重なるため、
+    // ここではheadに生の角度を渡さずHEAD_FOLLOW/NECK_FOLLOWで按分する
+    // （spine/chest分はapplySpineChestFollowが担当。4者の合計が100%になるよう定数側で調整済み）
+    applyHeadRotation(humanoid.getNormalizedBoneNode('head'), {
+      x: riggedFace.head.x * HEAD_FOLLOW, y: riggedFace.head.y * HEAD_FOLLOW, z: riggedFace.head.z * HEAD_FOLLOW
+    }, HEAD_LERP);
     applyHeadRotation(humanoid.getNormalizedBoneNode('neck'), {
-      x: riggedFace.head.x * 0.3, y: riggedFace.head.y * 0.3, z: riggedFace.head.z * 0.3
+      x: riggedFace.head.x * NECK_FOLLOW, y: riggedFace.head.y * NECK_FOLLOW, z: riggedFace.head.z * NECK_FOLLOW
     }, HEAD_LERP);
   }
 

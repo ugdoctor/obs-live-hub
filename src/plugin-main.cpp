@@ -114,6 +114,11 @@ static QPointer<MatchCounterDialog> s_matchCounterDialog;
 static QMutex              s_userPlatformMutex;
 static QMap<QString, QString> s_userPlatformMap;
 
+// vrm_stage.html の Controller が最後に送信した "vrm_transform_update" を保持する
+// （新規接続したDisplayクライアントへ即座に現在の位置・画角を同期するため。
+// メインスレッド上でのみ読み書きするため排他制御は不要）。
+static std::string s_lastVrmTransformJson;
+
 // EventBus は Twitch → UI の橋渡し。YouTube は Qt シグナルを直接使う。
 static EventBus<CommentEvent> s_eventBus;
 static EventBus<CommentEvent>::SubId s_twitchSubId = 0;
@@ -306,6 +311,10 @@ static void applyWsCallbacks(WsServer *srv)
 			broadcastConversationConfig();
 			broadcastMatchCounterUpdate(true); // isReset=true: 初回表示はリール演出なしで即時反映
 			broadcastYoutubeEmoteDict();
+			// vrm_stage.html: 新規接続（Displayモードのブラウザソース等）へ直近の
+			// モデル位置・画角を同期する。Controllerがまだ一度も送信していない場合は空のまま
+			if (!s_lastVrmTransformJson.empty())
+				s_wsServer->broadcast(s_lastVrmTransformJson);
 		}, Qt::QueuedConnection);
 	});
 }
@@ -1199,6 +1208,12 @@ static void handleWsClientMessage(const QString &json)
 		// 接続中の全クライアント（Displayモードのブラウザソース等）へそのまま中継する
 		if (s_wsServer)
 			s_wsServer->broadcast(json.toStdString());
+	} else if (type == "vrm_transform_update") {
+		// モデル位置・向き・拡大率・カメラ距離/FOVの調整値。中継するだけでなく、
+		// 新規Displayクライアント接続時にも再送できるよう直近の値をキャッシュしておく
+		s_lastVrmTransformJson = json.toStdString();
+		if (s_wsServer)
+			s_wsServer->broadcast(s_lastVrmTransformJson);
 	}
 }
 
