@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>obs-live-hub VRM Stage</title>
+<script>
+// bodyが描画される前にモードを確定させ、Displayモードで操作パネルが一瞬でも
+// 見えてしまう（フラッシュする）のを防ぐ。type=module のスクリプトは実行が
+// 遅延されるため、モード判定用のクラス付与だけはここで同期的に行う。
+(function() {
+  var params = new URLSearchParams(window.location.search);
+  if (params.get('mode') === 'display') {
+    document.documentElement.classList.add('mode-display');
+  }
+})();
+</script>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 100%; height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: "Segoe UI", Meiryo, sans-serif;
+}
+#canvas {
+  position: fixed; left: 0; top: 0;
+  width: 100%; height: 100%;
+  display: block;
+}
+
+/* Displayモードでは操作UIを完全に排除し、透過キャンバスのみを配信キャプチャに渡す */
+html.mode-display #uiPanel,
+html.mode-display #uiToggleTab {
+  display: none !important;
+}
+
+/* 配信キャプチャ対象からは除外したい操作UI。#uiPanel.hidden で折りたたむ。 */
+#uiPanel {
+  position: fixed; right: 12px; top: 12px;
+  width: 300px;
+  background: rgba(20, 20, 24, 0.82);
+  color: #f0f0f0;
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+  transform-origin: top right;
+}
+#uiPanel.hidden {
+  transform: translateX(calc(100% + 20px));
+  opacity: 0;
+  pointer-events: none;
+}
+#uiPanel h1 {
+  font-size: 13px;
+  margin-bottom: 8px;
+  opacity: 0.9;
+}
+#dropZone {
+  border: 2px dashed rgba(255,255,255,0.35);
+  border-radius: 8px;
+  padding: 14px 8px;
+  text-align: center;
+  cursor: pointer;
+  margin-bottom: 10px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+#dropZone:hover { background: rgba(255,255,255,0.06); }
+#dropZone.dragover {
+  background: rgba(90, 160, 255, 0.18);
+  border-color: #5aa0ff;
+}
+#statusLine {
+  min-height: 2.4em;
+  opacity: 0.85;
+  margin-bottom: 8px;
+  white-space: pre-line;
+}
+.uiRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+#cameraPreview {
+  width: 100%;
+  border-radius: 6px;
+  margin-top: 6px;
+  display: none;
+  transform: scaleX(-1); /* 鏡像表示（自分を見ながら操作しやすくする） */
+}
+.small-btn {
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.25);
+  color: #fff;
+  border-radius: 5px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.small-btn:hover { background: rgba(255,255,255,0.22); }
+
+/* パネルが隠れていても常に触れる開閉タブ */
+#uiToggleTab {
+  position: fixed; right: 0; top: 12px;
+  width: 22px; height: 40px;
+  background: rgba(20, 20, 24, 0.6);
+  color: #fff;
+  border: none;
+  border-radius: 6px 0 0 6px;
+  cursor: pointer;
+  font-size: 12px;
+  z-index: 10;
+}
+#uiToggleTab:hover { background: rgba(20, 20, 24, 0.85); }
+</style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+<video id="webcamVideo" autoplay playsinline muted style="display:none;"></video>
+
+<button id="uiToggleTab" title="操作パネルの表示/非表示">◂</button>
+
+<div id="uiPanel">
+  <h1>VRM Stage（Controller / Display 連携）</h1>
+
+  <div id="dropZone">
+    VRMファイルをドラッグ＆ドロップ<br>またはクリックして選択
+  </div>
+  <input type="file" id="vrmFileInput" accept=".vrm" style="display:none;">
+
+  <div id="statusLine">起動中…</div>
+
+  <div class="uiRow">
+    <button class="small-btn" id="startTrackingBtn">カメラ/マイクを開始</button>
+  </div>
+  <div class="uiRow">
+    <label><input type="checkbox" id="showCameraPreviewChk"> カメラプレビューを表示</label>
+  </div>
+  <div class="uiRow">
+    <label><input type="checkbox" id="displayModeToggleChk"> Displayモードとして動作（プレビュー用。
+      通常はOBS側で <code>?mode=display</code> を付けたURLを使用）</label>
+  </div>
+  <video id="cameraPreview" autoplay playsinline muted></video>
+</div>
+
+<!--
+  three-vrm@1.0.9 は three@^0.149.0 を要求するが、そのバージョン帯の three.js は
+  examples/js（グローバル公開のクラシックビルド）を同梱しなくなっているため、
+  Three.js / three-vrm は import map 経由の ES Modules として読み込む。
+  MediaPipe / Kalidokit は UMDビルドのみ配布されているため、従来通りグローバル変数
+  （window.FaceMesh / window.Camera / window.Kalidokit）としてクラシック読み込みする。
+-->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.149.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.149.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://unpkg.com/@pixiv/three-vrm@1.0.9/lib/three-vrm.module.js"
+  }
+}
+</script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/kalidokit@1.1.4/dist/kalidokit.umd.js"></script>
+
+<script type="module">
+'use strict';
+
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+// ── モード判定 ──────────────────────────────────────────────────────────
+// Controller: Webカメラ/マイクでトラッキングし、姿勢データをWebSocketへ送信する（送信側）。
+// Display   : トラッキングは行わず、WebSocketで受信した姿勢データをVRMへ反映するだけ（受信側、
+//             OBSブラウザソースに ?mode=display 付きURLを登録して使う）。
+var isDisplayMode = new URLSearchParams(window.location.search).get('mode') === 'display';
+
+// ── 定数（実測して調整可能なチューニング値） ──────────────────────────────
+var HEAD_LERP            = 0.45; // 頭部回転の追従の速さ（0-1、大きいほど追従が速い）
+var BLINK_LERP           = 0.55;
+var LOOKAT_LERP          = 0.35;
+var LOOKAT_RANGE         = 0.6;  // 目線ターゲットの左右上下振れ幅
+var LOOKAT_DISTANCE      = 2.5;
+var LIPSYNC_NOISE_FLOOR  = 0.02; // これ未満のRMSは無音とみなす
+var LIPSYNC_GAIN         = 6.0;  // RMS -> 口の開き量への増幅率
+var LIPSYNC_LERP         = 0.6;
+
+// Tポーズ解消（初期姿勢）。実機のVRMモデルで腕が交差する等おかしい場合はここの符号を反転する。
+var ARM_DOWN_Z    = 1.15; // 約66度。水平だった腕を下げる角度
+var ELBOW_BEND_Y  = 0.35; // 肘を軽く曲げる角度
+
+// 頭部の動きに連動して背骨・胸を傾ける割合（要件の「約30〜40%」をspine/chestで分担）
+var SPINE_FOLLOW = 0.18;
+var CHEST_FOLLOW = 0.17;
+
+// アイドル時の呼吸モーション
+var BREATH_SPEED     = 1.1;   // 呼吸の周期に相当する係数
+var BREATH_AMPLITUDE = 0.02;  // 胸・背骨の揺らぎの大きさ（ラジアン）
+
+// Controller→Display への姿勢送信間隔（無制限に送るとWsServer/回線に負荷がかかるため間引く）
+var POSE_SEND_INTERVAL_MS = 50; // 約20Hz
+
+// ── Three.js / VRM 基盤 ──────────────────────────────────────────────────
+var canvas, renderer, scene, camera, clock;
+var lookAtTarget;
+var currentVrm = null;
+var gltfLoader;
+
+function initScene() {
+  canvas = document.getElementById('canvas');
+  renderer = new THREE.WebGLRenderer({ canvas: canvas, alpha: true, antialias: true });
+  renderer.setClearColor(0x000000, 0); // OBSブラウザソースの背景透過対応
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+
+  scene = new THREE.Scene();
+
+  camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 20);
+  camera.position.set(0, 1.35, 1.6);
+  camera.lookAt(0, 1.3, 0);
+
+  var dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+  dirLight.position.set(1, 1.6, 1.2);
+  scene.add(dirLight);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+
+  lookAtTarget = new THREE.Object3D();
+  scene.add(lookAtTarget);
+
+  clock = new THREE.Clock();
+
+  gltfLoader = new GLTFLoader();
+  gltfLoader.register(function(parser) { return new VRMLoaderPlugin(parser); });
+
+  window.addEventListener('resize', onResize);
+  onResize();
+  requestAnimationFrame(animate);
+}
+
+function onResize() {
+  var w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  var delta = clock.getDelta();
+  if (currentVrm) {
+    applySpineChestFollow(lastHeadRig, clock.elapsedTime);
+    var mouthTarget = isDisplayMode ? lastReceivedMouthTarget : computeMicMouthTarget();
+    applyMouthOpenToVrm(currentVrm, mouthTarget, LIPSYNC_LERP);
+    currentVrm.update(delta);
+  }
+  maybeSendPoseUpdate();
+  renderer.render(scene, camera);
+}
+
+// ── Tポーズ解消（初期姿勢） ──────────────────────────────────────────────
+
+function applyRestPose(vrm) {
+  var humanoid = vrm.humanoid;
+  if (!humanoid) return;
+  var lUpper = humanoid.getNormalizedBoneNode('leftUpperArm');
+  var rUpper = humanoid.getNormalizedBoneNode('rightUpperArm');
+  var lLower = humanoid.getNormalizedBoneNode('leftLowerArm');
+  var rLower = humanoid.getNormalizedBoneNode('rightLowerArm');
+  // 正規化ボーン空間ではTポーズは腕が水平（Z回転0）。Z軸回転で腕を体側まで下ろす。
+  if (lUpper) lUpper.rotation.z =  ARM_DOWN_Z;
+  if (rUpper) rUpper.rotation.z = -ARM_DOWN_Z;
+  if (lLower) lLower.rotation.y = -ELBOW_BEND_Y;
+  if (rLower) rLower.rotation.y =  ELBOW_BEND_Y;
+}
+
+// ── 頭部連動の背骨・胸の傾き + アイドル呼吸モーション ────────────────────
+
+var lastHeadRig = { x: 0, y: 0, z: 0 };
+
+function applySpineChestFollow(headRig, elapsedTime) {
+  if (!currentVrm || !currentVrm.humanoid) return;
+  var spine = currentVrm.humanoid.getNormalizedBoneNode('spine');
+  var chest = currentVrm.humanoid.getNormalizedBoneNode('chest');
+  if (!spine && !chest) return;
+
+  var breath = Math.sin(elapsedTime * BREATH_SPEED) * BREATH_AMPLITUDE;
+  var h = headRig || { x: 0, y: 0, z: 0 };
+
+  applyHeadRotation(spine, {
+    x: h.x * SPINE_FOLLOW + breath * 0.5,
+    y: h.y * SPINE_FOLLOW,
+    z: h.z * SPINE_FOLLOW
+  }, HEAD_LERP);
+
+  applyHeadRotation(chest, {
+    x: h.x * CHEST_FOLLOW + breath,
+    y: h.y * CHEST_FOLLOW,
+    z: h.z * CHEST_FOLLOW
+  }, HEAD_LERP);
+}
+
+// ── VRMモデル読み込み（ファイル / IndexedDBキャッシュ 共通処理） ─────────
+
+function disposeCurrentVrm() {
+  if (!currentVrm) return;
+  scene.remove(currentVrm.scene);
+  VRMUtils.deepDispose(currentVrm.scene);
+  currentVrm = null;
+}
+
+function loadVrmBinary(arrayBuffer, fileName, opts) {
+  opts = opts || {};
+  setStatus('VRM読み込み中… (' + fileName + ')');
+  var blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: 'model/gltf-binary' }));
+  gltfLoader.load(blobUrl, function(gltf) {
+    URL.revokeObjectURL(blobUrl);
+    var vrm = gltf.userData.vrm;
+    if (!vrm) {
+      setStatus('VRMとして認識できませんでした: ' + fileName);
+      return;
+    }
+    disposeCurrentVrm();
+
+    // VRM0系モデルは前後が反転しているため、three-vrmの補助関数でカメラ向きに揃える
+    if (vrm.meta && vrm.meta.metaVersion === '0' && VRMUtils.rotateVRM0) {
+      VRMUtils.rotateVRM0(vrm);
+    }
+
+    currentVrm = vrm;
+    scene.add(vrm.scene);
+    if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
+    applyRestPose(vrm);
+
+    setStatus('VRM読み込み完了: ' + fileName);
+    if (opts.persist !== false) saveVrmToCache(arrayBuffer, fileName);
+  }, undefined, function(err) {
+    URL.revokeObjectURL(blobUrl);
+    setStatus('VRM読み込み失敗: ' + (err && err.message ? err.message : String(err)));
+  });
+}
+
+function loadVrmFile(file) {
+  if (!file) return;
+  file.arrayBuffer().then(function(buf) {
+    loadVrmBinary(buf, file.name);
+  }).catch(function(err) {
+    setStatus('ファイル読み込みに失敗しました: ' + (err && err.message ? err.message : String(err)));
+  });
+}
+
+// ── IndexedDBキャッシュ ──────────────────────────────────────────────────
+// ControllerとDisplayは別々のブラウザプロセス（通常ブラウザ / OBSのCEF）で動くため
+// IndexedDBを共有できない。そのため「読み込んだVRMを次回起動時に自動ロードする」対象は
+// あくまで“そのページインスタンス自身”のキャッシュとなる。Display側で自動ロードしたい場合は、
+// OBSブラウザソースを「操作」モードにしてキャンバスへ直接VRMファイルをドロップすればよい
+// （ページ全体がドロップターゲットになっているため、UIパネルが非表示でも読み込める）。
+
+var VRM_DB_NAME    = 'vrm-stage-db';
+var VRM_STORE_NAME = 'vrmFiles';
+var VRM_CACHE_KEY  = 'current';
+
+function openVrmDb() {
+  return new Promise(function(resolve, reject) {
+    var req = indexedDB.open(VRM_DB_NAME, 1);
+    req.onupgradeneeded = function() {
+      req.result.createObjectStore(VRM_STORE_NAME);
+    };
+    req.onsuccess = function() { resolve(req.result); };
+    req.onerror   = function() { reject(req.error); };
+  });
+}
+
+function saveVrmToCache(arrayBuffer, fileName) {
+  openVrmDb().then(function(db) {
+    var tx = db.transaction(VRM_STORE_NAME, 'readwrite');
+    tx.objectStore(VRM_STORE_NAME).put(
+      { name: fileName, data: arrayBuffer, savedAt: Date.now() }, VRM_CACHE_KEY);
+  }).catch(function(err) { console.warn('[vrm_stage] VRMキャッシュ保存失敗:', err); });
+}
+
+function loadVrmFromCache() {
+  return openVrmDb().then(function(db) {
+    return new Promise(function(resolve, reject) {
+      var tx  = db.transaction(VRM_STORE_NAME, 'readonly');
+      var req = tx.objectStore(VRM_STORE_NAME).get(VRM_CACHE_KEY);
+      req.onsuccess = function() { resolve(req.result || null); };
+      req.onerror   = function() { reject(req.error); };
+    });
+  });
+}
+
+function autoLoadCachedVrm() {
+  loadVrmFromCache().then(function(rec) {
+    if (rec && rec.data) {
+      loadVrmBinary(rec.data, rec.name || 'cached.vrm', { persist: false });
+    } else if (isDisplayMode) {
+      setStatus('VRM未設定です。OBSの「操作」モードでこの画面にVRMファイルをドロップしてください。');
+    }
+  }).catch(function(err) {
+    console.warn('[vrm_stage] VRMキャッシュ読込失敗:', err);
+  });
+}
+
+// ── ドラッグ＆ドロップ / ファイル選択UI ──────────────────────────────────
+
+function setStatus(text) {
+  var el = document.getElementById('statusLine');
+  if (el) el.textContent = text;
+}
+
+function initVrmDropUi() {
+  var dropZone  = document.getElementById('dropZone');
+  var fileInput = document.getElementById('vrmFileInput');
+
+  dropZone.addEventListener('click', function() { fileInput.click(); });
+  fileInput.addEventListener('change', function(e) {
+    if (e.target.files && e.target.files[0]) loadVrmFile(e.target.files[0]);
+  });
+
+  ['dragenter', 'dragover'].forEach(function(evt) {
+    dropZone.addEventListener(evt, function(e) {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    });
+  });
+  dropZone.addEventListener('dragleave', function() { dropZone.classList.remove('dragover'); });
+
+  // ページ全体のどこにドロップしても読み込む。Displayモードは操作パネル自体が
+  // 非表示のため、OBSの「操作」モードでキャンバスへ直接ドロップできるようにする。
+  window.addEventListener('dragover', function(e) { e.preventDefault(); });
+  window.addEventListener('drop', function(e) {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    var files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files[0]) loadVrmFile(files[0]);
+  });
+}
+
+// ── UI隠蔽トグル（配信画面用に透過キャンバスのみを残す） ────────────────
+
+function initUiToggle() {
+  var panel = document.getElementById('uiPanel');
+  var tab   = document.getElementById('uiToggleTab');
+  tab.addEventListener('click', function() {
+    panel.classList.toggle('hidden');
+    tab.textContent = panel.classList.contains('hidden') ? '▸' : '◂';
+  });
+}
+
+// ── Webカメラ + MediaPipe FaceMesh + Kalidokit（頭部・目線・まばたき） ──
+
+var faceMesh = null;
+var mpCamera = null;
+var webcamVideo = null;
+var lastEyeRig   = { l: 1, r: 1 };
+var lastPupilRig = { x: 0, y: 0 };
+
+function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+function clampRange(v, min, max) { return Math.max(min, Math.min(max, v)); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function applyHeadRotation(bone, rig, t) {
+  if (!bone || !rig) return;
+  bone.rotation.x = lerp(bone.rotation.x, rig.x || 0, t);
+  bone.rotation.y = lerp(bone.rotation.y, rig.y || 0, t);
+  bone.rotation.z = lerp(bone.rotation.z, rig.z || 0, t);
+}
+
+// riggedFace は Kalidokit.Face.solve() の戻り値、または WebSocket 経由で受信した
+// 同じ形状（head/eye/pupil）のオブジェクトのどちらでも受け付ける（Controller/Display共用）。
+function applyFaceRig(riggedFace) {
+  if (!currentVrm || !riggedFace) return;
+  var humanoid = currentVrm.humanoid;
+  var expr     = currentVrm.expressionManager;
+
+  if (riggedFace.head) lastHeadRig = riggedFace.head;
+
+  if (humanoid && riggedFace.head) {
+    applyHeadRotation(humanoid.getNormalizedBoneNode('head'), riggedFace.head, HEAD_LERP);
+    // 首も一部追従させ、頭だけが不自然に回転しないようにする
+    applyHeadRotation(humanoid.getNormalizedBoneNode('neck'), {
+      x: riggedFace.head.x * 0.3, y: riggedFace.head.y * 0.3, z: riggedFace.head.z * 0.3
+    }, HEAD_LERP);
+  }
+
+  if (expr && riggedFace.eye) {
+    lastEyeRig = riggedFace.eye;
+    var blinkL = clamp01(1 - (typeof riggedFace.eye.l === 'number' ? riggedFace.eye.l : 1));
+    var blinkR = clamp01(1 - (typeof riggedFace.eye.r === 'number' ? riggedFace.eye.r : 1));
+    expr.setValue('blinkLeft',  lerp(expr.getValue('blinkLeft')  || 0, blinkL, BLINK_LERP));
+    expr.setValue('blinkRight', lerp(expr.getValue('blinkRight') || 0, blinkR, BLINK_LERP));
+  }
+
+  if (riggedFace.pupil) {
+    lastPupilRig = riggedFace.pupil;
+    var tx = clampRange(riggedFace.pupil.x, -1, 1);
+    var ty = clampRange(riggedFace.pupil.y, -1, 1);
+    lookAtTarget.position.set(
+      lerp(lookAtTarget.position.x, tx * LOOKAT_RANGE, LOOKAT_LERP),
+      lerp(lookAtTarget.position.y, 1.3 + ty * LOOKAT_RANGE * 0.5, LOOKAT_LERP),
+      LOOKAT_DISTANCE
+    );
+  }
+}
+
+function onFaceMeshResults(results) {
+  if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) return;
+  var landmarks = results.multiFaceLandmarks[0];
+  if (!window.Kalidokit) return;
+  var riggedFace = Kalidokit.Face.solve(landmarks, {
+    runtime: 'mediapipe',
+    video: webcamVideo,
+  });
+  if (riggedFace) applyFaceRig(riggedFace);
+}
+
+function startTracking() {
+  webcamVideo = document.getElementById('webcamVideo');
+  var previewVideo = document.getElementById('cameraPreview');
+
+  navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+    .then(function(stream) {
+      webcamVideo.srcObject = stream;
+      previewVideo.srcObject = stream;
+      setupAudioAnalyser(stream);
+
+      faceMesh = new FaceMesh({
+        locateFile: function(f) { return 'https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/' + f; }
+      });
+      faceMesh.setOptions({
+        maxNumFaces: 1,
+        refineLandmarks: true,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+      faceMesh.onResults(onFaceMeshResults);
+
+      mpCamera = new Camera(webcamVideo, {
+        onFrame: function() { return faceMesh.send({ image: webcamVideo }); },
+        width: 640,
+        height: 480,
+      });
+      mpCamera.start();
+
+      setStatus('トラッキング開始（カメラ・マイクOK）');
+    })
+    .catch(function(err) {
+      setStatus('カメラ/マイクにアクセスできません: ' + (err && err.message ? err.message : String(err)));
+    });
+}
+
+function stopTracking() {
+  if (mpCamera) { mpCamera.stop(); mpCamera = null; }
+  if (faceMesh && faceMesh.close) { faceMesh.close(); }
+  faceMesh = null;
+
+  var stream = webcamVideo && webcamVideo.srcObject;
+  if (stream) stream.getTracks().forEach(function(t) { t.stop(); });
+  if (webcamVideo) webcamVideo.srcObject = null;
+  var previewVideo = document.getElementById('cameraPreview');
+  if (previewVideo) previewVideo.srcObject = null;
+
+  if (audioCtx) { audioCtx.close(); audioCtx = null; analyser = null; }
+
+  setStatus('トラッキングを停止しました。');
+}
+
+// ── Web Audio API（マイク音量ベースのリップシンク） ──────────────────────
+
+var audioCtx = null, analyser = null, audioBuf = null;
+var currentMouthOpen = 0;
+var lastReceivedMouthTarget = 0;
+
+function setupAudioAnalyser(stream) {
+  var AudioCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtor) return;
+  audioCtx = new AudioCtor();
+  var source = audioCtx.createMediaStreamSource(stream);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 1024;
+  audioBuf = new Uint8Array(analyser.fftSize);
+  source.connect(analyser);
+}
+
+function getMicVolumeRms() {
+  if (!analyser) return 0;
+  analyser.getByteTimeDomainData(audioBuf);
+  var sumSquares = 0;
+  for (var i = 0; i < audioBuf.length; i++) {
+    var v = (audioBuf[i] - 128) / 128;
+    sumSquares += v * v;
+  }
+  return Math.sqrt(sumSquares / audioBuf.length);
+}
+
+function computeMicMouthTarget() {
+  return clamp01((getMicVolumeRms() - LIPSYNC_NOISE_FLOOR) * LIPSYNC_GAIN);
+}
+
+// Controller（マイク由来）・Display（受信データ由来）の両方から共通で呼ばれる
+function applyMouthOpenToVrm(vrm, targetOpen, lerpAmount) {
+  var expr = vrm.expressionManager;
+  if (!expr) return;
+  currentMouthOpen = lerp(currentMouthOpen, clamp01(targetOpen || 0), lerpAmount);
+  // 'aa' を主軸にしつつ 'ih'/'ou' を弱く連動させ、単調な開閉に見えないようにする
+  expr.setValue('aa', currentMouthOpen);
+  expr.setValue('ih', currentMouthOpen * 0.15);
+  expr.setValue('ou', currentMouthOpen * 0.25);
+}
+
+// ── WebSocket連携（Controller: 送信 / Display: 受信） ────────────────────
+
+var WS_URL = 'ws://127.0.0.1:8765';
+var ws = null;
+var lastPoseSendTime = 0;
+
+function connectWs() {
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
+
+  ws = new WebSocket(WS_URL);
+  var thisWs = ws;
+
+  ws.onerror = function() { if (ws === thisWs) ws = null; };
+  ws.onclose = function() { if (ws === thisWs) ws = null; };
+  ws.onmessage = function(e) {
+    if (!isDisplayMode) return; // Controllerは他クライアント（自分自身のecho含む）の姿勢データを無視する
+    try {
+      var data = JSON.parse(e.data);
+      if (data.type === 'vrm_pose_update') onPoseUpdateReceived(data);
+    } catch (_) {}
+  };
+}
+
+function onPoseUpdateReceived(data) {
+  if (!currentVrm) return;
+  applyFaceRig(data);
+  lastReceivedMouthTarget = (typeof data.mouthOpen === 'number') ? data.mouthOpen : 0;
+}
+
+function maybeSendPoseUpdate() {
+  if (isDisplayMode || !currentVrm) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  var now = performance.now();
+  if (now - lastPoseSendTime < POSE_SEND_INTERVAL_MS) return;
+  lastPoseSendTime = now;
+  ws.send(JSON.stringify({
+    type: 'vrm_pose_update',
+    head: lastHeadRig,
+    eye: lastEyeRig,
+    pupil: lastPupilRig,
+    mouthOpen: currentMouthOpen
+  }));
+}
+
+function connectWsWatchdog() {
+  connectWs();
+  setInterval(function() {
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      connectWs();
+    }
+  }, 1000);
+}
+
+// ── モード切替（UIトグル。通常はURLの ?mode=display を使うが、同一ブラウザ内での
+//    プレビュー用に手動切替も提供する） ────────────────────────────────
+
+function setDisplayMode(flag) {
+  isDisplayMode = flag;
+  var panel = document.getElementById('uiPanel');
+  if (flag) {
+    stopTracking();
+    panel.classList.add('hidden');
+  } else {
+    panel.classList.remove('hidden');
+  }
+}
+
+// ── 初期化 ──────────────────────────────────────────────────────────────
+
+function init() {
+  initScene();
+  initVrmDropUi();
+  initUiToggle();
+  autoLoadCachedVrm();
+  connectWsWatchdog();
+
+  document.getElementById('startTrackingBtn').addEventListener('click', startTracking);
+  document.getElementById('showCameraPreviewChk').addEventListener('change', function(e) {
+    document.getElementById('cameraPreview').style.display = e.target.checked ? 'block' : 'none';
+  });
+  var displayToggleChk = document.getElementById('displayModeToggleChk');
+  displayToggleChk.checked = isDisplayMode;
+  displayToggleChk.addEventListener('change', function(e) { setDisplayMode(e.target.checked); });
+
+  if (isDisplayMode) {
+    document.getElementById('uiPanel').classList.add('hidden');
+    setStatus('Displayモード: WebSocketからの姿勢データを待機中…');
+  } else {
+    setStatus('VRMファイルを読み込み、「カメラ/マイクを開始」を押してください。');
+  }
+}
+
+init();
+</script>
+</body>
+</html>

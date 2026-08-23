@@ -1193,6 +1193,11 @@ static void handleWsClientMessage(const QString &json)
 		// tts.html からの読み上げ開始通知を全クライアントへ中継する
 		if (s_wsServer)
 			s_wsServer->broadcast(json.toStdString());
+	} else if (type == "vrm_pose_update") {
+		// vrm_stage.html（Controllerモード）が計算した姿勢データを、サーバー側では解釈せず
+		// 接続中の全クライアント（Displayモードのブラウザソース等）へそのまま中継する
+		if (s_wsServer)
+			s_wsServer->broadcast(json.toStdString());
 	}
 }
 
@@ -1285,6 +1290,38 @@ static void onOpenMatchCounterMenuClick(void * /* data */)
 	const std::string path =
 		std::string(appdata) + "\\obs-studio\\plugins\\obs-live-hub\\match_counter.html";
 	ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#endif
+}
+
+static void onOpenVrmStageMenuClick(void * /* data */)
+{
+#ifdef _WIN32
+	char appdata[MAX_PATH] = {};
+	if (GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH) == 0)
+		return;
+	const std::string path =
+		std::string(appdata) + "\\obs-studio\\plugins\\obs-live-hub\\vrm_stage.html";
+
+	// 通常ブラウザでは常にControllerモード（トラッキング送信側）として開く。
+	// Displayモード（OBSブラウザソース受信側）はURLに ?mode=display を付けて別途登録する。
+	ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+
+	std::string displayUrl = "file:///" + path;
+	for (char &c : displayUrl) {
+		if (c == '\\')
+			c = '/';
+	}
+	displayUrl += "?mode=display";
+
+	auto *mainWin = static_cast<QWidget *>(obs_frontend_get_main_window());
+	QMessageBox::information(
+		mainWin, "VRM Stage",
+		QString::fromStdString(
+			"コントローラー画面（Webカメラ・マイクでのトラッキング送信用）を"
+			"ブラウザで開きました。\n\n"
+			"OBSの「ブラウザ」ソースには、下記のURLを「ローカルファイル」の"
+			"チェックを外して登録してください（Displayモード・受信専用・背景透過）:\n\n" +
+			displayUrl));
 #endif
 }
 
@@ -1899,6 +1936,8 @@ static void buildObsLiveHubMenu()
 	matchMenu->addAction("カウンター外観設定", []() { onMatchCounterMenuClick(nullptr); });
 	matchMenu->addAction("カウンターページを開く", []() { onOpenMatchCounterMenuClick(nullptr); });
 
+	hubMenu->addAction("VRMステージページを開く", []() { onOpenVrmStageMenuClick(nullptr); });
+
 	auto *xMenu = hubMenu->addMenu("X投稿");
 	xMenu->addAction("X手動投稿",               []() { onXManualPostMenuClick(nullptr); });
 	xMenu->addAction("配信開始時の自動投稿設定", []() { onXAutoPostModeMenuClick(nullptr); });
@@ -2130,6 +2169,7 @@ bool obs_module_load(void)
 	ensureHtmlFileInAppData(L"effect.html");
 	ensureHtmlFileInAppData(L"conversation_overlay.html");
 	ensureHtmlFileInAppData(L"match_counter.html");
+	ensureHtmlFileInAppData(L"vrm_stage.html");
 #endif
 
 	PluginConfig::instance().load();
