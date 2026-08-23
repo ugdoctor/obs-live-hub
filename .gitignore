@@ -24,6 +24,7 @@
 
 # Exclude configuration files (contain API keys / tokens)
 config.json
+data/user_settings.json
 
 # Exclude lock files
 *.lock.json

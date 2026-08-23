@@ -13,7 +13,8 @@
 #include <ws2tcpip.h>
 
 // RFC 6455 WebSocket サーバー (WinSock2 ベース、TLS なし)
-// ブラウザソースからのローカル接続専用 (127.0.0.1)
+// 2026-08-24: マルチユーザーVRM通話のシグナリング用途でLAN内の他PCからも到達できる必要が
+// あるため、INADDR_ANY (0.0.0.0) でバインドする（旧: 127.0.0.1のみのループバック専用）。
 class WsServer {
 public:
 	enum class ListenState {
@@ -78,6 +79,9 @@ private:
 	void serveVrmStagePage(SOCKET sock);
 	void serveVrmModel(SOCKET sock);
 	void handleVrmModelUpload(SOCKET sock, const std::string &request);
+	// GET /vrm/user_settings.json: TURNサーバー設定等（user_settings.json）を配信する。
+	// マルチユーザーVRM通話機能（Git管理外の個人設定）用。
+	void serveUserSettings(SOCKET sock);
 
 	uint16_t port_;
 	SOCKET listenSock_ = INVALID_SOCKET;

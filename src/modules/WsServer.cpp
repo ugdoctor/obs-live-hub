@@ -388,6 +388,16 @@ static std::wstring vrmStageHtmlPathW()
 	return std::wstring(appdata) + L"\\obs-studio\\plugins\\obs-live-hub\\vrm_stage.html";
 }
 
+// user_settings.json（TURNサーバー認証情報等、Git管理外の個人設定）の配置先。
+// ensureUserSettingsFileInAppData()（plugin-main.cpp）が
+// 存在しない場合のみuser_settings.example.jsonから複製する（既存ファイルは上書きしない）。
+static std::wstring vrmUserSettingsPathW()
+{
+	wchar_t appdata[MAX_PATH] = {};
+	GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
+	return std::wstring(appdata) + L"\\obs-studio\\plugins\\obs-live-hub\\user_settings.json";
+}
+
 // リクエスト行が "<method> <path>"（クエリ文字列があれば無視）と厳密一致するか判定する。
 static bool isRequestForPath(const std::string &req, const char *method, const char *path)
 {
@@ -458,6 +468,15 @@ void WsServer::serveVrmStagePage(SOCKET sock)
 {
 	sendFileResponse(sock, vrmStageHtmlPathW(), "text/html; charset=UTF-8", 5 * 1024 * 1024,
 	                  "vrm_stage.html");
+}
+
+void WsServer::serveUserSettings(SOCKET sock)
+{
+	// TURNサーバー認証情報を含みうるファイルのため、存在しない場合は404を返すのみで
+	// 自動生成はしない（自動生成はensureUserSettingsFileInAppData()がexampleから複製する形で
+	// プラグイン起動時に一度だけ行う。ここでは配信のみを担当する）。
+	sendFileResponse(sock, vrmUserSettingsPathW(), "application/json; charset=UTF-8", 64 * 1024,
+	                  "user_settings.json");
 }
 
 void WsServer::serveVrmModel(SOCKET sock)
@@ -608,7 +627,11 @@ bool WsServer::start()
 
 	sockaddr_in addr{};
 	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	// 2026-08-24: マルチユーザーVRM通話機能（vrm_stage.html）のシグナリングサーバーとして
+	// LAN内の他PCからも到達できる必要があるため、INADDR_LOOPBACKからINADDR_ANYへ変更した。
+	// これによりWsServerの全機能（コメント表示・TTS・VMC受信結果配信等を含む）が同一LAN上の
+	// 他ホストから到達可能になる（ユーザー承認済みの意図的な変更。詳細はai_logs参照）。
+	addr.sin_addr.s_addr = htonl(INADDR_ANY);
 	addr.sin_port = htons(port_);
 
 	if (bind(listenSock_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == SOCKET_ERROR) {
@@ -635,7 +658,9 @@ bool WsServer::start()
 	listenState_.store(ListenState::Listening);
 	running_.store(true);
 	acceptThread_ = std::thread(&WsServer::acceptLoop, this);
-	obs_log(LOG_INFO, "[%s] Listening on ws://127.0.0.1:%u", WSTAG, port_);
+	obs_log(LOG_INFO,
+		"[%s] Listening on ws://0.0.0.0:%u (INADDR_ANY — LAN内の他PCからも到達可能です)",
+		WSTAG, port_);
 	return true;
 }
 
@@ -797,6 +822,12 @@ void WsServer::clientLoop(SOCKET sock)
 	// WebSocketへのアップグレードを行わずここで完結させる
 	if (isRequestForPath(request, "GET", "/vrm_stage.html")) {
 		serveVrmStagePage(sock);
+		closesocket(sock);
+		--activeClients_;
+		return;
+	}
+	if (isRequestForPath(request, "GET", "/vrm/user_settings.json")) {
+		serveUserSettings(sock);
 		closesocket(sock);
 		--activeClients_;
 		return;

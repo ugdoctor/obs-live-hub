@@ -1277,6 +1277,12 @@ static void handleWsClientMessage(const QString &json)
 		s_lastVrmTransformJson = json.toStdString();
 		if (s_wsServer)
 			s_wsServer->broadcast(s_lastVrmTransformJson);
+	} else if (type == "vrm_room_control" || type == "vrm_call_signal") {
+		// マルチユーザーVRM通話（フェーズ2）: ルーム管理（招待・待合室承認・キック等）と
+		// WebRTCシグナリング（SDP/ICE）。サーバー側では内容を解釈せず、roomId/toPeerIdによる
+		// 宛先フィルタはvrm_stage.html側のJSが行う（他のvrm_*系メッセージと同じ中継のみ方針）。
+		if (s_wsServer)
+			s_wsServer->broadcast(json.toStdString());
 	}
 }
 
@@ -2190,6 +2196,77 @@ static void ensureHtmlFileInAppData(const wchar_t *filename)
 			GetLastError());
 	}
 }
+
+// user_settings.json（TURNサーバー認証情報等の個人設定、Git管理外）を、存在しない場合のみ
+// user_settings.example.json（ダミー値、リポジトリに含まれる）から複製する。
+// ensureHtmlFileInAppData()と異なり、既存ファイルは絶対に上書きしない
+// （プラグイン更新のたびにユーザーの実TURN認証情報が消えるのを防ぐため）。
+static void ensureUserSettingsFileInAppData()
+{
+	const char *tag = "[user_settings]";
+
+	DWORD needed = GetEnvironmentVariableW(L"APPDATA", nullptr, 0);
+	if (needed == 0) {
+		obs_log(LOG_WARNING, "%s APPDATA not set (err=%lu)", tag, GetLastError());
+		return;
+	}
+	std::wstring appdata(needed - 1, L'\0');
+	GetEnvironmentVariableW(L"APPDATA", &appdata[0], needed);
+
+	const std::wstring targetDir = appdata + L"\\obs-studio\\plugins\\obs-live-hub";
+	const std::wstring targetPath = targetDir + L"\\user_settings.json";
+
+	if (GetFileAttributesW(targetPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+		// 既に存在する（ユーザーが設定済み）。絶対に上書きしない。
+		return;
+	}
+
+	if (!createDirectoryRecursiveW(targetDir)) {
+		obs_log(LOG_WARNING, "%s mkdir failed (err=%lu)", tag, GetLastError());
+		return;
+	}
+
+	HMODULE hMod = nullptr;
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+					GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCWSTR>(&ensureUserSettingsFileInAppData), &hMod) ||
+	    !hMod) {
+		obs_log(LOG_WARNING, "%s GetModuleHandleExW failed (err=%lu)", tag, GetLastError());
+		return;
+	}
+	wchar_t buf[MAX_PATH] = {};
+	if (!GetModuleFileNameW(hMod, buf, MAX_PATH)) {
+		obs_log(LOG_WARNING, "%s GetModuleFileNameW failed (err=%lu)", tag, GetLastError());
+		return;
+	}
+	const std::wstring dllPath(buf);
+	const auto slash = dllPath.rfind(L'\\');
+	const auto dot = dllPath.rfind(L'.');
+	if (slash == std::wstring::npos) {
+		obs_log(LOG_WARNING, "%s unexpected DLL path (no backslash)", tag);
+		return;
+	}
+	const std::wstring dllDir = dllPath.substr(0, slash);
+	const std::wstring baseName = (dot != std::wstring::npos && dot > slash)
+					      ? dllPath.substr(slash + 1, dot - slash - 1)
+					      : dllPath.substr(slash + 1);
+	const std::wstring sourcePath = dllDir + L"\\" + baseName + L"\\user_settings.example.json";
+
+	if (GetFileAttributesW(sourcePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+		obs_log(LOG_WARNING, "%s example source not found: %s (err=%lu)", tag,
+			wstrToUtf8(sourcePath.c_str()).c_str(), GetLastError());
+		return;
+	}
+
+	if (CopyFileW(sourcePath.c_str(), targetPath.c_str(), TRUE)) {
+		obs_log(LOG_INFO,
+			"%s user_settings.json が存在しなかったため、テンプレートから新規作成しました: %s"
+			"（TURNサーバーを使う場合はこのファイルを編集してください）",
+			tag, wstrToUtf8(targetPath.c_str()).c_str());
+	} else {
+		obs_log(LOG_WARNING, "%s CopyFileW failed (err=%lu)", tag, GetLastError());
+	}
+}
 #endif
 
 static void onFrontendEvent(obs_frontend_event event, void * /* data */)
@@ -2297,6 +2374,7 @@ bool obs_module_load(void)
 	ensureHtmlFileInAppData(L"conversation_overlay.html");
 	ensureHtmlFileInAppData(L"match_counter.html");
 	ensureHtmlFileInAppData(L"vrm_stage.html");
+	ensureUserSettingsFileInAppData(); // user_settings.json（TURN設定等）。既存ファイルは上書きしない
 #endif
 
 	PluginConfig::instance().load();

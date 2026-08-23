@@ -1,0 +1,9 @@
+{
+  "_comment": "このファイルはテンプレートです。実際の設定は user_settings.json（Git管理外）に記入してください。obs-live-hub は初回起動時、user_settings.json が存在しない場合にこのファイルを複製して自動作成します（既存の user_settings.json は上書きされません）。",
+  "turn": {
+    "_comment": "プライバシー保護モード（TURN中継）で使用するTURNサーバーの接続情報。未設定のままだとプライバシー保護モードは利用できません。",
+    "urls": "turn:your-turn-server.example.com:3478",
+    "username": "your-turn-username",
+    "credential": "your-turn-credential"
+  }
+}

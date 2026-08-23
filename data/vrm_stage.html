@@ -153,6 +153,51 @@ html.mode-display #uiToggleTab {
 .vmcActive   { color: #4caf50; font-weight: bold; }
 .vmcInactive { color: #ff5555; }
 
+#callPanel {
+  margin-top: 8px;
+  border-top: 1px solid rgba(255,255,255,0.15);
+  padding-top: 8px;
+}
+#callPanel summary { cursor: pointer; opacity: 0.9; margin-bottom: 6px; }
+.callWarning {
+  background: rgba(255, 80, 80, 0.18);
+  border: 1px solid #ff5555;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  margin-bottom: 8px;
+}
+#callModeSelect, #callJoinCodeInput {
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.25);
+  color: #fff;
+  border-radius: 5px;
+  padding: 3px 5px;
+  font-size: 11px;
+}
+.callParticipantRow {
+  border-top: 1px dashed rgba(255,255,255,0.15);
+  padding-top: 6px;
+  margin-top: 6px;
+  font-size: 11px;
+}
+.callParticipantRow .uiRow { margin-bottom: 4px; }
+.callParticipantName { font-weight: bold; flex: 1 1 auto; }
+.callBadgeWaiting { color: #ffcc44; }
+.callBadgeConnected { color: #4caf50; }
+.callSlotSelect, .callOffsetInput {
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.25);
+  color: #fff;
+  border-radius: 4px;
+  font-size: 10px;
+  padding: 2px;
+}
+.callOffsetInput { width: 3.2em; }
+.kick-btn { background: rgba(255,60,60,0.25); border-color: rgba(255,60,60,0.5); }
+.kick-btn:hover { background: rgba(255,60,60,0.4); }
+
 /* パネルが隠れていても常に触れる開閉タブ */
 #uiToggleTab {
   position: fixed; right: 0; top: 12px;
@@ -276,6 +321,59 @@ html.mode-display #uiToggleTab {
     </div>
     <div class="uiRow">
       <button class="small-btn" id="testSwingBtn">胴体を左右に揺らす（Test Swing）</button>
+    </div>
+  </details>
+
+  <details id="callPanel">
+    <summary>🎥 マルチユーザー通話（最大8人）</summary>
+
+    <div class="uiRow">
+      <label for="callModeSelect">接続モード</label>
+      <select id="callModeSelect">
+        <option value="p2p">P2P直接（低遅延・IP開示あり）</option>
+        <option value="relay">プライバシー保護（TURN中継）</option>
+      </select>
+    </div>
+    <div id="callP2pWarning" class="callWarning">
+      ⚠️ 注意: P2P通信では相手にIPアドレスが開示されます。配信中の初対面ゲストや一般募集では
+      使用せず、信頼できる知人間でのみ利用してください。
+    </div>
+    <div id="callRelayNotice" class="callWarning" style="display:none; background:rgba(80,160,255,0.18); border-color:#5aa0ff;">
+      🛡️ プライバシー保護モード: 全通信がTURN中継サーバー経由になり、IPアドレスは相手に開示されません
+      （<span id="callTurnStatus">TURN設定を確認中…</span>）。
+    </div>
+
+    <div id="callRoomSetup">
+      <div class="uiRow">
+        <button class="small-btn" id="callCreateRoomBtn">ルームを作成（ホスト）</button>
+      </div>
+      <div class="uiRow">
+        <input type="text" id="callJoinCodeInput" placeholder="招待コード HUB-XXXX-YYYY" style="flex:1 1 auto; min-width:0;">
+        <button class="small-btn" id="callJoinRoomBtn">参加</button>
+      </div>
+    </div>
+
+    <div id="callRoomInfo" style="display:none;">
+      <div class="uiRow">
+        <span>招待コード:</span>
+        <strong id="callInviteCodeVal" style="flex:1 1 auto;">-</strong>
+      </div>
+      <div class="uiRow">
+        <button class="small-btn" id="callRegenCodeBtn">コード再発行</button>
+        <button class="small-btn" id="callCopyCodeBtn">コピー</button>
+        <button class="small-btn" id="callLeaveRoomBtn">退出</button>
+      </div>
+      <div id="callStatusLine" class="debugRow" style="margin-bottom:6px;"></div>
+    </div>
+
+    <div id="callWaitingRoomSection" style="display:none;">
+      <div class="uiRow"><strong>待合室（承認待ち）</strong></div>
+      <div id="callWaitingList"></div>
+    </div>
+
+    <div id="callParticipantsSection" style="display:none;">
+      <div class="uiRow"><strong>参加者</strong></div>
+      <div id="callParticipantsList"></div>
     </div>
   </details>
 </div>
@@ -416,6 +514,14 @@ function animate() {
     }
     currentVrm.update(delta);
   }
+
+  // マルチユーザー通話: 各リモート参加者のVRMもここで一括更新する
+  Object.keys(callState.peers).forEach(function(peerId) {
+    var peer = callState.peers[peerId];
+    if (peer.vrm) peer.vrm.update(delta);
+  });
+  maybeSendCallPoseUpdate();
+
   maybeSendPoseUpdate();
   renderer.render(scene, camera);
 }
@@ -619,6 +725,11 @@ function sendTransformUpdate(force) {
   if (!force && now - lastTransformSendTime < TRANSFORM_SEND_INTERVAL_MS) return;
   lastTransformSendTime = now;
   var payload = Object.assign({ type: 'vrm_transform_update' }, vrmTransform);
+  // マルチユーザー通話（Controllerが参加中のルーム）をDisplay側へ「shadow join」させるための
+  // 最小限の情報も便乗させる（callState定義後にcallRoomId等を実値で埋める。詳細は
+  // 「マルチユーザー通話」セクションのattemptShadowJoin参照）。
+  payload.callRoomId = (typeof callState !== 'undefined' && callState.roomId) || '';
+  payload.callParentPeerId = (typeof callState !== 'undefined' && callState.myPeerId) || '';
   ws.send(JSON.stringify(payload));
 }
 
@@ -628,6 +739,10 @@ function onTransformUpdateReceived(data) {
   });
   applyTransform(vrmTransform);
   saveTransformToLocalStorage(); // Display側でも次回起動用に保存しておく
+
+  if (isDisplayMode && data.callRoomId && typeof attemptShadowJoin === 'function') {
+    attemptShadowJoin(data.callRoomId, data.callParentPeerId);
+  }
 }
 
 function initTransformPanel() {
@@ -789,6 +904,12 @@ function loadVrmBinary(arrayBuffer, fileName, opts) {
     setStatus('VRM読み込み完了: ' + fileName + '（' + currentVrmVersionLabel + '）');
     if (opts.persist !== false) saveVrmToCache(arrayBuffer, fileName);
     if (opts.upload !== false && !isDisplayMode) uploadVrmToPlugin(arrayBuffer, fileName);
+
+    // マルチユーザー通話用に自分自身のVRMバイナリを保持しておく（新規ピア接続時に送信する。
+    // loadVrmBinary()は常に「自分自身のアバター」の読み込みにのみ使われる関数のため無条件で良い。
+    // リモート参加者のVRMは別関数 loadRemoteParticipantVrmBinary() が扱い、ここには影響しない）
+    localVrmArrayBufferForCall = arrayBuffer;
+    localVrmFileNameForCall = fileName;
   }, undefined, function(err) {
     URL.revokeObjectURL(blobUrl);
     setStatus('VRM読み込み失敗: ' + (err && err.message ? err.message : String(err)));
@@ -1017,6 +1138,8 @@ function onFaceMeshResults(results) {
   if (riggedFace) applyFaceRig(riggedFace);
 }
 
+var localMediaStream = null; // マルチユーザー通話でマイク音声トラックを各ピアへ送るために保持
+
 function startTracking() {
   webcamVideo = document.getElementById('webcamVideo');
   var previewVideo = document.getElementById('cameraPreview');
@@ -1025,6 +1148,7 @@ function startTracking() {
     .then(function(stream) {
       webcamVideo.srcObject = stream;
       previewVideo.srcObject = stream;
+      localMediaStream = stream;
       setupAudioAnalyser(stream);
 
       faceMesh = new FaceMesh({
@@ -1062,6 +1186,10 @@ function stopTracking() {
   if (webcamVideo) webcamVideo.srcObject = null;
   var previewVideo = document.getElementById('cameraPreview');
   if (previewVideo) previewVideo.srcObject = null;
+  // 注意: マルチユーザー通話中にVMC受信等でこの関数が呼ばれると、通話へ送信していた
+  // マイク音声トラックも一緒に停止する（カメラ/マイクとVMCが排他という既存仕様の帰結）。
+  // 通話中はVMCとの併用を避けるか、通話の音声は別途確保する運用を想定した既知の制限。
+  localMediaStream = null;
 
   if (audioCtx) { audioCtx.close(); audioCtx = null; analyser = null; }
 
@@ -1248,6 +1376,11 @@ function connectWs() {
       // vrm_vmc_update はプラグイン（VmcReceiver）が発信元であり、ControllerもDisplayも
       // 対等なWebSocketクライアントとして受け取る（自分自身のechoではないため両方で処理する）
       if (data.type === 'vrm_vmc_update') { onVmcUpdateReceived(data); return; }
+      // マルチユーザー通話（ルーム管理・WebRTCシグナリング）はプラグイン中継のみで
+      // サーバー発信ではないが、ControllerとDisplayが「別ピア」として独立参加する設計のため
+      // vrm_vmc_updateと同様にisDisplayModeガードの外側で処理する
+      if (data.type === 'vrm_room_control') { handleRoomControl(data); return; }
+      if (data.type === 'vrm_call_signal') { handleCallSignal(data); return; }
 
       if (!isDisplayMode) return; // 以下はController自身が発信したデータのechoなので無視する
       if (data.type === 'vrm_pose_update') onPoseUpdateReceived(data);
@@ -1288,6 +1421,864 @@ function connectWsWatchdog() {
   }, 1000);
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// ── マルチユーザーVRM通話（フェーズ2） ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+//
+// アーキテクチャ概要:
+// - シグナリング（誰と誰をつなぐかのSDP/ICE交換、ルーム管理）は既存のWsServer経由
+//   （type: "vrm_room_control" / "vrm_call_signal"）。WsServerは2026-08-24よりINADDR_ANYで
+//   待ち受けるため、ホストと同一LAN上にいる参加者のブラウザからも到達できる
+//   （インターネット越しの離れた相手と直接つなぐ場合は、ホスト側でポート開放/VPN等が別途必要。
+//   これは本機能のスコープ外）。
+// - 実際の音声・データ通信はWebRTC（RTCPeerConnection）でピア間を直接（またはTURN中継で）
+//   接続するフルメッシュ構成（最大8人 = 最大28コネクション）。SFU（中継サーバーでの合成）は
+//   実装していない。
+// - Controller/DisplayはそれぞれWsServerの独立したクライアントとして、原則独立に
+//   ルームへ「参加」する。ただし同一PC上のDisplay（OBSブラウザソース）は、招待コード入力や
+//   待合室承認のUIを操作できない（#uiPanelごと非表示のため）。そこでControllerは自分の
+//   ルーム参加状態（roomId・自分のpeerId）を vrm_transform_update に便乗させて常時共有し、
+//   Displayはそれを見て「shadow join」（招待コード・待合室承認を経由せず、
+//   ホストに『信頼できるControllerの分身です』と自己申告して自動参加する）を行う。
+//   ホスト側は shadow_join_request の shadowOfPeerId が現在のロースターに実在する場合のみ
+//   自動承認する。
+// - VRMバイナリは各ピアへ RTCDataChannel（'vrm'チャンネル）でチャンク転送し、受信側は
+//   ArrayBuffer/Blobのみでモデルを構築する。IndexedDB・localStorageへは一切保存しない
+//   （要件3）。退出・キック時は disposeCallPeerVrm() でジオメトリ/マテリアル/テクスチャを
+//   dispose() し、Blob URLも revokeObjectURL() する。
+
+var CALL_MAX_PARTICIPANTS   = 8;
+var CALL_POSE_SEND_INTERVAL_MS = 33; // 約30Hz
+var CALL_VRM_CHUNK_SIZE = 16 * 1024; // RTCDataChannel向けの安全なチャンクサイズ
+var CALL_VRM_SEND_BUFFER_LIMIT = 1024 * 1024; // このバイト数を超えたら送信を一旦止める
+var CALL_ICE_SERVERS_STUN = [{ urls: 'stun:stun.l.google.com:19302' }];
+var CALL_SLOT_OFFSET_X = { left: -0.6, center: 0, right: 0.6 };
+
+var callState = {
+  connectionMode: 'p2p', // 'p2p' | 'relay'
+  roomId: null,
+  inviteCode: null,
+  isHost: false,
+  myPeerId: null,
+  myDisplayName: null,
+  waitingPeers: {},     // ホストのみ: peerId -> { displayName, requestedAt }
+  bannedPeerIds: {},    // ホストのみ: peerId -> true（キック済み、以後の再参加を拒否）
+  peers: {}             // peerId -> CallPeer
+};
+var turnConfig = null;       // user_settings.jsonから読み込んだTURN設定（{urls,username,credential}）
+var callAudioCtx = null;     // 参加者音声のボリューム調整用（Web Audio、<audio>要素は消音してこちら経由で再生）
+var lastCallPoseSendTime = 0;
+
+function generateRandomCode(chars, len) {
+  var s = '';
+  for (var i = 0; i < len; i++) s += chars.charAt(Math.floor(Math.random() * chars.length));
+  return s;
+}
+function generateInviteCode() {
+  // 紛らわしい文字（0/O, 1/I等）を除いた英数字。HUB-XXXX-YYYY 形式（約40bit相当）。
+  var chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  return 'HUB-' + generateRandomCode(chars, 4) + '-' + generateRandomCode(chars, 4);
+}
+function generatePeerId() {
+  return 'p_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
+function makeCallPeer(peerId, displayName) {
+  return {
+    peerId: peerId,
+    displayName: displayName || peerId,
+    pc: null,
+    dataChannel: null,   // 姿勢データ用（'pose'）
+    vrmChannel: null,    // VRMバイナリ転送用（'vrm'）
+    vrmReceiveBuffer: null,
+    pendingBlobUrl: null,
+    vrm: null,
+    audioEl: null,
+    gainNode: null,
+    volume: 1.0,
+    muted: false,
+    layout: { slot: 'center', offsetX: 0, offsetY: 0, offsetZ: 0, scale: 1 },
+    lastPoseRig: null
+  };
+}
+
+// ── TURN設定の読み込み（user_settings.json、Git管理外） ─────────────────
+
+function loadUserSettings() {
+  return fetch(HTTP_BASE + '/vrm/user_settings.json').then(function(res) {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.json();
+  }).then(function(json) {
+    if (json && json.turn && json.turn.urls) {
+      turnConfig = json.turn;
+      setDebugText('callTurnStatus', 'TURNサーバー設定を読み込みました');
+    } else {
+      turnConfig = null;
+      setDebugText('callTurnStatus', 'TURN未設定（user_settings.jsonにturn.urlsがありません）');
+    }
+  }).catch(function() {
+    turnConfig = null;
+    setDebugText('callTurnStatus', 'user_settings.jsonが見つかりません（TURN中継は利用不可）');
+  });
+}
+
+// ── 接続モード切り替え + セキュリティ警告UI ──────────────────────────────
+
+function initCallModeUi() {
+  var select = document.getElementById('callModeSelect');
+  var p2pWarning = document.getElementById('callP2pWarning');
+  var relayNotice = document.getElementById('callRelayNotice');
+  if (!select) return;
+
+  function applyModeUi() {
+    var isP2p = callState.connectionMode === 'p2p';
+    if (p2pWarning) p2pWarning.style.display = isP2p ? 'block' : 'none';
+    if (relayNotice) relayNotice.style.display = isP2p ? 'none' : 'block';
+  }
+
+  select.value = callState.connectionMode;
+  applyModeUi();
+
+  select.addEventListener('change', function() {
+    if (select.value === 'p2p') {
+      var ok = confirm(
+        '⚠️ 注意: P2P通信では相手にIPアドレスが開示されます。\n\n' +
+        '配信中の初対面ゲストや一般募集では使用せず、信頼できる知人間でのみ利用してください。\n\n' +
+        'このモードを選択しますか？');
+      if (!ok) { select.value = callState.connectionMode; return; }
+    } else if (select.value === 'relay' && !turnConfig) {
+      alert('TURNサーバーが未設定のため、プライバシー保護モードは利用できません。\n' +
+            'data/user_settings.json にTURNサーバー情報を設定してください。');
+      select.value = callState.connectionMode;
+      return;
+    }
+    callState.connectionMode = select.value;
+    applyModeUi();
+    // 既存接続のiceTransportPolicyは接続確立時に固定されるため遡って変わらない
+    setCallStatus('接続モードを変更しました（既存の接続には影響しません。次回の新規参加から適用されます）。');
+  });
+}
+
+// ── ルーム作成・参加・退出 ────────────────────────────────────────────────
+
+function setCallStatus(text) {
+  setDebugText('callStatusLine', text);
+  setStatus(text);
+}
+
+function showCallRoomUi() {
+  var setup = document.getElementById('callRoomSetup');
+  var info  = document.getElementById('callRoomInfo');
+  var waitingSection = document.getElementById('callWaitingRoomSection');
+  var participantsSection = document.getElementById('callParticipantsSection');
+  if (setup) setup.style.display = 'none';
+  if (info) {
+    info.style.display = 'block';
+    setDebugText('callInviteCodeVal', callState.isHost ? (callState.inviteCode || '-') : '(参加者のため非表示)');
+  }
+  if (waitingSection) waitingSection.style.display = callState.isHost ? 'block' : 'none';
+  if (participantsSection) participantsSection.style.display = 'block';
+}
+
+function hideCallRoomUi() {
+  var setup = document.getElementById('callRoomSetup');
+  var info  = document.getElementById('callRoomInfo');
+  var waitingSection = document.getElementById('callWaitingRoomSection');
+  var participantsSection = document.getElementById('callParticipantsSection');
+  if (setup) setup.style.display = 'block';
+  if (info) info.style.display = 'none';
+  if (waitingSection) waitingSection.style.display = 'none';
+  if (participantsSection) participantsSection.style.display = 'none';
+  var wl = document.getElementById('callWaitingList'); if (wl) wl.innerHTML = '';
+  var pl = document.getElementById('callParticipantsList'); if (pl) pl.innerHTML = '';
+}
+
+function callCreateRoom() {
+  if (callState.roomId) { setCallStatus('既にルームに参加中です。先に退出してください。'); return; }
+  callState.isHost = true;
+  callState.myPeerId = generatePeerId();
+  callState.myDisplayName = 'ホスト';
+  callState.roomId = generatePeerId(); // 招待コードとは独立の内部識別子（コード再発行時も維持する）
+  callState.inviteCode = generateInviteCode();
+  callState.waitingPeers = {};
+  callState.bannedPeerIds = {};
+  callState.peers = {};
+  showCallRoomUi();
+  renderCallParticipantsList();
+  renderCallWaitingList();
+  setCallStatus('ルームを作成しました。招待コードを知人に共有してください。');
+  sendTransformUpdate(true); // Display側へroomId/自分のpeerIdを共有（shadow join用）
+}
+
+function callRegenerateInviteCode() {
+  if (!callState.isHost) return;
+  callState.inviteCode = generateInviteCode();
+  setDebugText('callInviteCodeVal', callState.inviteCode);
+  setCallStatus('招待コードを再発行しました。古いコードは無効になりました。');
+}
+
+function callJoinRoom(inviteCodeInput) {
+  if (callState.roomId) { setCallStatus('既にルームに参加中です。先に退出してください。'); return; }
+  var codeUsed = (inviteCodeInput || '').trim().toUpperCase();
+  if (!codeUsed) { setCallStatus('招待コードを入力してください。'); return; }
+  callState.isHost = false;
+  callState.myPeerId = generatePeerId();
+  callState.myDisplayName = 'ゲスト';
+  callState.roomId = null; // join_ack受信時に設定される
+  sendRoomControl({ action: 'join_request', inviteCode: codeUsed, displayName: callState.myDisplayName });
+  setCallStatus('参加をリクエストしました。ホストの承認をお待ちください…');
+  setTimeout(function() {
+    if (!callState.roomId) {
+      setCallStatus('招待コードが見つからないか、無効です。コードを確認してください。');
+    }
+  }, 5000);
+}
+
+function leaveCallRoom() {
+  if (!callState.roomId) return;
+  sendRoomControl({ action: 'leave' });
+  Object.keys(callState.peers).forEach(function(peerId) { disconnectCallPeer(peerId, null); });
+  callState.roomId = null;
+  callState.isHost = false;
+  callState.inviteCode = null;
+  callState.waitingPeers = {};
+  callState.bannedPeerIds = {};
+  hideCallRoomUi();
+  setCallStatus('ルームから退出しました。');
+  sendTransformUpdate(true);
+}
+
+// Displayモード専用: Controllerが参加しているルームへ、待合室承認を経由せず自動参加する。
+// ホスト側はshadowOfPeerIdが現在のロースターに実在する場合のみ自動承認する（handleRoomControl参照）。
+function attemptShadowJoin(roomId, parentPeerId) {
+  if (!isDisplayMode || !roomId) return;
+  if (callState.roomId === roomId) return; // 既に参加済み
+  if (callState.roomId) leaveCallRoom(); // 別ルームに参加中だった場合は先に抜ける
+  callState.isHost = false;
+  callState.myPeerId = generatePeerId();
+  callState.myDisplayName = 'Display';
+  callState.roomId = roomId;
+  sendRoomControl({ action: 'shadow_join_request', shadowOfPeerId: parentPeerId });
+  setCallStatus('通話ルームへ自動参加中…（Displayモード）');
+}
+
+// ── ルーム管理メッセージの送受信 ──────────────────────────────────────────
+
+function sendRoomControl(partial) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  var msg = Object.assign({
+    type: 'vrm_room_control',
+    roomId: callState.roomId,
+    fromPeerId: callState.myPeerId,
+    displayName: callState.myDisplayName
+  }, partial);
+  ws.send(JSON.stringify(msg));
+}
+
+function rosterDisplayName(peerId) {
+  if (peerId === callState.myPeerId) return callState.myDisplayName;
+  var peer = callState.peers[peerId];
+  return peer ? peer.displayName : peerId;
+}
+
+function broadcastRoster() {
+  if (!callState.isHost) return;
+  var members = [{ peerId: callState.myPeerId, displayName: callState.myDisplayName }];
+  Object.keys(callState.peers).forEach(function(peerId) {
+    members.push({ peerId: peerId, displayName: callState.peers[peerId].displayName });
+  });
+  sendRoomControl({ action: 'roster', members: members });
+}
+
+function applyRosterUpdate(msg) {
+  var seen = {};
+  (msg.members || []).forEach(function(m) {
+    seen[m.peerId] = true;
+    if (m.peerId === callState.myPeerId) return;
+    if (!callState.peers[m.peerId]) callState.peers[m.peerId] = makeCallPeer(m.peerId, m.displayName);
+    else callState.peers[m.peerId].displayName = m.displayName;
+    ensureConnectionToPeer(m.peerId);
+  });
+  Object.keys(callState.peers).forEach(function(peerId) {
+    if (!seen[peerId]) disconnectCallPeer(peerId, null);
+  });
+  renderCallParticipantsList();
+}
+
+function approveWaitingPeer(peerId) {
+  var waiting = callState.waitingPeers[peerId];
+  if (!waiting) return;
+  delete callState.waitingPeers[peerId];
+  renderCallWaitingList();
+  callState.peers[peerId] = makeCallPeer(peerId, waiting.displayName);
+  sendRoomControl({ action: 'approve', targetPeerId: peerId });
+  broadcastRoster();
+  ensureConnectionToPeer(peerId);
+  renderCallParticipantsList();
+}
+
+function rejectWaitingPeer(peerId, reason) {
+  delete callState.waitingPeers[peerId];
+  renderCallWaitingList();
+  sendRoomControl({ action: 'reject', targetPeerId: peerId, reason: reason || 'host_declined' });
+}
+
+function kickCallPeer(peerId) {
+  if (!callState.isHost) return;
+  callState.bannedPeerIds[peerId] = true; // セッションBAN: このルームが存続する間、再参加を拒否する
+  sendRoomControl({ action: 'kick', targetPeerId: peerId });
+  disconnectCallPeer(peerId, null);
+  broadcastRoster();
+}
+
+function handleRoomControl(msg) {
+  var action = msg.action;
+
+  // join_request / join_ack はroomId確定前に処理する必要があるため、roomIdゲートより先に扱う
+  if (action === 'join_request') {
+    if (!callState.isHost) return;
+    if (msg.inviteCode !== callState.inviteCode) return; // 失効済み・誤入力のコードは無視
+    if (callState.bannedPeerIds[msg.fromPeerId]) {
+      sendRoomControl({ action: 'reject', targetPeerId: msg.fromPeerId, reason: 'banned' });
+      return;
+    }
+    if (Object.keys(callState.peers).length >= CALL_MAX_PARTICIPANTS - 1) {
+      sendRoomControl({ action: 'reject', targetPeerId: msg.fromPeerId, reason: 'room_full' });
+      return;
+    }
+    callState.waitingPeers[msg.fromPeerId] = {
+      displayName: msg.displayName || msg.fromPeerId, requestedAt: Date.now()
+    };
+    renderCallWaitingList();
+    sendRoomControl({ action: 'join_ack', targetPeerId: msg.fromPeerId, roomId: callState.roomId });
+    return;
+  }
+  if (action === 'join_ack') {
+    if (msg.targetPeerId !== callState.myPeerId) return;
+    callState.roomId = msg.roomId; // ここで初めて内部roomIdを取得する
+    setCallStatus('ホストの承認待ちです…');
+    return;
+  }
+  if (action === 'shadow_join_request') {
+    if (!callState.isHost) return;
+    if (msg.roomId !== callState.roomId) return;
+    var parentOk = msg.shadowOfPeerId === callState.myPeerId || !!callState.peers[msg.shadowOfPeerId];
+    if (!parentOk) return; // 現在のロースターに存在しない相手の「分身」は信用しない
+    callState.peers[msg.fromPeerId] = makeCallPeer(
+      msg.fromPeerId, rosterDisplayName(msg.shadowOfPeerId) + '(Display)');
+    sendRoomControl({ action: 'approve', targetPeerId: msg.fromPeerId });
+    broadcastRoster();
+    ensureConnectionToPeer(msg.fromPeerId);
+    renderCallParticipantsList();
+    return;
+  }
+
+  // 以降はroomIdが既知かつ一致する場合のみ処理する
+  if (!callState.roomId || msg.roomId !== callState.roomId) return;
+
+  if (action === 'approve') {
+    if (msg.targetPeerId !== callState.myPeerId) return;
+    setCallStatus('ルームに参加しました。');
+    showCallRoomUi();
+    return;
+  }
+  if (action === 'reject') {
+    if (msg.targetPeerId !== callState.myPeerId) return;
+    setCallStatus('参加を拒否されました' + (msg.reason ? '（' + msg.reason + '）' : ''));
+    callState.roomId = null;
+    return;
+  }
+  if (action === 'roster') {
+    if (!callState.isHost) applyRosterUpdate(msg);
+    return;
+  }
+  if (action === 'kick') {
+    if (msg.targetPeerId === callState.myPeerId) {
+      setCallStatus('ホストにより退出させられました。');
+      leaveCallRoom();
+    } else {
+      disconnectCallPeer(msg.targetPeerId, null);
+    }
+    return;
+  }
+  if (action === 'leave') {
+    disconnectCallPeer(msg.fromPeerId, (msg.displayName || msg.fromPeerId) + ' が退出しました');
+    if (callState.isHost) { delete callState.waitingPeers[msg.fromPeerId]; renderCallWaitingList(); }
+    return;
+  }
+  if (action === 'layout_update') {
+    var peer = callState.peers[msg.targetPeerId];
+    if (peer) { peer.layout = msg.layout; applyCallPeerLayout(peer); }
+    return;
+  }
+}
+
+// ── WebRTC接続の確立（フルメッシュ） ──────────────────────────────────────
+// ピア間の「どちらがofferを送るか」はpeerId文字列比較で決定し、両者が同時にofferを
+// 送り合う（グレア）を避ける。データチャンネルもofferを送る側だけが作成する
+// （createDataChannel側の変更がSDPに載り、相手はondatachannelで受け取る）。
+
+function ensureConnectionToPeer(peerId) {
+  var peer = callState.peers[peerId];
+  if (!peer || peer.pc) return;
+  var isInitiator = callState.myPeerId < peerId;
+  peer.pc = createPeerConnectionFor(peer, isInitiator);
+  if (isInitiator) negotiateOffer(peer);
+}
+
+function createPeerConnectionFor(peer, isInitiator) {
+  var iceServers = CALL_ICE_SERVERS_STUN.slice();
+  if (turnConfig && turnConfig.urls) {
+    iceServers.push({ urls: turnConfig.urls, username: turnConfig.username, credential: turnConfig.credential });
+  }
+  var config = { iceServers: iceServers };
+  if (callState.connectionMode === 'relay') config.iceTransportPolicy = 'relay';
+
+  var pc = new RTCPeerConnection(config);
+
+  pc.onicecandidate = function(e) {
+    if (e.candidate) sendCallSignal(peer.peerId, 'candidate', null, e.candidate.toJSON());
+  };
+  pc.ontrack = function(e) {
+    if (e.streams && e.streams[0]) attachRemoteAudioTrack(peer, e.streams[0]);
+  };
+  pc.onconnectionstatechange = function() {
+    renderCallParticipantsList();
+    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+      // 相手がクラッシュ/回線切断等で"leave"を送れないまま消えた場合の保険。
+      // ルームの正式なメンバー管理（waitingPeers/bannedPeerIds/roster再送出）はホストが行うため、
+      // ここではローカルの表示・リソースのみ後始末する（相手への通知は行わない）。
+      console.warn('[vrm_stage:call] connection to ' + peer.peerId + ' ' + pc.connectionState);
+      disconnectCallPeer(peer.peerId, (peer.displayName || peer.peerId) + ' との接続が切断されました');
+    }
+  };
+  pc.ondatachannel = function(e) { wireDataChannel(peer, e.channel, e.channel.label); };
+
+  // Controllerのみローカルのマイク音声を送る（Displayは受信専用として動作する）
+  if (!isDisplayMode && localMediaStream) {
+    localMediaStream.getAudioTracks().forEach(function(track) { pc.addTrack(track, localMediaStream); });
+  }
+
+  if (isInitiator) {
+    wireDataChannel(peer, pc.createDataChannel('pose', { ordered: false, maxRetransmits: 0 }), 'pose');
+    wireDataChannel(peer, pc.createDataChannel('vrm', { ordered: true }), 'vrm');
+  }
+
+  return pc;
+}
+
+function negotiateOffer(peer) {
+  peer.pc.createOffer().then(function(offer) {
+    return peer.pc.setLocalDescription(offer);
+  }).then(function() {
+    sendCallSignal(peer.peerId, 'offer', peer.pc.localDescription.sdp, null);
+  }).catch(function(err) { console.warn('[vrm_stage:call] createOffer failed', err); });
+}
+
+function sendCallSignal(toPeerId, signalType, sdp, candidate) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({
+    type: 'vrm_call_signal',
+    roomId: callState.roomId,
+    fromPeerId: callState.myPeerId,
+    toPeerId: toPeerId,
+    signalType: signalType,
+    sdp: sdp,
+    candidate: candidate
+  }));
+}
+
+function handleCallSignal(msg) {
+  if (!callState.roomId || msg.roomId !== callState.roomId) return;
+  if (msg.toPeerId !== callState.myPeerId) return;
+
+  var peer = callState.peers[msg.fromPeerId];
+  if (!peer) return; // ロースターに存在しない相手からのシグナルは無視する（承認フロー経由のみ許可）
+  if (!peer.pc) peer.pc = createPeerConnectionFor(peer, callState.myPeerId < msg.fromPeerId);
+
+  if (msg.signalType === 'offer') {
+    peer.pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp }).then(function() {
+      return peer.pc.createAnswer();
+    }).then(function(answer) {
+      return peer.pc.setLocalDescription(answer);
+    }).then(function() {
+      sendCallSignal(peer.peerId, 'answer', peer.pc.localDescription.sdp, null);
+    }).catch(function(err) { console.warn('[vrm_stage:call] createAnswer failed', err); });
+  } else if (msg.signalType === 'answer') {
+    peer.pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp }).catch(function(err) {
+      console.warn('[vrm_stage:call] setRemoteDescription(answer) failed', err);
+    });
+  } else if (msg.signalType === 'candidate' && msg.candidate) {
+    peer.pc.addIceCandidate(msg.candidate).catch(function(err) {
+      console.warn('[vrm_stage:call] addIceCandidate failed', err);
+    });
+  }
+}
+
+// ── データチャンネル（姿勢データ + VRMバイナリ転送） ──────────────────────
+
+function wireDataChannel(peer, channel, label) {
+  if (label === 'pose') {
+    peer.dataChannel = channel;
+    channel.onmessage = function(e) {
+      try { applyRemotePeerPose(peer, JSON.parse(e.data)); } catch (_) {}
+    };
+  } else if (label === 'vrm') {
+    peer.vrmChannel = channel;
+    channel.binaryType = 'arraybuffer';
+    channel.bufferedAmountLowThreshold = 262144;
+    channel.onopen = function() {
+      if (!isDisplayMode && localVrmArrayBufferForCall) {
+        sendVrmOverDataChannel(peer, localVrmArrayBufferForCall, localVrmFileNameForCall);
+      }
+    };
+    channel.onmessage = function(e) { handleVrmChunkReceived(peer, e.data); };
+  }
+}
+
+function hasActiveCallPeers() {
+  return Object.keys(callState.peers).some(function(id) {
+    var p = callState.peers[id];
+    return p.dataChannel && p.dataChannel.readyState === 'open';
+  });
+}
+
+function maybeSendCallPoseUpdate() {
+  if (isDisplayMode || !hasActiveCallPeers()) return; // Displayは自前のトラッキングを持たないため送信しない
+  var now = performance.now();
+  if (now - lastCallPoseSendTime < CALL_POSE_SEND_INTERVAL_MS) return;
+  lastCallPoseSendTime = now;
+  var payload = JSON.stringify({ head: lastHeadRig, eye: lastEyeRig, pupil: lastPupilRig, mouthOpen: currentMouthOpen });
+  Object.keys(callState.peers).forEach(function(peerId) {
+    var peer = callState.peers[peerId];
+    if (peer.dataChannel && peer.dataChannel.readyState === 'open') {
+      try { peer.dataChannel.send(payload); } catch (_) {}
+    }
+  });
+}
+
+function applyRemotePeerPose(peer, data) {
+  peer.lastPoseRig = data;
+  if (!peer.vrm) return;
+  var humanoid = peer.vrm.humanoid;
+  if (humanoid && data.head) {
+    var headNode = humanoid.getNormalizedBoneNode('head');
+    var neckNode = humanoid.getNormalizedBoneNode('neck');
+    applyHeadRotation(headNode, {
+      x: data.head.x * HEAD_FOLLOW, y: data.head.y * HEAD_FOLLOW, z: data.head.z * HEAD_FOLLOW
+    }, HEAD_LERP);
+    applyHeadRotation(neckNode, {
+      x: data.head.x * NECK_FOLLOW, y: data.head.y * NECK_FOLLOW, z: data.head.z * NECK_FOLLOW
+    }, HEAD_LERP);
+  }
+  if (peer.vrm.expressionManager && typeof data.mouthOpen === 'number') {
+    var expr = peer.vrm.expressionManager;
+    var m = clamp01(data.mouthOpen);
+    expr.setValue('aa', m); expr.setValue('ih', m * 0.15); expr.setValue('ou', m * 0.25);
+  }
+}
+
+// VRMバイナリの送信元保持（自分自身のアバターのみ。要件3によりリモート参加者分は
+// 受信後すぐdisposeし、ここには保持しない）
+var localVrmArrayBufferForCall = null;
+var localVrmFileNameForCall = null;
+
+function sendVrmOverDataChannel(peer, arrayBuffer, fileName) {
+  var channel = peer.vrmChannel;
+  if (!channel || channel.readyState !== 'open') return;
+  channel.send(JSON.stringify({ kind: 'vrm-start', fileName: fileName, size: arrayBuffer.byteLength }));
+
+  var offset = 0;
+  function sendNextChunk() {
+    if (!channel || channel.readyState !== 'open') return;
+    while (offset < arrayBuffer.byteLength) {
+      if (channel.bufferedAmount > CALL_VRM_SEND_BUFFER_LIMIT) {
+        channel.onbufferedamountlow = function() { channel.onbufferedamountlow = null; sendNextChunk(); };
+        return;
+      }
+      var end = Math.min(offset + CALL_VRM_CHUNK_SIZE, arrayBuffer.byteLength);
+      channel.send(arrayBuffer.slice(offset, end));
+      offset = end;
+    }
+    channel.send(JSON.stringify({ kind: 'vrm-end' }));
+  }
+  sendNextChunk();
+}
+
+function handleVrmChunkReceived(peer, data) {
+  if (typeof data === 'string') {
+    try {
+      var msg = JSON.parse(data);
+      if (msg.kind === 'vrm-start') {
+        peer.vrmReceiveBuffer = { chunks: [], receivedSize: 0, totalSize: msg.size, fileName: msg.fileName };
+      } else if (msg.kind === 'vrm-end') {
+        finishRemoteVrmReceive(peer);
+      }
+    } catch (_) {}
+    return;
+  }
+  if (!peer.vrmReceiveBuffer) return; // vrm-start未受信のチャンクは無視（順序保証チャンネルのため通常は発生しない）
+  peer.vrmReceiveBuffer.chunks.push(data);
+  peer.vrmReceiveBuffer.receivedSize += data.byteLength;
+}
+
+function finishRemoteVrmReceive(peer) {
+  var buf = peer.vrmReceiveBuffer;
+  if (!buf) return;
+  var combined = new Uint8Array(buf.receivedSize);
+  var pos = 0;
+  buf.chunks.forEach(function(chunk) { combined.set(new Uint8Array(chunk), pos); pos += chunk.byteLength; });
+  peer.vrmReceiveBuffer = null;
+  loadRemoteParticipantVrmBinary(peer, combined.buffer, buf.fileName);
+}
+
+// 要件3: 受信したVRMバイナリはBlob/ArrayBufferのみで展開し、IndexedDB/localStorageへは
+// 一切書き込まない（saveVrmToCache()を呼ばない点が自分自身のアバター読み込みとの違い）。
+function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
+  var blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: 'model/gltf-binary' }));
+  peer.pendingBlobUrl = blobUrl;
+  gltfLoader.load(blobUrl, function(gltf) {
+    URL.revokeObjectURL(blobUrl); // ロード完了後は即座に解放する（メモリ限定保持）
+    if (peer.pendingBlobUrl === blobUrl) peer.pendingBlobUrl = null;
+    var vrm = gltf.userData.vrm;
+    if (!vrm) return;
+    disposeCallPeerVrm(peer); // 差し替え時は古いモデルを完全破棄してから入れ替える
+    if (vrm.meta && vrm.meta.metaVersion === '0' && VRMUtils.rotateVRM0) VRMUtils.rotateVRM0(vrm);
+    peer.vrm = vrm;
+    scene.add(vrm.scene);
+    applyCallPeerLayout(peer);
+    setCallStatus((peer.displayName || peer.peerId) + ' のVRMを受信しました');
+  }, undefined, function(err) {
+    URL.revokeObjectURL(blobUrl);
+    if (peer.pendingBlobUrl === blobUrl) peer.pendingBlobUrl = null;
+    console.warn('[vrm_stage:call] remote VRM load failed', err);
+  });
+}
+
+// ── 音声（参加者ごとの<audio>要素 + 個別音量/ミュート） ───────────────────
+
+function attachRemoteAudioTrack(peer, stream) {
+  if (!peer.audioEl) {
+    var audioEl = document.createElement('audio');
+    audioEl.autoplay = true;
+    audioEl.muted = true; // 実際の出力はGainNode経由のため、要素自体は消音し二重再生を防ぐ
+    audioEl.style.display = 'none';
+    document.body.appendChild(audioEl);
+    peer.audioEl = audioEl;
+  }
+  peer.audioEl.srcObject = stream;
+
+  if (!callAudioCtx) callAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  var srcNode = callAudioCtx.createMediaStreamSource(stream);
+  var gainNode = callAudioCtx.createGain();
+  gainNode.gain.value = peer.muted ? 0 : peer.volume;
+  srcNode.connect(gainNode).connect(callAudioCtx.destination);
+  peer.gainNode = gainNode;
+}
+
+function setCallPeerVolume(peerId, volumePercent) {
+  var peer = callState.peers[peerId];
+  if (!peer) return;
+  peer.volume = clampRange(volumePercent, 0, 200) / 100;
+  if (peer.gainNode && !peer.muted) peer.gainNode.gain.value = peer.volume;
+}
+
+function setCallPeerMute(peerId, muted) {
+  var peer = callState.peers[peerId];
+  if (!peer) return;
+  peer.muted = muted;
+  if (peer.gainNode) peer.gainNode.gain.value = muted ? 0 : peer.volume;
+}
+
+// ── 3D空間配置（ホストが調整、他クライアントへ同期） ──────────────────────
+
+function applyCallPeerLayout(peer) {
+  if (!peer.vrm) return;
+  var l = peer.layout;
+  var slotX = CALL_SLOT_OFFSET_X[l.slot] || 0;
+  peer.vrm.scene.position.set(slotX + l.offsetX, l.offsetY, l.offsetZ);
+  peer.vrm.scene.scale.setScalar(l.scale || 1);
+}
+
+function updateCallPeerLayout(peerId, partial) {
+  var peer = callState.peers[peerId];
+  if (!peer) return;
+  Object.assign(peer.layout, partial);
+  applyCallPeerLayout(peer);
+  if (callState.isHost) sendRoomControl({ action: 'layout_update', targetPeerId: peerId, layout: peer.layout });
+}
+
+// ── 退出・キック時のクリーンアップ（メモリ完全破棄） ──────────────────────
+
+function disposeCallPeerVrm(peer) {
+  if (peer.pendingBlobUrl) { URL.revokeObjectURL(peer.pendingBlobUrl); peer.pendingBlobUrl = null; }
+  if (!peer.vrm) return;
+  scene.remove(peer.vrm.scene);
+  peer.vrm.scene.traverse(function(obj) {
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material) {
+      var mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      mats.forEach(function(mat) {
+        Object.keys(mat).forEach(function(key) {
+          var val = mat[key];
+          if (val && val.isTexture) val.dispose();
+        });
+        mat.dispose();
+      });
+    }
+  });
+  if (VRMUtils.deepDispose) VRMUtils.deepDispose(peer.vrm.scene);
+  peer.vrm = null;
+}
+
+function disconnectCallPeer(peerId, statusMessage) {
+  var peer = callState.peers[peerId];
+  if (!peer) return;
+  disposeCallPeerVrm(peer);
+  if (peer.dataChannel) { try { peer.dataChannel.close(); } catch (_) {} }
+  if (peer.vrmChannel) { try { peer.vrmChannel.close(); } catch (_) {} }
+  if (peer.pc) { try { peer.pc.close(); } catch (_) {} }
+  if (peer.audioEl) {
+    peer.audioEl.pause();
+    peer.audioEl.srcObject = null;
+    if (peer.audioEl.parentNode) peer.audioEl.parentNode.removeChild(peer.audioEl);
+  }
+  delete callState.peers[peerId];
+  renderCallParticipantsList();
+  if (statusMessage) setCallStatus(statusMessage);
+}
+
+// ── UIレンダリング ──────────────────────────────────────────────────────
+
+function renderCallWaitingList() {
+  var container = document.getElementById('callWaitingList');
+  if (!container) return;
+  container.innerHTML = '';
+  Object.keys(callState.waitingPeers).forEach(function(peerId) {
+    var w = callState.waitingPeers[peerId];
+    var rowDiv = document.createElement('div');
+    rowDiv.className = 'uiRow';
+    var nameSpan = document.createElement('span');
+    nameSpan.className = 'callParticipantName';
+    nameSpan.textContent = (w.displayName || peerId) + ' さんが参加申請中';
+    var approveBtn = document.createElement('button');
+    approveBtn.className = 'small-btn'; approveBtn.textContent = '承認';
+    approveBtn.addEventListener('click', function() { approveWaitingPeer(peerId); });
+    var rejectBtn = document.createElement('button');
+    rejectBtn.className = 'small-btn'; rejectBtn.textContent = '拒否';
+    rejectBtn.addEventListener('click', function() { rejectWaitingPeer(peerId); });
+    rowDiv.appendChild(nameSpan); rowDiv.appendChild(approveBtn); rowDiv.appendChild(rejectBtn);
+    container.appendChild(rowDiv);
+  });
+}
+
+function renderCallParticipantsList() {
+  var container = document.getElementById('callParticipantsList');
+  if (!container) return;
+  container.innerHTML = '';
+  Object.keys(callState.peers).forEach(function(peerId) {
+    var peer = callState.peers[peerId];
+    var row = document.createElement('div');
+    row.className = 'callParticipantRow';
+
+    var nameRow = document.createElement('div'); nameRow.className = 'uiRow';
+    var nameSpan = document.createElement('span'); nameSpan.className = 'callParticipantName';
+    var connected = peer.pc && peer.pc.connectionState === 'connected';
+    nameSpan.textContent = (peer.displayName || peerId) + (connected ? ' ● 接続中' : ' ○ 接続待ち');
+    nameSpan.className += connected ? ' callBadgeConnected' : ' callBadgeWaiting';
+    nameRow.appendChild(nameSpan);
+    if (callState.isHost) {
+      var kickBtn = document.createElement('button');
+      kickBtn.className = 'small-btn kick-btn'; kickBtn.textContent = '強制キック';
+      kickBtn.addEventListener('click', function() {
+        if (confirm((peer.displayName || peerId) + ' を退出させ、以後の再参加を拒否します。よろしいですか？')) {
+          kickCallPeer(peerId);
+        }
+      });
+      nameRow.appendChild(kickBtn);
+    }
+    row.appendChild(nameRow);
+
+    var volRow = document.createElement('div'); volRow.className = 'uiRow';
+    var volLabel = document.createElement('label'); volLabel.textContent = '音量'; volLabel.style.width = '32px';
+    var volSlider = document.createElement('input');
+    volSlider.type = 'range'; volSlider.min = '0'; volSlider.max = '200'; volSlider.step = '5';
+    volSlider.value = String(Math.round(peer.volume * 100));
+    volSlider.style.flex = '1 1 auto';
+    volSlider.addEventListener('input', function() { setCallPeerVolume(peerId, parseInt(volSlider.value, 10)); });
+    var muteBtn = document.createElement('button');
+    muteBtn.className = 'small-btn'; muteBtn.textContent = peer.muted ? 'ミュート中' : 'ミュート';
+    muteBtn.addEventListener('click', function() {
+      setCallPeerMute(peerId, !peer.muted);
+      muteBtn.textContent = peer.muted ? 'ミュート中' : 'ミュート';
+    });
+    volRow.appendChild(volLabel); volRow.appendChild(volSlider); volRow.appendChild(muteBtn);
+    row.appendChild(volRow);
+
+    if (callState.isHost) {
+      var layoutRow = document.createElement('div'); layoutRow.className = 'uiRow';
+      var slotSelect = document.createElement('select'); slotSelect.className = 'callSlotSelect';
+      [['left', '左'], ['center', '中央'], ['right', '右']].forEach(function(pair) {
+        var opt = document.createElement('option'); opt.value = pair[0]; opt.textContent = pair[1];
+        if (peer.layout.slot === pair[0]) opt.selected = true;
+        slotSelect.appendChild(opt);
+      });
+      slotSelect.addEventListener('change', function() { updateCallPeerLayout(peerId, { slot: slotSelect.value }); });
+      layoutRow.appendChild(slotSelect);
+
+      ['offsetX', 'offsetY', 'offsetZ', 'scale'].forEach(function(key) {
+        var inp = document.createElement('input');
+        inp.type = 'number'; inp.className = 'callOffsetInput'; inp.step = '0.05';
+        inp.value = peer.layout[key];
+        inp.title = key;
+        inp.addEventListener('change', function() {
+          var v = parseFloat(inp.value);
+          if (isNaN(v)) return;
+          var partial = {}; partial[key] = v;
+          updateCallPeerLayout(peerId, partial);
+        });
+        layoutRow.appendChild(inp);
+      });
+      row.appendChild(layoutRow);
+    }
+
+    container.appendChild(row);
+  });
+}
+
+// ── 初期化 ────────────────────────────────────────────────────────────
+
+function initCallUi() {
+  loadUserSettings();
+  initCallModeUi();
+
+  var createBtn = document.getElementById('callCreateRoomBtn');
+  if (createBtn) createBtn.addEventListener('click', callCreateRoom);
+
+  var joinBtn = document.getElementById('callJoinRoomBtn');
+  var joinInput = document.getElementById('callJoinCodeInput');
+  if (joinBtn && joinInput) joinBtn.addEventListener('click', function() { callJoinRoom(joinInput.value); });
+
+  var regenBtn = document.getElementById('callRegenCodeBtn');
+  if (regenBtn) regenBtn.addEventListener('click', callRegenerateInviteCode);
+
+  var copyBtn = document.getElementById('callCopyCodeBtn');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', function() {
+      if (callState.inviteCode && navigator.clipboard) navigator.clipboard.writeText(callState.inviteCode);
+    });
+  }
+
+  var leaveBtn = document.getElementById('callLeaveRoomBtn');
+  if (leaveBtn) leaveBtn.addEventListener('click', leaveCallRoom);
+
+  // ページを閉じる際、可能な範囲で他の参加者へ退出を通知する（ベストエフォート。
+  // クラッシュ等でこれが送れない場合はpc.onconnectionstatechangeのfailed/closed処理が保険になる）
+  window.addEventListener('beforeunload', function() {
+    if (callState.roomId) sendRoomControl({ action: 'leave' });
+  });
+}
+
 // ── モード切替（UIトグル。通常はURLの ?mode=display を使うが、同一ブラウザ内での
 //    プレビュー用に手動切替も提供する） ────────────────────────────────
 
@@ -1324,6 +2315,7 @@ function init() {
   initTransformPanel();
   initDebugPanel();
   initVmcWatchdog();
+  initCallUi();
   initModelForMode();
   connectWsWatchdog();
 
