@@ -642,6 +642,25 @@ function applyRestPose() {
   if (rLower) rLower.rotation.y =  ELBOW_BEND_Y;
 }
 
+// 不具合3対策: applyRestPose()はlocalVrm用に事前解決したcurrentBones（グローバルな
+// ボーン解決キャッシュ、resolveBonesForCurrentVrm()参照）にのみ依存しており、
+// 通話相手のリモートVRM（peer.vrm）に対しては一度も呼ばれていなかった。モーション同期
+// （vrm_peer_motion、applyRemotePeerPose()参照）はhead/neck/表情のみを動かす設計のため、
+// 腕がロード直後のTポーズ（水平）のまま残り続け、「頭は動くが腕はTポーズのまま」に見える
+// 不具合の主因になっていた。loadRemoteParticipantVrmBinary()のロード完了時に、
+// currentBonesとは独立にhumanoidから直接ボーンを解決して同じ腕下げ処理を適用する。
+function applyRestPoseToPeerVrm(vrm) {
+  if (!vrm || !vrm.humanoid) return;
+  var lUpper = resolveBoneWithFallback(vrm.humanoid, 'leftUpperArm');
+  var rUpper = resolveBoneWithFallback(vrm.humanoid, 'rightUpperArm');
+  var lLower = resolveBoneWithFallback(vrm.humanoid, 'leftLowerArm');
+  var rLower = resolveBoneWithFallback(vrm.humanoid, 'rightLowerArm');
+  if (lUpper) lUpper.node.rotation.z =  ARM_DOWN_Z;
+  if (rUpper) rUpper.node.rotation.z = -ARM_DOWN_Z;
+  if (lLower) lLower.node.rotation.y = -ELBOW_BEND_Y;
+  if (rLower) rLower.node.rotation.y =  ELBOW_BEND_Y;
+}
+
 // ── 頭部連動の背骨・胸の傾き + アイドル呼吸モーション ────────────────────
 
 var lastHeadRig = { x: 0, y: 0, z: 0 };
@@ -2164,6 +2183,7 @@ function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
     diagInfo('VRM', peer.peerId + ' のロード成功 → シーンに追加し、右側スロットへ配置します');
     disposeCallPeerVrm(peer); // 差し替え時は古いモデルを完全破棄してから入れ替える
     if (vrm.meta && vrm.meta.metaVersion === '0' && VRMUtils.rotateVRM0) VRMUtils.rotateVRM0(vrm);
+    applyRestPoseToPeerVrm(vrm); // 不具合3対策: 腕をTポーズから下ろす（モーション同期は頭部/表情のみのため）
     peer.vrm = vrm;
     scene.add(vrm.scene);
     applyCallPeerLayout(peer);
