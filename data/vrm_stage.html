@@ -198,6 +198,33 @@ html.mode-display #uiToggleTab {
 .kick-btn { background: rgba(255,60,60,0.25); border-color: rgba(255,60,60,0.5); }
 .kick-btn:hover { background: rgba(255,60,60,0.4); }
 
+/* 🌐 WebRTC通話診断コンソール */
+#rtcDiagPanel {
+  margin-top: 8px;
+  border-top: 1px dashed rgba(255,255,255,0.15);
+  padding-top: 6px;
+}
+#rtcDiagPanel summary { cursor: pointer; opacity: 0.9; margin-bottom: 6px; }
+#rtcDiagLog {
+  height: 160px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: rgba(0,0,0,0.35);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.rtcDiagRow { white-space: pre-wrap; word-break: break-all; }
+.rtcDiagWs  { color: #7ab8ff; }
+.rtcDiagRtc { color: #b98cff; }
+.rtcDiagDc  { color: #4caf50; }
+.rtcDiagVrm { color: #ffcc44; }
+.rtcDiagWarn { color: #ff6b6b; }
+.rtcDiagTime { opacity: 0.55; margin-right: 4px; }
+
 /* パネルが隠れていても常に触れる開閉タブ */
 #uiToggleTab {
   position: fixed; right: 0; top: 12px;
@@ -375,6 +402,15 @@ html.mode-display #uiToggleTab {
       <div class="uiRow"><strong>参加者</strong></div>
       <div id="callParticipantsList"></div>
     </div>
+
+    <details id="rtcDiagPanel">
+      <summary>🌐 WebRTC 通話診断コンソール</summary>
+      <div id="rtcDiagLog"></div>
+      <div class="uiRow" style="margin-top:6px;">
+        <button class="small-btn" id="rtcDiagCopyBtn">📋 ログをコピー</button>
+        <button class="small-btn" id="rtcDiagClearBtn">クリア</button>
+      </div>
+    </details>
   </details>
 </div>
 
@@ -1576,7 +1612,10 @@ function makeCallPeer(peerId, displayName) {
     volume: 1.0,
     muted: false,
     layout: { slot: 'center', offsetX: 0, offsetY: 0, offsetZ: 0, scale: 1 },
-    lastPoseRig: null
+    lastPoseRig: null,
+    // ICE Candidateの取りこぼし対策: setRemoteDescription()完了前に届いたcandidateを
+    // 一時的に退避しておくキュー（handleCallSignal参照）。
+    pendingCandidates: []
   };
 }
 
@@ -1635,6 +1674,74 @@ function initCallModeUi() {
     // 既存接続のiceTransportPolicyは接続確立時に固定されるため遡って変わらない
     setCallStatus('接続モードを変更しました（既存の接続には影響しません。次回の新規参加から適用されます）。');
   });
+}
+
+// ── 🌐 WebRTC通話診断コンソール（画面内ログビューア） ──────────────────────
+// OBS Display（CEFブラウザソース）はDevToolsを開くのが手間なため、承認〜SDP/ICE交換〜
+// DataChannel〜リモートVRMロードまでの一連のイベントを画面内で直接確認できるようにする。
+// [WS]=ルーム管理/シグナリングメッセージの送受信、[RTC]=PeerConnectionの状態遷移、
+// [DC]=DataChannelの開閉・転送、[VRM]=リモート参加者VRMのロード進捗、の4カテゴリで色分けする。
+
+var RTC_DIAG_MAX_LINES = 100;
+var rtcDiagEntries = []; // { ts, text, warn } のリングバッファ（コピー用に保持）
+
+function logDiag(category, message, isWarn) {
+  var now = new Date();
+  var ts = String(now.getHours()).padStart(2, '0') + ':'
+    + String(now.getMinutes()).padStart(2, '0') + ':'
+    + String(now.getSeconds()).padStart(2, '0') + '.'
+    + String(now.getMilliseconds()).padStart(3, '0');
+  var line = '[' + category + '] ' + message;
+
+  rtcDiagEntries.push({ ts: ts, text: line, warn: !!isWarn });
+  if (rtcDiagEntries.length > RTC_DIAG_MAX_LINES) rtcDiagEntries.shift();
+
+  // DevTools側にも従来通り出力し、スタックトレース等が必要な深い調査でも使えるようにする
+  if (isWarn) console.warn('[vrm_stage:diag] ' + line); else console.info('[vrm_stage:diag] ' + line);
+
+  var container = document.getElementById('rtcDiagLog');
+  if (!container) return;
+  var row = document.createElement('div');
+  var catClass = category === 'WS' ? 'rtcDiagWs' : category === 'RTC' ? 'rtcDiagRtc'
+    : category === 'DC' ? 'rtcDiagDc' : category === 'VRM' ? 'rtcDiagVrm' : '';
+  row.className = 'rtcDiagRow' + (isWarn ? ' rtcDiagWarn' : (catClass ? ' ' + catClass : ''));
+  var timeSpan = document.createElement('span');
+  timeSpan.className = 'rtcDiagTime';
+  timeSpan.textContent = ts;
+  row.appendChild(timeSpan);
+  row.appendChild(document.createTextNode(line));
+  container.appendChild(row);
+  while (container.children.length > RTC_DIAG_MAX_LINES) container.removeChild(container.firstChild);
+  container.scrollTop = container.scrollHeight;
+}
+
+function diagInfo(category, message) { logDiag(category, message, false); }
+function diagWarn(category, message, err) {
+  logDiag(category, message + (err ? (' :: ' + (err && err.message ? err.message : String(err))) : ''), true);
+}
+
+function initRtcDiagPanel() {
+  var copyBtn = document.getElementById('rtcDiagCopyBtn');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', function() {
+      var text = rtcDiagEntries.map(function(e) { return e.ts + ' ' + e.text; }).join('\n');
+      if (!navigator.clipboard) { setCallStatus('このブラウザではクリップボードコピーに対応していません。'); return; }
+      navigator.clipboard.writeText(text).then(function() {
+        setCallStatus('診断ログをクリップボードへコピーしました（' + rtcDiagEntries.length + '行）。');
+      }).catch(function(err) {
+        console.warn('[vrm_stage:diag] クリップボードコピー失敗', err);
+        setCallStatus('診断ログのコピーに失敗しました。');
+      });
+    });
+  }
+  var clearBtn = document.getElementById('rtcDiagClearBtn');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', function() {
+      rtcDiagEntries = [];
+      var container = document.getElementById('rtcDiagLog');
+      if (container) container.innerHTML = '';
+    });
+  }
 }
 
 // ── ルーム作成・参加・退出 ────────────────────────────────────────────────
@@ -1731,11 +1838,16 @@ function leaveCallRoom() {
 }
 
 // ローカル操作者（このページインスタンスが表示しているlocalVrmの持ち主）がホストかどうか。
-// Controller自身はcallState.isHostがそのまま使えるが、Displayはshadow joinにより
-// callState.isHostが常にfalseになる（自分自身は待合室承認フローを経由しないゲスト扱いの
-// ダミー参加のため）ので、attemptShadowJoin()で受け取ったcallState.localIsHostを使う。
+// 要件3対策: Displayモードは常に「ホストPCの画面」として固定する。以前はshadow join経由で
+// 受け取ったcallState.localIsHost（vrm_transform_updateのcallParentIsHost）に依存していたが、
+// これはメッセージの到達タイミング次第で一時的に誤判定しうる不確実な経路だった
+// （実害は確認できていないが、Displayが誤ってゲストとして扱われるとVMC無視・自動配置の
+// 左右判定に影響する可能性があるため、判定経路そのものを単純化・確実化する）。
+// ゲスト自身がOBS Displayを個別に運用するケースは現状スコープ外とする。
+// Controller自身はcallState.isHostがそのまま使える。
 function isLocalOperatorHost() {
-  return isDisplayMode ? !!callState.localIsHost : !!callState.isHost;
+  if (isDisplayMode) return true;
+  return !!callState.isHost;
 }
 
 // Displayモード専用: Controllerが参加しているルームへ、待合室承認を経由せず自動参加する。
@@ -1806,7 +1918,7 @@ function approveWaitingPeer(peerId) {
   delete callState.waitingPeers[peerId];
   renderCallWaitingList();
   callState.peers[peerId] = makeCallPeer(peerId, waiting.displayName);
-  console.info('[vrm_stage:room] 承認: ' + peerId + ' (' + waiting.displayName + ') → approve送信 + roster配信');
+  diagInfo('WS', '承認: ' + peerId + ' (' + waiting.displayName + ') → approve送信 + roster配信');
   sendRoomControl({ action: 'approve', targetPeerId: peerId });
   broadcastRoster();
   ensureConnectionToPeer(peerId);
@@ -1816,14 +1928,14 @@ function approveWaitingPeer(peerId) {
 function rejectWaitingPeer(peerId, reason) {
   delete callState.waitingPeers[peerId];
   renderCallWaitingList();
-  console.info('[vrm_stage:room] 拒否: ' + peerId + ' reason=' + (reason || 'host_declined'));
+  diagInfo('WS', '拒否: ' + peerId + ' reason=' + (reason || 'host_declined'));
   sendRoomControl({ action: 'reject', targetPeerId: peerId, reason: reason || 'host_declined' });
 }
 
 function kickCallPeer(peerId) {
   if (!callState.isHost) return;
   callState.bannedPeerIds[peerId] = true; // セッションBAN: このルームが存続する間、再参加を拒否する
-  console.info('[vrm_stage:room] キック: ' + peerId);
+  diagInfo('WS', 'キック: ' + peerId);
   sendRoomControl({ action: 'kick', targetPeerId: peerId });
   disconnectCallPeer(peerId, null);
   broadcastRoster();
@@ -1831,7 +1943,7 @@ function kickCallPeer(peerId) {
 
 function handleRoomControl(msg) {
   var action = msg.action;
-  console.info('[vrm_stage:room] 受信 action=' + action + ' from=' + msg.fromPeerId
+  diagInfo('WS', '受信 action=' + action + ' from=' + msg.fromPeerId
     + ' roomId=' + msg.roomId + ' (自分: myPeerId=' + callState.myPeerId
     + ' isHost=' + callState.isHost + ' roomId=' + callState.roomId + ')');
 
@@ -1839,17 +1951,17 @@ function handleRoomControl(msg) {
   if (action === 'join_request') {
     if (!callState.isHost) return;
     if (msg.inviteCode !== callState.inviteCode) {
-      console.warn('[vrm_stage:room] join_request却下: 招待コード不一致 (受信="' + msg.inviteCode
+      diagWarn('WS', 'join_request却下: 招待コード不一致 (受信="' + msg.inviteCode
         + '" 現在="' + callState.inviteCode + '")');
       return;
     }
     if (callState.bannedPeerIds[msg.fromPeerId]) {
-      console.warn('[vrm_stage:room] join_request却下: banned peerId=' + msg.fromPeerId);
+      diagWarn('WS', 'join_request却下: banned peerId=' + msg.fromPeerId);
       sendRoomControl({ action: 'reject', targetPeerId: msg.fromPeerId, reason: 'banned' });
       return;
     }
     if (Object.keys(callState.peers).length >= CALL_MAX_PARTICIPANTS - 1) {
-      console.warn('[vrm_stage:room] join_request却下: room_full');
+      diagWarn('WS', 'join_request却下: room_full');
       sendRoomControl({ action: 'reject', targetPeerId: msg.fromPeerId, reason: 'room_full' });
       return;
     }
@@ -1857,14 +1969,14 @@ function handleRoomControl(msg) {
       displayName: msg.displayName || msg.fromPeerId, requestedAt: Date.now()
     };
     renderCallWaitingList();
-    console.info('[vrm_stage:room] join_request受理 → 待合室へ追加 + join_ack送信: ' + msg.fromPeerId);
+    diagInfo('WS', 'join_request受理 → 待合室へ追加 + join_ack送信: ' + msg.fromPeerId);
     sendRoomControl({ action: 'join_ack', targetPeerId: msg.fromPeerId, roomId: callState.roomId });
     return;
   }
   if (action === 'join_ack') {
     if (msg.targetPeerId !== callState.myPeerId) return;
     callState.roomId = msg.roomId; // ここで初めて内部roomIdを取得する
-    console.info('[vrm_stage:room] join_ack受信 → roomId確定=' + callState.roomId + '、ホストの承認待ち');
+    diagInfo('WS', 'join_ack受信 → roomId確定=' + callState.roomId + '、ホストの承認待ち');
     setCallStatus('ホストの承認待ちです…');
     return;
   }
@@ -1873,13 +1985,13 @@ function handleRoomControl(msg) {
     if (msg.roomId !== callState.roomId) return;
     var parentOk = msg.shadowOfPeerId === callState.myPeerId || !!callState.peers[msg.shadowOfPeerId];
     if (!parentOk) {
-      console.warn('[vrm_stage:room] shadow_join_request却下: shadowOfPeerId='
+      diagWarn('WS', 'shadow_join_request却下: shadowOfPeerId='
         + msg.shadowOfPeerId + ' がロースターに存在しません');
       return; // 現在のロースターに存在しない相手の「分身」は信用しない
     }
     callState.peers[msg.fromPeerId] = makeCallPeer(
       msg.fromPeerId, rosterDisplayName(msg.shadowOfPeerId) + '(Display)');
-    console.info('[vrm_stage:room] shadow_join_request自動承認: ' + msg.fromPeerId
+    diagInfo('WS', 'shadow_join_request自動承認: ' + msg.fromPeerId
       + ' (shadowOf=' + msg.shadowOfPeerId + ')');
     sendRoomControl({ action: 'approve', targetPeerId: msg.fromPeerId });
     broadcastRoster();
@@ -1890,14 +2002,14 @@ function handleRoomControl(msg) {
 
   // 以降はroomIdが既知かつ一致する場合のみ処理する
   if (!callState.roomId || msg.roomId !== callState.roomId) {
-    console.warn('[vrm_stage:room] action=' + action + ' をroomId不一致のため無視 (受信='
+    diagWarn('WS', 'action=' + action + ' をroomId不一致のため無視 (受信='
       + msg.roomId + ' 現在=' + callState.roomId + ')');
     return;
   }
 
   if (action === 'approve') {
     if (msg.targetPeerId !== callState.myPeerId) return;
-    console.info('[vrm_stage:room] approve受信 → ルーム参加完了、roster待ち');
+    diagInfo('WS', 'approve受信 → ルーム参加完了、roster待ち');
     setCallStatus('ルームに参加しました。');
     showCallRoomUi();
     // 不具合2対策: 参加者リストDOMは本来rosterメッセージ受信（applyRosterUpdate）で
@@ -1909,21 +2021,21 @@ function handleRoomControl(msg) {
   }
   if (action === 'reject') {
     if (msg.targetPeerId !== callState.myPeerId) return;
-    console.warn('[vrm_stage:room] reject受信: reason=' + msg.reason);
+    diagWarn('WS', 'reject受信: reason=' + msg.reason);
     setCallStatus('参加を拒否されました' + (msg.reason ? '（' + msg.reason + '）' : ''));
     callState.roomId = null;
     return;
   }
   if (action === 'roster') {
     if (!callState.isHost) {
-      console.info('[vrm_stage:room] roster受信 members=' + JSON.stringify((msg.members || []).map(function(m) { return m.peerId; })));
+      diagInfo('WS', 'roster受信 members=' + JSON.stringify((msg.members || []).map(function(m) { return m.peerId; })));
       applyRosterUpdate(msg);
     }
     return;
   }
   if (action === 'kick') {
     if (msg.targetPeerId === callState.myPeerId) {
-      console.warn('[vrm_stage:room] 自分がキックされました');
+      diagWarn('WS', '自分がキックされました');
       setCallStatus('ホストにより退出させられました。');
       leaveCallRoom();
     } else {
@@ -1952,7 +2064,7 @@ function ensureConnectionToPeer(peerId) {
   var peer = callState.peers[peerId];
   if (!peer || peer.pc) return;
   var isInitiator = callState.myPeerId < peerId;
-  console.info('[vrm_stage:call] ensureConnectionToPeer(' + peerId + ') isInitiator=' + isInitiator);
+  diagInfo('RTC', 'ensureConnectionToPeer(' + peerId + ') isInitiator=' + isInitiator);
   peer.pc = createPeerConnectionFor(peer, isInitiator);
   if (isInitiator) negotiateOffer(peer);
 }
@@ -1976,13 +2088,13 @@ function createPeerConnectionFor(peer, isInitiator) {
   pc.onconnectionstatechange = function() {
     // 承認・SDP/ICE交換がどこまで進んだかを切り分けやすくするため、全状態遷移を出力する
     // （new → connecting → connected、または failed/disconnected 等）
-    console.info('[vrm_stage:call] pc(' + peer.peerId + ').connectionState = ' + pc.connectionState);
+    diagInfo('RTC', 'pc(' + peer.peerId + ').connectionState = ' + pc.connectionState);
     renderCallParticipantsList();
     if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
       // 相手がクラッシュ/回線切断等で"leave"を送れないまま消えた場合の保険。
       // ルームの正式なメンバー管理（waitingPeers/bannedPeerIds/roster再送出）はホストが行うため、
       // ここではローカルの表示・リソースのみ後始末する（相手への通知は行わない）。
-      console.warn('[vrm_stage:call] connection to ' + peer.peerId + ' ' + pc.connectionState);
+      diagWarn('RTC', 'connection to ' + peer.peerId + ' ' + pc.connectionState);
       disconnectCallPeer(peer.peerId, (peer.displayName || peer.peerId) + ' との接続が切断されました');
     }
   };
@@ -1990,10 +2102,13 @@ function createPeerConnectionFor(peer, isInitiator) {
     // NAT越え・ファイアウォール起因の失敗はconnectionStateよりこちらに先に現れることが多い
     // （checking → connected/failed 等）。ICE自体が失敗している場合はTURN設定や
     // 「プライバシー保護（TURN中継）モード」への切替を検討する
-    console.info('[vrm_stage:call] pc(' + peer.peerId + ').iceConnectionState = ' + pc.iceConnectionState);
+    diagInfo('RTC', 'pc(' + peer.peerId + ').iceConnectionState = ' + pc.iceConnectionState);
+  };
+  pc.onsignalingstatechange = function() {
+    diagInfo('RTC', 'pc(' + peer.peerId + ').signalingState = ' + pc.signalingState);
   };
   pc.ondatachannel = function(e) {
-    console.info('[vrm_stage:call] ondatachannel(' + peer.peerId + ') label=' + e.channel.label);
+    diagInfo('DC', 'ondatachannel(' + peer.peerId + ') label=' + e.channel.label);
     wireDataChannel(peer, e.channel, e.channel.label);
   };
 
@@ -2014,13 +2129,17 @@ function negotiateOffer(peer) {
   peer.pc.createOffer().then(function(offer) {
     return peer.pc.setLocalDescription(offer);
   }).then(function() {
-    console.info('[vrm_stage:call] offer送信 → ' + peer.peerId + ' (sdp ' + peer.pc.localDescription.sdp.length + ' bytes)');
+    diagInfo('WS', 'offer送信 → ' + peer.peerId + ' (sdp ' + peer.pc.localDescription.sdp.length + ' bytes)');
     sendCallSignal(peer.peerId, 'offer', peer.pc.localDescription.sdp, null);
-  }).catch(function(err) { console.warn('[vrm_stage:call] createOffer failed', err); });
+  }).catch(function(err) {
+    console.warn('[vrm_stage:call] createOffer failed', err);
+    diagWarn('RTC', 'createOffer failed', err);
+  });
 }
 
 function sendCallSignal(toPeerId, signalType, sdp, candidate) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (signalType === 'candidate') diagInfo('WS', 'candidate送信 → ' + toPeerId);
   ws.send(JSON.stringify({
     type: 'vrm_call_signal',
     roomId: callState.roomId,
@@ -2032,6 +2151,24 @@ function sendCallSignal(toPeerId, signalType, sdp, candidate) {
   }));
 }
 
+// ICE Candidateの取りこぼし対策: setRemoteDescription()が完了する（＝peer.pc.remoteDescription
+// が非nullになる）前にcandidateが届くことがある（offer送信直後、相手のICE gatheringが
+// SDP交換より先に候補を見つけて送ってくるケース等）。setRemoteDescription完了前に
+// addIceCandidate()を呼ぶとInvalidStateErrorで失敗する実装があり、その場合は接続が
+// 確立できないまま"接続待ち"で止まって見える。届いた時点でremoteDescription未設定なら
+// peer.pendingCandidatesへ退避し、setRemoteDescription完了後にまとめて適用する。
+function flushPendingIceCandidates(peer) {
+  if (!peer.pendingCandidates || peer.pendingCandidates.length === 0) return;
+  var queued = peer.pendingCandidates;
+  peer.pendingCandidates = [];
+  diagInfo('RTC', 'pendingCandidates(' + peer.peerId + ') ' + queued.length + '件を適用します');
+  queued.forEach(function(candidate) {
+    peer.pc.addIceCandidate(candidate).catch(function(err) {
+      diagWarn('RTC', 'addIceCandidate(queued, ' + peer.peerId + ') failed', err);
+    });
+  });
+}
+
 function handleCallSignal(msg) {
   if (!callState.roomId || msg.roomId !== callState.roomId) return;
   if (msg.toPeerId !== callState.myPeerId) return;
@@ -2041,32 +2178,49 @@ function handleCallSignal(msg) {
     // 不具合1対策: 以前はここで完全に無言でdropしていたが、これは「roster/approveの処理が
     // signalTypeの到着より遅れている（もしくは失敗している）」ことの直接の兆候であり、
     // 承認フローが停止して見える不具合の切り分けに重要なため警告として出力する。
-    console.warn('[vrm_stage:call] signalType=' + msg.signalType + ' from=' + msg.fromPeerId
+    diagWarn('WS', 'signalType=' + msg.signalType + ' from=' + msg.fromPeerId
       + ' を無視: ロースターにこのpeerIdが存在しません（roster/approveの受信が遅れているか'
       + '失敗している可能性）');
     return; // ロースターに存在しない相手からのシグナルは無視する（承認フロー経由のみ許可）
   }
   if (!peer.pc) peer.pc = createPeerConnectionFor(peer, callState.myPeerId < msg.fromPeerId);
+  if (!peer.pendingCandidates) peer.pendingCandidates = [];
 
   if (msg.signalType === 'offer') {
-    console.info('[vrm_stage:call] offer受信 ← ' + msg.fromPeerId + ' (sdp ' + (msg.sdp || '').length + ' bytes)');
+    diagInfo('WS', 'offer受信 ← ' + msg.fromPeerId + ' (sdp ' + (msg.sdp || '').length + ' bytes)');
     peer.pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp }).then(function() {
+      flushPendingIceCandidates(peer);
       return peer.pc.createAnswer();
     }).then(function(answer) {
       return peer.pc.setLocalDescription(answer);
     }).then(function() {
-      console.info('[vrm_stage:call] answer送信 → ' + peer.peerId + ' (sdp ' + peer.pc.localDescription.sdp.length + ' bytes)');
+      diagInfo('WS', 'answer送信 → ' + peer.peerId + ' (sdp ' + peer.pc.localDescription.sdp.length + ' bytes)');
       sendCallSignal(peer.peerId, 'answer', peer.pc.localDescription.sdp, null);
-    }).catch(function(err) { console.warn('[vrm_stage:call] createAnswer failed', err); });
+    }).catch(function(err) {
+      console.warn('[vrm_stage:call] createAnswer failed', err);
+      diagWarn('RTC', 'offer処理/createAnswer failed (' + peer.peerId + ')', err);
+    });
   } else if (msg.signalType === 'answer') {
-    console.info('[vrm_stage:call] answer受信 ← ' + msg.fromPeerId + ' (sdp ' + (msg.sdp || '').length + ' bytes)');
-    peer.pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp }).catch(function(err) {
+    diagInfo('WS', 'answer受信 ← ' + msg.fromPeerId + ' (sdp ' + (msg.sdp || '').length + ' bytes)');
+    peer.pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp }).then(function() {
+      flushPendingIceCandidates(peer);
+    }).catch(function(err) {
       console.warn('[vrm_stage:call] setRemoteDescription(answer) failed', err);
+      diagWarn('RTC', 'setRemoteDescription(answer, ' + peer.peerId + ') failed', err);
     });
   } else if (msg.signalType === 'candidate' && msg.candidate) {
-    peer.pc.addIceCandidate(msg.candidate).catch(function(err) {
-      console.warn('[vrm_stage:call] addIceCandidate failed', err);
-    });
+    if (!peer.pc.remoteDescription || !peer.pc.remoteDescription.type) {
+      // まだofferもanswerも適用されていない → 退避して後で一括適用する
+      peer.pendingCandidates.push(msg.candidate);
+      diagInfo('RTC', 'candidate受信 ← ' + msg.fromPeerId + '（remoteDescription未設定のためキューへ退避、'
+        + peer.pendingCandidates.length + '件目）');
+    } else {
+      diagInfo('RTC', 'candidate受信 ← ' + msg.fromPeerId + ' → 即時適用');
+      peer.pc.addIceCandidate(msg.candidate).catch(function(err) {
+        console.warn('[vrm_stage:call] addIceCandidate failed', err);
+        diagWarn('RTC', 'addIceCandidate(' + peer.peerId + ') failed', err);
+      });
+    }
   }
 }
 
@@ -2074,12 +2228,15 @@ function handleCallSignal(msg) {
 
 function wireDataChannel(peer, channel, label) {
   channel.onclose = function() {
-    console.info('[vrm_stage:call] dataChannel(' + peer.peerId + ', ' + label + ') closed');
+    diagInfo('DC', 'dataChannel(' + peer.peerId + ', ' + label + ') closed');
+  };
+  channel.onerror = function(e) {
+    diagWarn('DC', 'dataChannel(' + peer.peerId + ', ' + label + ') error', (e && e.error) || e);
   };
   if (label === 'pose') {
     peer.dataChannel = channel;
     channel.onopen = function() {
-      console.info('[vrm_stage:call] dataChannel(' + peer.peerId + ', pose) open');
+      diagInfo('DC', 'dataChannel(' + peer.peerId + ', pose) open');
     };
     channel.onmessage = function(e) {
       try { applyRemotePeerPose(peer, JSON.parse(e.data)); } catch (_) {}
@@ -2089,7 +2246,7 @@ function wireDataChannel(peer, channel, label) {
     channel.binaryType = 'arraybuffer';
     channel.bufferedAmountLowThreshold = 262144;
     channel.onopen = function() {
-      console.info('[vrm_stage:call] dataChannel(' + peer.peerId + ', vrm) open'
+      diagInfo('DC', 'dataChannel(' + peer.peerId + ', vrm) open'
         + (!isDisplayMode && localVrmArrayBufferForCall
           ? ' → 自分のVRM送信開始 (' + localVrmArrayBufferForCall.byteLength + ' bytes)'
           : ' → 送信するVRMなし（Displayまたは未読込）'));
@@ -2151,13 +2308,19 @@ var localVrmFileNameForCall = null;
 function sendVrmOverDataChannel(peer, arrayBuffer, fileName) {
   var channel = peer.vrmChannel;
   if (!channel || channel.readyState !== 'open') return;
+  diagInfo('DC', 'VRM送信開始 → ' + peer.peerId + ' (' + fileName + ', ' + arrayBuffer.byteLength + ' bytes)');
   channel.send(JSON.stringify({ kind: 'vrm-start', fileName: fileName, size: arrayBuffer.byteLength }));
 
   var offset = 0;
+  var pauseCount = 0;
   function sendNextChunk() {
     if (!channel || channel.readyState !== 'open') return;
     while (offset < arrayBuffer.byteLength) {
       if (channel.bufferedAmount > CALL_VRM_SEND_BUFFER_LIMIT) {
+        pauseCount++;
+        diagInfo('DC', 'VRM送信一時停止 → ' + peer.peerId + '（送信バッファ超過、'
+          + Math.round(offset / arrayBuffer.byteLength * 100) + '%まで送信済み、'
+          + pauseCount + '回目の一時停止）');
         channel.onbufferedamountlow = function() { channel.onbufferedamountlow = null; sendNextChunk(); };
         return;
       }
@@ -2165,6 +2328,7 @@ function sendVrmOverDataChannel(peer, arrayBuffer, fileName) {
       channel.send(arrayBuffer.slice(offset, end));
       offset = end;
     }
+    diagInfo('DC', 'VRM送信完了 → ' + peer.peerId + ' (' + arrayBuffer.byteLength + ' bytes送信済み)');
     channel.send(JSON.stringify({ kind: 'vrm-end' }));
   }
   sendNextChunk();
@@ -2175,19 +2339,30 @@ function handleVrmChunkReceived(peer, data) {
     try {
       var msg = JSON.parse(data);
       if (msg.kind === 'vrm-start') {
-        console.info('[vrm_stage:call] VRM受信開始 ← ' + peer.peerId + ' (' + msg.fileName + ', ' + msg.size + ' bytes)');
+        diagInfo('VRM', '受信開始 ← ' + peer.peerId + ' (' + msg.fileName + ', ' + msg.size + ' bytes)');
         peer.vrmReceiveBuffer = { chunks: [], receivedSize: 0, totalSize: msg.size, fileName: msg.fileName };
       } else if (msg.kind === 'vrm-end') {
-        console.info('[vrm_stage:call] VRM受信完了 ← ' + peer.peerId + ' ('
-          + (peer.vrmReceiveBuffer ? peer.vrmReceiveBuffer.receivedSize : '?') + ' bytes受信)');
+        diagInfo('VRM', '受信完了 ← ' + peer.peerId + ' ('
+          + (peer.vrmReceiveBuffer ? peer.vrmReceiveBuffer.receivedSize : '?') + ' bytes受信) → デコード中…');
         finishRemoteVrmReceive(peer);
       }
     } catch (_) {}
     return;
   }
   if (!peer.vrmReceiveBuffer) return; // vrm-start未受信のチャンクは無視（順序保証チャンネルのため通常は発生しない）
-  peer.vrmReceiveBuffer.chunks.push(data);
-  peer.vrmReceiveBuffer.receivedSize += data.byteLength;
+  var buf = peer.vrmReceiveBuffer;
+  buf.chunks.push(data);
+  buf.receivedSize += data.byteLength;
+  // 25%刻みで進捗をログする（チャンクごとだと数百〜数千行になり得るため間引く）
+  if (buf.totalSize > 0) {
+    var pct = Math.floor(buf.receivedSize / buf.totalSize * 100);
+    var milestone = Math.floor(pct / 25) * 25;
+    if (milestone > (buf.lastLoggedMilestone || 0)) {
+      buf.lastLoggedMilestone = milestone;
+      diagInfo('VRM', '受信中 ← ' + peer.peerId + ' ' + milestone + '% ('
+        + buf.receivedSize + ' / ' + buf.totalSize + ' bytes)');
+    }
+  }
 }
 
 function finishRemoteVrmReceive(peer) {
@@ -2208,22 +2383,22 @@ function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
   // 描画）と同一人物の二重表示になる。VMCは常にlocalVrmだけに適用し、リモートアバターは
   // 純粋な他人（DataChannel経由の他ピア）のみに限定するため、ここでロード自体を行わない。
   if (isDisplayMode && callState.shadowParentPeerId && peer.peerId === callState.shadowParentPeerId) {
-    console.info('[vrm_stage:call] ' + peer.peerId + ' は自分自身の分身のためVRMロードをスキップ'
+    diagInfo('VRM', peer.peerId + ' は自分自身の分身のためロードをスキップ'
       + '（localVrmが既にホスト自身のモデルを表示している）');
     return;
   }
   var blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: 'model/gltf-binary' }));
   peer.pendingBlobUrl = blobUrl;
+  diagInfo('VRM', peer.peerId + ' のパース開始 (' + arrayBuffer.byteLength + ' bytes)');
   gltfLoader.load(blobUrl, function(gltf) {
     URL.revokeObjectURL(blobUrl); // ロード完了後は即座に解放する（メモリ限定保持）
     if (peer.pendingBlobUrl === blobUrl) peer.pendingBlobUrl = null;
     var vrm = gltf.userData.vrm;
     if (!vrm) {
-      console.warn('[vrm_stage:call] ' + peer.peerId + ' のVRMパース失敗: gltf.userData.vrmが空です'
-        + '（受信データが壊れている可能性）');
+      diagWarn('VRM', peer.peerId + ' のパース失敗: gltf.userData.vrmが空です（受信データが壊れている可能性）');
       return;
     }
-    console.info('[vrm_stage:call] ' + peer.peerId + ' のVRMロード成功 → シーンに追加します');
+    diagInfo('VRM', peer.peerId + ' のロード成功 → シーンに追加し、右側スロットへ配置します');
     disposeCallPeerVrm(peer); // 差し替え時は古いモデルを完全破棄してから入れ替える
     if (vrm.meta && vrm.meta.metaVersion === '0' && VRMUtils.rotateVRM0) VRMUtils.rotateVRM0(vrm);
     peer.vrm = vrm;
@@ -2234,6 +2409,7 @@ function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
     URL.revokeObjectURL(blobUrl);
     if (peer.pendingBlobUrl === blobUrl) peer.pendingBlobUrl = null;
     console.warn('[vrm_stage:call] remote VRM load failed', err);
+    diagWarn('VRM', peer.peerId + ' のロード失敗', err);
   });
 }
 
@@ -2477,6 +2653,7 @@ function renderCallParticipantsList() {
 function initCallUi() {
   loadUserSettings();
   initCallModeUi();
+  initRtcDiagPanel();
 
   var createBtn = document.getElementById('callCreateRoomBtn');
   if (createBtn) createBtn.addEventListener('click', callCreateRoom);
