@@ -1617,15 +1617,35 @@ function generatePeerId() {
   return 'p_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
-function makeCallPeer(peerId, displayName) {
+function makeCallPeer(peerId, displayName, isShadow, shadowOfPeerId) {
   return {
     peerId: peerId,
     displayName: displayName || peerId,
     pendingBlobUrl: null,
     vrm: null,
     layout: { slot: 'center', offsetX: 0, offsetY: 0, offsetZ: 0, scale: 1 },
-    lastPoseRig: null
+    lastPoseRig: null,
+    // 不具合3対策: このピアが「誰かのDisplay分身（shadow join）」かどうか、
+    // および分身であれば本体（shadowOfPeerId）を全クライアントが判別できるようにする
+    // （以前はDisplay自身のcallState.shadowParentPeerIdだけが頼りで、他のクライアントや
+    // ホスト自身の視点からは「このピアは分身なので取得不要」と判断できなかった）。
+    isShadow: !!isShadow,
+    shadowOfPeerId: shadowOfPeerId || null
   };
+}
+
+// 不具合3対策: このpeerId/peerが「絶対にVRMをフェッチ・ロードすべきでない」相手かどうかを
+// 判定する。対象は次の3種類。
+// - 自分自身（myPeerId） … applyRosterUpdate()側で既に除外済みだが、防御的に二重チェックする
+// - Shadowピア（peer.isShadow） … Displayが自動参加するための「分身」であり、
+//   本体（shadowOfPeerId）とは別に独立したVRMを持たない
+// - 自分自身の分身（peer.shadowOfPeerId === myPeerId） … 自分のDisplay用shadow接続であり、
+//   二重表示防止のためどの視点からもVRMを取得しない
+function isNonFetchablePeer(peerId, peer) {
+  if (peerId === callState.myPeerId) return true;
+  if (peer && peer.isShadow) return true;
+  if (peer && peer.shadowOfPeerId === callState.myPeerId) return true;
+  return false;
 }
 
 // ── 🌐 通話診断コンソール（画面内ログビューア） ────────────────────────────
@@ -1842,9 +1862,13 @@ function rosterDisplayName(peerId) {
 
 function broadcastRoster() {
   if (!callState.isHost) return;
-  var members = [{ peerId: callState.myPeerId, displayName: callState.myDisplayName }];
+  var members = [{ peerId: callState.myPeerId, displayName: callState.myDisplayName, isShadow: false, shadowOfPeerId: null }];
   Object.keys(callState.peers).forEach(function(peerId) {
-    members.push({ peerId: peerId, displayName: callState.peers[peerId].displayName });
+    var p = callState.peers[peerId];
+    members.push({
+      peerId: peerId, displayName: p.displayName,
+      isShadow: !!p.isShadow, shadowOfPeerId: p.shadowOfPeerId || null
+    });
   });
   sendRoomControl({ action: 'roster', members: members });
 }
@@ -1856,10 +1880,12 @@ function applyRosterUpdate(msg) {
     seen[m.peerId] = true;
     if (m.peerId === callState.myPeerId) return;
     if (!callState.peers[m.peerId]) {
-      callState.peers[m.peerId] = makeCallPeer(m.peerId, m.displayName);
+      callState.peers[m.peerId] = makeCallPeer(m.peerId, m.displayName, m.isShadow, m.shadowOfPeerId);
       newPeerIds.push(m.peerId);
     } else {
       callState.peers[m.peerId].displayName = m.displayName;
+      callState.peers[m.peerId].isShadow = !!m.isShadow;
+      callState.peers[m.peerId].shadowOfPeerId = m.shadowOfPeerId || null;
     }
   });
   Object.keys(callState.peers).forEach(function(peerId) {
@@ -1873,7 +1899,15 @@ function applyRosterUpdate(msg) {
     // 新規ピアが自分より先にVRMをアップロード済みだった「後から参加」のケースを、
     // vrm_peer_model_readyイベントを待たずに拾うため、各新規ピアのモデルを能動的に取得する
     // （未アップロードならHTTP 404が返るだけで、fetchPeerVrmModel()側で静かに無視される）。
-    newPeerIds.forEach(function(peerId) { fetchPeerVrmModel(callState.peers[peerId]); });
+    // 不具合3対策: Shadowピア・自分自身の分身は絶対にフェッチしない。
+    newPeerIds.forEach(function(peerId) {
+      var peer = callState.peers[peerId];
+      if (isNonFetchablePeer(peerId, peer)) {
+        diagInfo('VRM', peerId + ' はShadow/自己ピアのためVRM取得をスキップ');
+        return;
+      }
+      fetchPeerVrmModel(peer);
+    });
   }
 }
 
@@ -1955,7 +1989,7 @@ function handleRoomControl(msg) {
       return; // 現在のロースターに存在しない相手の「分身」は信用しない
     }
     callState.peers[msg.fromPeerId] = makeCallPeer(
-      msg.fromPeerId, rosterDisplayName(msg.shadowOfPeerId) + '(Display)');
+      msg.fromPeerId, rosterDisplayName(msg.shadowOfPeerId) + '(Display)', true, msg.shadowOfPeerId);
     diagInfo('WS', 'shadow_join_request自動承認: ' + msg.fromPeerId
       + ' (shadowOf=' + msg.shadowOfPeerId + ')');
     sendRoomControl({ action: 'approve', targetPeerId: msg.fromPeerId });
@@ -2027,6 +2061,34 @@ function handleRoomControl(msg) {
 // （type: "vrm_peer_motion"）。受信側はroomId一致・自分以外・ロースターに実在する
 // 送信元かどうかでフィルタする。
 
+// 不具合4対策: lastHeadRig/currentMouthOpenはapplyFaceRig()（Kalidokit・Webカメラ経由）
+// でのみ更新され、onVmcUpdateReceived()（VMC/VSeeFace等の外部トラッキング経由）では
+// 一切更新されない。そのためホストがVMCでトラッキングしている間、通話相手へは
+// 常に凍結した（VMC開始前の）頭部姿勢が送信され続け、「ゲスト側でホストが動かない」
+// という症状になっていた。VMC受信中は、VMCが直接書き込んだ実際のボーン回転を
+// 読み戻して送信データを作る。
+//
+// applyRemotePeerPose()側は受信したhead.x/y/zにHEAD_FOLLOW/NECK_FOLLOWを掛けてから
+// 適用する（＝lastHeadRigは「配分前の生値」という前提の wire format）。VMCはhead
+// ボーンへ最終的な回転を直接設定するため、そのままでは二重に減衰してしまう。
+// HEAD_FOLLOWで逆算しておくことで、既存の受信側ロジック・プロトコルを変更せずに
+// 実際の頭部回転を正しく伝える。
+function computeHeadRigForCallBroadcast() {
+  if (isVmcActive() && currentBones.head && currentBones.head.node) {
+    var r = currentBones.head.node.rotation;
+    return { x: r.x / HEAD_FOLLOW, y: r.y / HEAD_FOLLOW, z: r.z / HEAD_FOLLOW };
+  }
+  return lastHeadRig;
+}
+
+function computeMouthOpenForCallBroadcast() {
+  if (isVmcActive() && localVrm && localVrm.expressionManager) {
+    var v = localVrm.expressionManager.getValue('aa');
+    if (typeof v === 'number') return v;
+  }
+  return currentMouthOpen;
+}
+
 function maybeSendCallPoseUpdate() {
   if (isDisplayMode) return; // Displayは自前のトラッキングを持たないため送信しない
   if (!callState.roomId || Object.keys(callState.peers).length === 0) return;
@@ -2038,7 +2100,8 @@ function maybeSendCallPoseUpdate() {
     type: 'vrm_peer_motion',
     roomId: callState.roomId,
     fromPeerId: callState.myPeerId,
-    head: lastHeadRig, eye: lastEyeRig, pupil: lastPupilRig, mouthOpen: currentMouthOpen
+    head: computeHeadRigForCallBroadcast(), eye: lastEyeRig, pupil: lastPupilRig,
+    mouthOpen: computeMouthOpenForCallBroadcast()
   }));
 }
 
@@ -2132,8 +2195,10 @@ function removeVrmModelFromServer(peerId) {
 // ロースターに実在するpeerIdかどうかだけで宛先フィルタする）。
 function handlePeerModelReady(data) {
   if (!callState.roomId) return; // 通話ルームに参加していなければ無視
-  if (data.peerId === callState.myPeerId) return; // 自分自身のechoは無視
   var peer = callState.peers[data.peerId];
+  // 不具合3対策: 自分自身・Shadowピア・自分自身の分身は絶対にフェッチしない
+  // （data.peerId === myPeerIdのケースもisNonFetchablePeer内でカバーされる）。
+  if (isNonFetchablePeer(data.peerId, peer)) return;
   if (!peer) return; // ロースターに存在しない相手のモデルは無視する（承認フロー経由のみ許可）
   fetchPeerVrmModel(peer);
 }
@@ -2167,6 +2232,14 @@ function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
   if (isDisplayMode && callState.shadowParentPeerId && peer.peerId === callState.shadowParentPeerId) {
     diagInfo('VRM', peer.peerId + ' は自分自身の分身のためロードをスキップ'
       + '（localVrmが既にホスト自身のモデルを表示している）');
+    return;
+  }
+  // 不具合3対策: 上記はDisplay自身が「自分の分身」を認識するケースのみをカバーしていた。
+  // ここでは全クライアント共通で、Shadowピア（誰かのDisplay分身）や自分自身の分身のVRMを
+  // 最終防御としてロードしない（isNonFetchablePeer()参照。通常はfetchPeerVrmModel()呼び出し
+  // 前のガードで弾かれるため、ここに到達するのは異常系のみのはず）。
+  if (isNonFetchablePeer(peer.peerId, peer)) {
+    diagInfo('VRM', peer.peerId + ' はShadow/自己ピアのためロードをスキップ');
     return;
   }
   var blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: 'model/gltf-binary' }));
