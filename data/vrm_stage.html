@@ -460,6 +460,21 @@ var PeerConnectionClass = window.RTCPeerConnection ||
 var SessionDescriptionClass = window.RTCSessionDescription || globalThis.RTCSessionDescription || null;
 var IceCandidateClass = window.RTCIceCandidate || globalThis.RTCIceCandidate || null;
 
+// RTCPeerConnectionの唯一の生成箇所（createPeerConnectionFor()）はこの関数だけを通す。
+// window.isSecureContextも併せて報告することで、「非localhostのプレーンHTTP経由でLAN内の
+// 別PCから開いている」等、セキュアコンテキスト起因でWebRTC系APIが制限されているケースも
+// 診断ログから一目で切り分けられるようにする（127.0.0.1/localhostは非HTTPSでもセキュアな
+// オリジンとして扱われるが、招待コード経由でホストのLAN IPへ直接アクセスした場合は該当しない）。
+function createPC(config) {
+  var PC = window.RTCPeerConnection || window.webkitRTCPeerConnection ||
+    window.mozRTCPeerConnection || globalThis.RTCPeerConnection;
+  if (!PC) {
+    throw new Error('RTCPeerConnection が見つかりません。window.isSecureContext=' + window.isSecureContext
+      + ' location.origin=' + window.location.origin);
+  }
+  return new PC(config);
+}
+
 // WsServer（プラグイン）が待ち受けるポート。WebSocketだけでなく、
 // vrm_stage.html本体・/vrm/model のHTTP配信も同じポートで行う。
 var WS_PORT      = 8765;
@@ -2092,7 +2107,10 @@ function ensureConnectionToPeer(peerId) {
     // 例外を投げて以降の処理（Offer生成等）が一切実行されないまま無言で止まる。
     // 原因が一目でわかるよう、ここで明示的に検知して警告する。
     diagWarn('RTC', 'このブラウザ環境はRTCPeerConnectionに対応していません（' + peerId + 'への接続不可）。'
-      + 'プライバシー保護系のブラウザ拡張機能がWebRTCを無効化していないか確認してください。');
+      + 'window.isSecureContext=' + window.isSecureContext + ' location.origin=' + window.location.origin
+      + '。プライバシー保護系のブラウザ拡張機能がWebRTCを無効化していないか、'
+      + 'localhost/127.0.0.1以外の非HTTPSアドレス（招待コード経由でホストのLAN IPへ直接アクセスした場合等）で'
+      + 'セキュアコンテキストの制限に該当していないか確認してください。');
     return;
   }
 
@@ -2150,7 +2168,7 @@ function createPeerConnectionFor(peer, isInitiator) {
   var config = { iceServers: iceServers };
   if (callState.connectionMode === 'relay') config.iceTransportPolicy = 'relay';
 
-  var pc = new PeerConnectionClass(config);
+  var pc = createPC(config);
 
   pc.onicecandidate = function(e) {
     if (e.candidate) sendCallSignal(peer.peerId, 'candidate', null, e.candidate.toJSON());
@@ -2280,8 +2298,10 @@ function handleCallSignal(msg) {
   if (!peer.pc) {
     if (!PeerConnectionClass) {
       diagWarn('RTC', 'このブラウザ環境はRTCPeerConnectionに対応していないため' + msg.signalType
-        + 'を処理できません（' + peer.peerId + '）。プライバシー保護系のブラウザ拡張機能が'
-        + 'WebRTCを無効化していないか確認してください。');
+        + 'を処理できません（' + peer.peerId + '）。window.isSecureContext=' + window.isSecureContext
+        + ' location.origin=' + window.location.origin + '。プライバシー保護系のブラウザ拡張機能が'
+        + 'WebRTCを無効化していないか、非HTTPSアドレスでのアクセスによるセキュアコンテキストの'
+        + '制限に該当していないか確認してください。');
       return;
     }
     try {
