@@ -168,7 +168,7 @@ html.mode-display #uiToggleTab {
   line-height: 1.4;
   margin-bottom: 8px;
 }
-#callModeSelect, #callJoinCodeInput {
+#callJoinCodeInput {
   background: rgba(255,255,255,0.1);
   border: 1px solid rgba(255,255,255,0.25);
   color: #fff;
@@ -352,22 +352,13 @@ html.mode-display #uiToggleTab {
   </details>
 
   <details id="callPanel">
-    <summary>🎥 マルチユーザー通話（最大8人）</summary>
+    <summary>🧑‍🤝‍🧑 マルチアバター同期（最大8人）</summary>
 
-    <div class="uiRow">
-      <label for="callModeSelect">接続モード</label>
-      <select id="callModeSelect">
-        <option value="p2p">P2P直接（低遅延・IP開示あり）</option>
-        <option value="relay">プライバシー保護（TURN中継）</option>
-      </select>
-    </div>
-    <div id="callP2pWarning" class="callWarning">
-      ⚠️ 注意: P2P通信では相手にIPアドレスが開示されます。配信中の初対面ゲストや一般募集では
-      使用せず、信頼できる知人間でのみ利用してください。
-    </div>
-    <div id="callRelayNotice" class="callWarning" style="display:none; background:rgba(80,160,255,0.18); border-color:#5aa0ff;">
-      🛡️ プライバシー保護モード: 全通信がTURN中継サーバー経由になり、IPアドレスは相手に開示されません
-      （<span id="callTurnStatus">TURN設定を確認中…</span>）。
+    <div class="callWarning" style="background:rgba(80,160,255,0.18); border-color:#5aa0ff;">
+      🛡️ 全ての通信はホストのWsServer（このOBSプラグイン）を経由するWebSocket中継方式です
+      （WebRTC/P2P接続は使用しません。相手にIPアドレスは開示されません）。
+      現バージョンはモーション（姿勢・表情）とVRMモデルの同期のみに対応しており、
+      音声通話機能は含まれません。
     </div>
 
     <div id="callRoomSetup">
@@ -446,34 +437,6 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 // Display   : トラッキングは行わず、WebSocketで受信した姿勢データをVRMへ反映するだけ（受信側、
 //             OBSブラウザソースに ?mode=display 付きURLを登録して使う）。
 var isDisplayMode = new URLSearchParams(window.location.search).get('mode') === 'display';
-
-// ── WebRTC関連クラスのグローバル参照フォールバック ──────────────────────
-// 通常のブラウザ/OBSブラウザソースでは標準の window.RTCPeerConnection が常に存在するはずだが、
-// 一部の環境（プライバシー系拡張機能がWebRTC IPリーク対策として上書き・削除する場合等）で
-// 未定義になるケースへの保険として、ベンダープレフィックス付きの旧名やglobalThis経由の参照も
-// フォールバックとして試す。コード中で直接 `RTCPeerConnection` 等のグローバル識別子を
-// 参照している箇所は無いか、以降はすべてこれらの変数経由で参照する。
-var PeerConnectionClass = window.RTCPeerConnection ||
-                           window.webkitRTCPeerConnection ||
-                           window.mozRTCPeerConnection ||
-                           globalThis.RTCPeerConnection || null;
-var SessionDescriptionClass = window.RTCSessionDescription || globalThis.RTCSessionDescription || null;
-var IceCandidateClass = window.RTCIceCandidate || globalThis.RTCIceCandidate || null;
-
-// RTCPeerConnectionの唯一の生成箇所（createPeerConnectionFor()）はこの関数だけを通す。
-// window.isSecureContextも併せて報告することで、「非localhostのプレーンHTTP経由でLAN内の
-// 別PCから開いている」等、セキュアコンテキスト起因でWebRTC系APIが制限されているケースも
-// 診断ログから一目で切り分けられるようにする（127.0.0.1/localhostは非HTTPSでもセキュアな
-// オリジンとして扱われるが、招待コード経由でホストのLAN IPへ直接アクセスした場合は該当しない）。
-function createPC(config) {
-  var PC = window.RTCPeerConnection || window.webkitRTCPeerConnection ||
-    window.mozRTCPeerConnection || globalThis.RTCPeerConnection;
-  if (!PC) {
-    throw new Error('RTCPeerConnection が見つかりません。window.isSecureContext=' + window.isSecureContext
-      + ' location.origin=' + window.location.origin);
-  }
-  return new PC(config);
-}
 
 // WsServer（プラグイン）が待ち受けるポート。WebSocketだけでなく、
 // vrm_stage.html本体・/vrm/model のHTTP配信も同じポートで行う。
@@ -988,14 +951,16 @@ function loadVrmBinary(arrayBuffer, fileName, opts) {
     } else if (opts.upload !== false && !isDisplayMode) {
       console.info('[vrm_stage:model] ゲスト役のため/vrm/modelへのアップロードをスキップします'
         + '（roomId=' + callState.roomId + '）。ホストのDisplayに表示されるモデルを'
-        + '上書きしないため。VRMは通話のDataChannel経由でのみ相手に配信されます。');
+        + '上書きしないため。VRMは通話のWebSocket中継経由でのみ相手に配信されます。');
     }
 
-    // マルチユーザー通話用に自分自身のVRMバイナリを保持しておく（新規ピア接続時に送信する。
-    // loadVrmBinary()は常に「自分自身のアバター」の読み込みにのみ使われる関数のため無条件で良い。
-    // リモート参加者のVRMは別関数 loadRemoteParticipantVrmBinary() が扱い、ここには影響しない）
+    // マルチユーザー通話用に自分自身のVRMバイナリを保持しておく（ルーム参加者へWebSocket経由で
+    // 送信する。loadVrmBinary()は常に「自分自身のアバター」の読み込みにのみ使われる関数のため
+    // 無条件で良い。リモート参加者のVRMは別関数 loadRemoteParticipantVrmBinary() が扱い、
+    // ここには影響しない）
     localVrmArrayBufferForCall = arrayBuffer;
     localVrmFileNameForCall = fileName;
+    broadcastOwnVrmModel(true); // 既にルーム参加中に(再)読み込みした場合、即座に相手へ送り直す
   }, undefined, function(err) {
     URL.revokeObjectURL(blobUrl);
     setStatus('VRM読み込み失敗: ' + (err && err.message ? err.message : String(err)));
@@ -1082,9 +1047,9 @@ function autoLoadCachedVrm() {
 // 共有してしまう。ゲスト役タブが自分の（通話送信用の）VRMを読み込むと、この共有スロットを
 // 上書きし、"vrm_model_sync"がブロードキャストされて、ホストのOBS Displayが
 // ゲストのモデルへ切り替わってしまう（＝ホストのモデルが消える不具合の実体）。
-// ゲストの通話用モデルはWebRTC DataChannel（localVrmArrayBufferForCall経由）でのみ相手に
-// 配信されるため、/vrm/modelへは同期不要。ルームに「ゲストとして」参加している間だけ
-// アップロードを止めることで、この上書きを防ぐ。
+// ゲストの通話用モデルはWebSocket中継（localVrmArrayBufferForCall経由、
+// broadcastOwnVrmModel()参照）でのみ相手に配信されるため、/vrm/modelへは同期不要。
+// ルームに「ゲストとして」参加している間だけアップロードを止めることで、この上書きを防ぐ。
 function shouldSyncLocalModelToPlugin() {
   return !callState.roomId || isLocalOperatorHost();
 }
@@ -1241,7 +1206,7 @@ function onFaceMeshResults(results) {
   if (riggedFace) applyFaceRig(riggedFace);
 }
 
-var localMediaStream = null; // マルチユーザー通話でマイク音声トラックを各ピアへ送るために保持
+var localMediaStream = null; // マイク音声解析（ローカルのリップシンク用）のために保持
 
 function startTracking() {
   webcamVideo = document.getElementById('webcamVideo');
@@ -1289,9 +1254,9 @@ function stopTracking() {
   if (webcamVideo) webcamVideo.srcObject = null;
   var previewVideo = document.getElementById('cameraPreview');
   if (previewVideo) previewVideo.srcObject = null;
-  // 注意: マルチユーザー通話中にVMC受信等でこの関数が呼ばれると、通話へ送信していた
-  // マイク音声トラックも一緒に停止する（カメラ/マイクとVMCが排他という既存仕様の帰結）。
-  // 通話中はVMCとの併用を避けるか、通話の音声は別途確保する運用を想定した既知の制限。
+  // VMC受信等でこの関数が呼ばれると、ローカルのリップシンク解析用ストリームも停止する
+  // （カメラ/マイクとVMCが排他という既存仕様の帰結。マルチユーザー通話は現在WebSocket
+  // 経由のモーション/VRM同期のみのため、この停止による通話側への影響は無い）。
   localMediaStream = null;
 
   if (audioCtx) { audioCtx.close(); audioCtx = null; analyser = null; }
@@ -1504,11 +1469,13 @@ function connectWs() {
       // vrm_vmc_update はプラグイン（VmcReceiver）が発信元であり、ControllerもDisplayも
       // 対等なWebSocketクライアントとして受け取る（自分自身のechoではないため両方で処理する）
       if (data.type === 'vrm_vmc_update') { onVmcUpdateReceived(data); return; }
-      // マルチユーザー通話（ルーム管理・WebRTCシグナリング）はプラグイン中継のみで
+      // マルチユーザー通話（ルーム管理・モーション/VRM同期）はプラグイン中継のみで
       // サーバー発信ではないが、ControllerとDisplayが「別ピア」として独立参加する設計のため
       // vrm_vmc_updateと同様にisDisplayModeガードの外側で処理する
       if (data.type === 'vrm_room_control') { handleRoomControl(data); return; }
-      if (data.type === 'vrm_call_signal') { handleCallSignal(data); return; }
+      if (data.type === 'vrm_peer_motion') { handlePeerMotionReceived(data); return; }
+      if (data.type === 'vrm_peer_model_start' || data.type === 'vrm_peer_model_chunk'
+        || data.type === 'vrm_peer_model_end') { handlePeerModelControl(data); return; }
 
       if (!isDisplayMode) return; // 以下はController自身が発信したデータのechoなので無視する
       if (data.type === 'vrm_pose_update') onPoseUpdateReceived(data);
@@ -1558,15 +1525,17 @@ function connectWsWatchdog() {
 // ── マルチユーザーVRM通話（フェーズ2） ──────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════
 //
-// アーキテクチャ概要:
-// - シグナリング（誰と誰をつなぐかのSDP/ICE交換、ルーム管理）は既存のWsServer経由
-//   （type: "vrm_room_control" / "vrm_call_signal"）。WsServerは2026-08-24よりINADDR_ANYで
-//   待ち受けるため、ホストと同一LAN上にいる参加者のブラウザからも到達できる
-//   （インターネット越しの離れた相手と直接つなぐ場合は、ホスト側でポート開放/VPN等が別途必要。
-//   これは本機能のスコープ外）。
-// - 実際の音声・データ通信はWebRTC（RTCPeerConnection）でピア間を直接（またはTURN中継で）
-//   接続するフルメッシュ構成（最大8人 = 最大28コネクション）。SFU（中継サーバーでの合成）は
-//   実装していない。
+// アーキテクチャ概要（2026-08-24 WebSocket完全中継方式へ全面リファクタリング）:
+// - WebRTC（RTCPeerConnection/RTCDataChannel）は一切使用しない。ルーム管理・モーション同期・
+//   VRMモデル配信のすべてを、既存のWsServer（プラグイン、type: "vrm_room_control" /
+//   "vrm_peer_motion" / "vrm_peer_model_start" / "vrm_peer_model_chunk" /
+//   "vrm_peer_model_end"）経由のWebSocketメッセージ中継のみで実現する。
+//   WebRTCのSDP/ICE交換・RTCPeerConnection未対応環境・NAT越え失敗等に起因する接続不能
+//   （2026-08-24の一連の"接続待ち"問題）を構造的に無くすための設計変更。
+// - WsServerはメッセージの内容を解釈せず、type/roomIdに応じて接続中の全WebSocketクライアントへ
+//   ブロードキャストするだけの単純な中継サーバーとして動作する（他のvrm_*系メッセージと同じ
+//   「宛先フィルタはJS側で行う」方針）。ホストのOBSプラグイン（＝WsServer）を経由するため、
+//   WebRTCのようなP2P直接接続は発生せず、相手にIPアドレスは開示されない。
 // - Controller/DisplayはそれぞれWsServerの独立したクライアントとして、原則独立に
 //   ルームへ「参加」する。ただし同一PC上のDisplay（OBSブラウザソース）は、招待コード入力や
 //   待合室承認のUIを操作できない（#uiPanelごと非表示のため）。そこでControllerは自分の
@@ -1575,20 +1544,21 @@ function connectWsWatchdog() {
 //   ホストに『信頼できるControllerの分身です』と自己申告して自動参加する）を行う。
 //   ホスト側は shadow_join_request の shadowOfPeerId が現在のロースターに実在する場合のみ
 //   自動承認する。
-// - VRMバイナリは各ピアへ RTCDataChannel（'vrm'チャンネル）でチャンク転送し、受信側は
-//   ArrayBuffer/Blobのみでモデルを構築する。IndexedDB・localStorageへは一切保存しない
-//   （要件3）。退出・キック時は disposeCallPeerVrm() でジオメトリ/マテリアル/テクスチャを
-//   dispose() し、Blob URLも revokeObjectURL() する。
+// - VRMバイナリは各ピアが自分自身の分をBase64エンコードしてチャンク分割し、WebSocket経由で
+//   ルーム全体へブロードキャストする（要件2）。受信側は自分のロースターに存在する送信元からの
+//   ものだけを受け取り、ArrayBuffer/Blobのみでモデルを構築する。IndexedDB・localStorageへは
+//   一切保存しない（要件3）。退出・キック時は disposeCallPeerVrm() でジオメトリ/マテリアル/
+//   テクスチャを dispose() し、Blob URLも revokeObjectURL() する。
+// - 音声通話（マイク音声の相互配信）はWebRTCに依存していた機能のため、本リファクタリングで
+//   撤去した。現在はモーション（頭部/表情/口の開き）とVRMモデルの同期のみに対応する。
 
 var CALL_MAX_PARTICIPANTS   = 8;
 var CALL_POSE_SEND_INTERVAL_MS = 33; // 約30Hz
-var CALL_VRM_CHUNK_SIZE = 16 * 1024; // RTCDataChannel向けの安全なチャンクサイズ
-var CALL_VRM_SEND_BUFFER_LIMIT = 1024 * 1024; // このバイト数を超えたら送信を一旦止める
-var CALL_ICE_SERVERS_STUN = [{ urls: 'stun:stun.l.google.com:19302' }];
+var CALL_VRM_WS_CHUNK_BYTES = 64 * 1024; // WebSocket 1メッセージあたりの生バイト数（Base64化で約1.33倍になる）
+var CALL_VRM_BROADCAST_MIN_INTERVAL_MS = 2000; // 短時間にroster更新が連続しても送信し過ぎないようにする
 var CALL_SLOT_OFFSET_X = { left: -0.6, center: 0, right: 0.6 };
 
 var callState = {
-  connectionMode: 'p2p', // 'p2p' | 'relay'
   roomId: null,
   inviteCode: null,
   isHost: false,
@@ -1601,15 +1571,14 @@ var callState = {
   // 「自分（ローカル操作者）の分身」であるピアのIDを覚えておき、そのピア経由で届く
   // VRM/姿勢はlocalVrm（VMC/ローカル姿勢で駆動する自分自身の描画）と二重表示に
   // なるため無視する（不具合1対策：VMCは常にlocalVrmだけに適用し、リモートは
-  // DataChannel経由のデータだけを適用するよう分離する）。
+  // WebSocket経由の他ピアのデータだけを適用するよう分離する）。
   shadowParentPeerId: null,
   // shadow joinしている相手（＝ローカル操作者）がホストかどうか。Controller自身の場合は
   // isHostをそのまま使うため未使用（isLocalOperatorHost()参照）。
   localIsHost: false
 };
-var turnConfig = null;       // user_settings.jsonから読み込んだTURN設定（{urls,username,credential}）
-var callAudioCtx = null;     // 参加者音声のボリューム調整用（Web Audio、<audio>要素は消音してこちら経由で再生）
 var lastCallPoseSendTime = 0;
+var lastVrmBroadcastAt = 0; // broadcastOwnVrmModel()の連続送信を間引くためのタイムスタンプ
 
 function generateRandomCode(chars, len) {
   var s = '';
@@ -1629,90 +1598,19 @@ function makeCallPeer(peerId, displayName) {
   return {
     peerId: peerId,
     displayName: displayName || peerId,
-    pc: null,
-    dataChannel: null,   // 姿勢データ用（'pose'）
-    vrmChannel: null,    // VRMバイナリ転送用（'vrm'）
     vrmReceiveBuffer: null,
     pendingBlobUrl: null,
     vrm: null,
-    audioEl: null,
-    gainNode: null,
-    volume: 1.0,
-    muted: false,
     layout: { slot: 'center', offsetX: 0, offsetY: 0, offsetZ: 0, scale: 1 },
-    lastPoseRig: null,
-    // ICE Candidateの取りこぼし対策: setRemoteDescription()完了前に届いたcandidateを
-    // 一時的に退避しておくキュー（handleCallSignal参照）。
-    pendingCandidates: [],
-    // 接続確立タイムアウトの監視用タイマーID（ensureConnectionToPeer参照）。
-    // ICEはNAT越えに失敗した場合でも"failed"へ遷移せず"checking"のまま無期限に
-    // 止まることがあるため、connectionstatechangeだけに頼らず能動的に検知する。
-    connectTimeoutId: null
+    lastPoseRig: null
   };
 }
 
-// ── TURN設定の読み込み（user_settings.json、Git管理外） ─────────────────
-
-function loadUserSettings() {
-  return fetch(HTTP_BASE + '/vrm/user_settings.json').then(function(res) {
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    return res.json();
-  }).then(function(json) {
-    if (json && json.turn && json.turn.urls) {
-      turnConfig = json.turn;
-      setDebugText('callTurnStatus', 'TURNサーバー設定を読み込みました');
-    } else {
-      turnConfig = null;
-      setDebugText('callTurnStatus', 'TURN未設定（user_settings.jsonにturn.urlsがありません）');
-    }
-  }).catch(function() {
-    turnConfig = null;
-    setDebugText('callTurnStatus', 'user_settings.jsonが見つかりません（TURN中継は利用不可）');
-  });
-}
-
-// ── 接続モード切り替え + セキュリティ警告UI ──────────────────────────────
-
-function initCallModeUi() {
-  var select = document.getElementById('callModeSelect');
-  var p2pWarning = document.getElementById('callP2pWarning');
-  var relayNotice = document.getElementById('callRelayNotice');
-  if (!select) return;
-
-  function applyModeUi() {
-    var isP2p = callState.connectionMode === 'p2p';
-    if (p2pWarning) p2pWarning.style.display = isP2p ? 'block' : 'none';
-    if (relayNotice) relayNotice.style.display = isP2p ? 'none' : 'block';
-  }
-
-  select.value = callState.connectionMode;
-  applyModeUi();
-
-  select.addEventListener('change', function() {
-    if (select.value === 'p2p') {
-      var ok = confirm(
-        '⚠️ 注意: P2P通信では相手にIPアドレスが開示されます。\n\n' +
-        '配信中の初対面ゲストや一般募集では使用せず、信頼できる知人間でのみ利用してください。\n\n' +
-        'このモードを選択しますか？');
-      if (!ok) { select.value = callState.connectionMode; return; }
-    } else if (select.value === 'relay' && !turnConfig) {
-      alert('TURNサーバーが未設定のため、プライバシー保護モードは利用できません。\n' +
-            'data/user_settings.json にTURNサーバー情報を設定してください。');
-      select.value = callState.connectionMode;
-      return;
-    }
-    callState.connectionMode = select.value;
-    applyModeUi();
-    // 既存接続のiceTransportPolicyは接続確立時に固定されるため遡って変わらない
-    setCallStatus('接続モードを変更しました（既存の接続には影響しません。次回の新規参加から適用されます）。');
-  });
-}
-
-// ── 🌐 WebRTC通話診断コンソール（画面内ログビューア） ──────────────────────
-// OBS Display（CEFブラウザソース）はDevToolsを開くのが手間なため、承認〜SDP/ICE交換〜
-// DataChannel〜リモートVRMロードまでの一連のイベントを画面内で直接確認できるようにする。
-// [WS]=ルーム管理/シグナリングメッセージの送受信、[RTC]=PeerConnectionの状態遷移、
-// [DC]=DataChannelの開閉・転送、[VRM]=リモート参加者VRMのロード進捗、の4カテゴリで色分けする。
+// ── 🌐 通話診断コンソール（画面内ログビューア） ────────────────────────────
+// OBS Display（CEFブラウザソース）はDevToolsを開くのが手間なため、承認〜モーション/VRM同期
+// までの一連のイベントを画面内で直接確認できるようにする。
+// [WS]=ルーム管理・モーション/VRM転送メッセージの送受信、[VRM]=リモート参加者VRMのロード進捗、
+// の2カテゴリで色分けする（WebRTC撤去に伴い、以前あった[RTC]/[DC]カテゴリは廃止した）。
 
 var RTC_DIAG_MAX_LINES = 100;
 var rtcDiagEntries = []; // { ts, text, warn } のリングバッファ（コピー用に保持）
@@ -1734,8 +1632,7 @@ function logDiag(category, message, isWarn) {
   var container = document.getElementById('rtcDiagLog');
   if (!container) return;
   var row = document.createElement('div');
-  var catClass = category === 'WS' ? 'rtcDiagWs' : category === 'RTC' ? 'rtcDiagRtc'
-    : category === 'DC' ? 'rtcDiagDc' : category === 'VRM' ? 'rtcDiagVrm' : '';
+  var catClass = category === 'WS' ? 'rtcDiagWs' : category === 'VRM' ? 'rtcDiagVrm' : '';
   row.className = 'rtcDiagRow' + (isWarn ? ' rtcDiagWarn' : (catClass ? ' ' + catClass : ''));
   var timeSpan = document.createElement('span');
   timeSpan.className = 'rtcDiagTime';
@@ -1931,17 +1828,26 @@ function broadcastRoster() {
 
 function applyRosterUpdate(msg) {
   var seen = {};
+  var hasNewPeer = false;
   (msg.members || []).forEach(function(m) {
     seen[m.peerId] = true;
     if (m.peerId === callState.myPeerId) return;
-    if (!callState.peers[m.peerId]) callState.peers[m.peerId] = makeCallPeer(m.peerId, m.displayName);
-    else callState.peers[m.peerId].displayName = m.displayName;
-    ensureConnectionToPeer(m.peerId);
+    if (!callState.peers[m.peerId]) {
+      callState.peers[m.peerId] = makeCallPeer(m.peerId, m.displayName);
+      hasNewPeer = true; // WebSocket中継方式では「接続確立」の概念が無いため、
+                          // 新規ピア検出＝自分のVRMを（再）送信するトリガーとする
+    } else {
+      callState.peers[m.peerId].displayName = m.displayName;
+    }
   });
   Object.keys(callState.peers).forEach(function(peerId) {
     if (!seen[peerId]) disconnectCallPeer(peerId, null);
   });
   renderCallParticipantsList();
+  // 自分より後に参加した相手は、自分が過去に送ったVRMブロードキャストを受け取れていない
+  // （WsServerは受信履歴を保持せず、その時点で接続中のクライアントへ配るだけのため）。
+  // roster更新のたびに新規ピアの有無をチェックし、いれば自分のVRMを再送する。
+  if (hasNewPeer) broadcastOwnVrmModel(false);
 }
 
 function approveWaitingPeer(peerId) {
@@ -1953,7 +1859,7 @@ function approveWaitingPeer(peerId) {
   diagInfo('WS', '承認: ' + peerId + ' (' + waiting.displayName + ') → approve送信 + roster配信');
   sendRoomControl({ action: 'approve', targetPeerId: peerId });
   broadcastRoster();
-  ensureConnectionToPeer(peerId);
+  broadcastOwnVrmModel(true); // 承認直後に確実に自分のVRMを送る
   renderCallParticipantsList();
 }
 
@@ -2027,7 +1933,7 @@ function handleRoomControl(msg) {
       + ' (shadowOf=' + msg.shadowOfPeerId + ')');
     sendRoomControl({ action: 'approve', targetPeerId: msg.fromPeerId });
     broadcastRoster();
-    ensureConnectionToPeer(msg.fromPeerId);
+    broadcastOwnVrmModel(true);
     renderCallParticipantsList();
     return;
   }
@@ -2049,6 +1955,7 @@ function handleRoomControl(msg) {
     // rosterが遅延・欠落した場合でも「セクションは出るがリストは空のまま」という
     // 中途半端な表示にならないようにする（自分の分も含めてrealCallPeerIds()を評価し直す）。
     renderCallParticipantsList();
+    broadcastOwnVrmModel(true); // 承認された時点で、既にルームにいる相手へ自分のVRMを送る
     return;
   }
   if (action === 'reject') {
@@ -2087,324 +1994,33 @@ function handleRoomControl(msg) {
   }
 }
 
-// ── WebRTC接続の確立（フルメッシュ） ──────────────────────────────────────
-// ピア間の「どちらがofferを送るか」はpeerId文字列比較で決定し、両者が同時にofferを
-// 送り合う（グレア）を避ける。データチャンネルもofferを送る側だけが作成する
-// （createDataChannel側の変更がSDPに載り、相手はondatachannelで受け取る）。
-
-var CALL_CONNECT_TIMEOUT_MS = 15000; // この時間内にconnectedへ到達しなければ診断ログを出す
-
-function ensureConnectionToPeer(peerId) {
-  var peer = callState.peers[peerId];
-  if (!peer || peer.pc) return;
-  var isInitiator = callState.myPeerId < peerId;
-  diagInfo('RTC', 'ensureConnectionToPeer(' + peerId + ') isInitiator=' + isInitiator);
-
-  if (!PeerConnectionClass) {
-    // 通常のOBSブラウザソース/一般的なブラウザでは起こり得ないが、万一実行環境が
-    // WebRTCに対応していない場合（またはプライバシー系拡張機能等でRTCPeerConnectionが
-    // 上書き・削除されている場合）、new RTCPeerConnection()がReferenceError/TypeErrorで
-    // 例外を投げて以降の処理（Offer生成等）が一切実行されないまま無言で止まる。
-    // 原因が一目でわかるよう、ここで明示的に検知して警告する。
-    diagWarn('RTC', 'このブラウザ環境はRTCPeerConnectionに対応していません（' + peerId + 'への接続不可）。'
-      + 'window.isSecureContext=' + window.isSecureContext + ' location.origin=' + window.location.origin
-      + '。プライバシー保護系のブラウザ拡張機能がWebRTCを無効化していないか、'
-      + 'localhost/127.0.0.1以外の非HTTPSアドレス（招待コード経由でホストのLAN IPへ直接アクセスした場合等）で'
-      + 'セキュアコンテキストの制限に該当していないか確認してください。');
-    return;
-  }
-
-  try {
-    // isInitiator=true時にここでcreateOffer()まで完了させる（onnegotiationneededには
-    // 依存しない。createPeerConnectionFor()内でDataChannelを同期的に作成した直後、
-    // 呼び出し元のこの関数からnegotiateOffer()を明示的に呼ぶ設計）。
-    peer.pc = createPeerConnectionFor(peer, isInitiator);
-  } catch (err) {
-    // createPeerConnectionFor()は同期処理のみ（RTCPeerConnection生成・
-    // createDataChannel・イベントハンドラ登録）だが、万一ここで例外が起きると
-    // peer.pcが未設定のまま以降のOffer送信が一切走らず、ログ上は
-    // 「isInitiator=true」の直後で完全に停止して見える。呼び出し元
-    // （applyRosterUpdate等のforEachループ）まで例外を伝播させると他ピアの接続まで
-    // 巻き添えで止まりかねないため、ここで捕捉して診断ログに出す。
-    diagWarn('RTC', 'createPeerConnectionFor(' + peerId + ') で例外が発生し接続を開始できません', err);
-    return;
-  }
-
-  startConnectTimeoutWatchdog(peer);
-
-  if (isInitiator) negotiateOffer(peer);
-}
-
-// ICEはNAT越えに失敗した場合でも"failed"へ遷移せず"checking"のまま無期限に止まる
-// ことがあり、connectionstatechange任せでは「接続待ち」の停止に気づけないケースがある。
-// 一定時間内にconnectedへ到達しなければ、現在の各種stateを診断ログへまとめて出す。
-function startConnectTimeoutWatchdog(peer) {
-  if (peer.connectTimeoutId) clearTimeout(peer.connectTimeoutId);
-  peer.connectTimeoutId = setTimeout(function() {
-    peer.connectTimeoutId = null;
-    if (!peer.pc || peer.pc.connectionState === 'connected') return;
-    diagWarn('RTC', peer.peerId + ' への接続が' + (CALL_CONNECT_TIMEOUT_MS / 1000) + '秒経っても確立しません'
-      + '（connectionState=' + peer.pc.connectionState
-      + ' iceConnectionState=' + peer.pc.iceConnectionState
-      + ' signalingState=' + peer.pc.signalingState + '）。'
-      + 'signalingStateが"stable"以外のまま止まっている場合はOffer/Answerが相手に届いていない、'
-      + 'iceConnectionStateが"checking"のまま止まっている場合はNAT越えに失敗している可能性が高く、'
-      + '「プライバシー保護（TURN中継）モード」への切替を検討してください。');
-  }, CALL_CONNECT_TIMEOUT_MS);
-}
-
-function clearConnectTimeoutWatchdog(peer) {
-  if (peer.connectTimeoutId) {
-    clearTimeout(peer.connectTimeoutId);
-    peer.connectTimeoutId = null;
-  }
-}
-
-function createPeerConnectionFor(peer, isInitiator) {
-  var iceServers = CALL_ICE_SERVERS_STUN.slice();
-  if (turnConfig && turnConfig.urls) {
-    iceServers.push({ urls: turnConfig.urls, username: turnConfig.username, credential: turnConfig.credential });
-  }
-  var config = { iceServers: iceServers };
-  if (callState.connectionMode === 'relay') config.iceTransportPolicy = 'relay';
-
-  var pc = createPC(config);
-
-  pc.onicecandidate = function(e) {
-    if (e.candidate) sendCallSignal(peer.peerId, 'candidate', null, e.candidate.toJSON());
-  };
-  pc.ontrack = function(e) {
-    if (e.streams && e.streams[0]) attachRemoteAudioTrack(peer, e.streams[0]);
-  };
-  pc.onconnectionstatechange = function() {
-    // 承認・SDP/ICE交換がどこまで進んだかを切り分けやすくするため、全状態遷移を出力する
-    // （new → connecting → connected、または failed/disconnected 等）
-    diagInfo('RTC', 'pc(' + peer.peerId + ').connectionState = ' + pc.connectionState);
-    renderCallParticipantsList();
-    if (pc.connectionState === 'connected') clearConnectTimeoutWatchdog(peer);
-    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-      // 相手がクラッシュ/回線切断等で"leave"を送れないまま消えた場合の保険。
-      // ルームの正式なメンバー管理（waitingPeers/bannedPeerIds/roster再送出）はホストが行うため、
-      // ここではローカルの表示・リソースのみ後始末する（相手への通知は行わない）。
-      diagWarn('RTC', 'connection to ' + peer.peerId + ' ' + pc.connectionState);
-      disconnectCallPeer(peer.peerId, (peer.displayName || peer.peerId) + ' との接続が切断されました');
-    }
-  };
-  pc.oniceconnectionstatechange = function() {
-    // NAT越え・ファイアウォール起因の失敗はconnectionStateよりこちらに先に現れることが多い
-    // （checking → connected/failed 等）。ICE自体が失敗している場合はTURN設定や
-    // 「プライバシー保護（TURN中継）モード」への切替を検討する
-    diagInfo('RTC', 'pc(' + peer.peerId + ').iceConnectionState = ' + pc.iceConnectionState);
-  };
-  pc.onsignalingstatechange = function() {
-    diagInfo('RTC', 'pc(' + peer.peerId + ').signalingState = ' + pc.signalingState);
-  };
-  pc.ondatachannel = function(e) {
-    diagInfo('DC', 'ondatachannel(' + peer.peerId + ') label=' + e.channel.label);
-    wireDataChannel(peer, e.channel, e.channel.label);
-  };
-
-  // Controllerのみローカルのマイク音声を送る（Displayは受信専用として動作する）
-  if (!isDisplayMode && localMediaStream) {
-    localMediaStream.getAudioTracks().forEach(function(track) { pc.addTrack(track, localMediaStream); });
-  }
-
-  if (isInitiator) {
-    wireDataChannel(peer, pc.createDataChannel('pose', { ordered: false, maxRetransmits: 0 }), 'pose');
-    wireDataChannel(peer, pc.createDataChannel('vrm', { ordered: true }), 'vrm');
-  }
-
-  return pc;
-}
-
-function negotiateOffer(peer) {
-  peer.pc.createOffer().then(function(offer) {
-    return peer.pc.setLocalDescription(offer);
-  }).then(function() {
-    diagInfo('WS', 'offer送信 → ' + peer.peerId + ' (sdp ' + peer.pc.localDescription.sdp.length + ' bytes)');
-    sendCallSignal(peer.peerId, 'offer', peer.pc.localDescription.sdp, null);
-  }).catch(function(err) {
-    console.warn('[vrm_stage:call] createOffer failed', err);
-    diagWarn('RTC', 'createOffer failed', err);
-  });
-}
-
-function sendCallSignal(toPeerId, signalType, sdp, candidate) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  if (signalType === 'candidate') diagInfo('WS', 'candidate送信 → ' + toPeerId);
-  ws.send(JSON.stringify({
-    type: 'vrm_call_signal',
-    roomId: callState.roomId,
-    fromPeerId: callState.myPeerId,
-    toPeerId: toPeerId,
-    signalType: signalType,
-    sdp: sdp,
-    candidate: candidate
-  }));
-}
-
-// setRemoteDescription()/addIceCandidate()はプレーンなinitオブジェクト（RTCSessionDescriptionInit/
-// RTCIceCandidateInit）を直接渡せる仕様のため、本来はRTCSessionDescription/RTCIceCandidateの
-// 明示的なインスタンス化は不要（three-vrm系のコードもこの前提で書かれている）。ここでは
-// SessionDescriptionClass/IceCandidateClassが利用可能な環境ではインスタンス化して渡し、
-// 利用できない場合はプレーンオブジェクトのままフォールバックする（どちらでも仕様上は動作する）。
-function makeSessionDescription(init) {
-  try {
-    return SessionDescriptionClass ? new SessionDescriptionClass(init) : init;
-  } catch (_) {
-    return init; // 環境依存でコンストラクタが使えない場合はプレーンオブジェクトにフォールバック
-  }
-}
-function makeIceCandidate(init) {
-  try {
-    return IceCandidateClass ? new IceCandidateClass(init) : init;
-  } catch (_) {
-    return init;
-  }
-}
-
-// ICE Candidateの取りこぼし対策: setRemoteDescription()が完了する（＝peer.pc.remoteDescription
-// が非nullになる）前にcandidateが届くことがある（offer送信直後、相手のICE gatheringが
-// SDP交換より先に候補を見つけて送ってくるケース等）。setRemoteDescription完了前に
-// addIceCandidate()を呼ぶとInvalidStateErrorで失敗する実装があり、その場合は接続が
-// 確立できないまま"接続待ち"で止まって見える。届いた時点でremoteDescription未設定なら
-// peer.pendingCandidatesへ退避し、setRemoteDescription完了後にまとめて適用する。
-function flushPendingIceCandidates(peer) {
-  if (!peer.pendingCandidates || peer.pendingCandidates.length === 0) return;
-  var queued = peer.pendingCandidates;
-  peer.pendingCandidates = [];
-  diagInfo('RTC', 'pendingCandidates(' + peer.peerId + ') ' + queued.length + '件を適用します');
-  queued.forEach(function(candidate) {
-    peer.pc.addIceCandidate(makeIceCandidate(candidate)).catch(function(err) {
-      diagWarn('RTC', 'addIceCandidate(queued, ' + peer.peerId + ') failed', err);
-    });
-  });
-}
-
-function handleCallSignal(msg) {
-  if (!callState.roomId || msg.roomId !== callState.roomId) return;
-  if (msg.toPeerId !== callState.myPeerId) return;
-
-  var peer = callState.peers[msg.fromPeerId];
-  if (!peer) {
-    // 不具合1対策: 以前はここで完全に無言でdropしていたが、これは「roster/approveの処理が
-    // signalTypeの到着より遅れている（もしくは失敗している）」ことの直接の兆候であり、
-    // 承認フローが停止して見える不具合の切り分けに重要なため警告として出力する。
-    diagWarn('WS', 'signalType=' + msg.signalType + ' from=' + msg.fromPeerId
-      + ' を無視: ロースターにこのpeerIdが存在しません（roster/approveの受信が遅れているか'
-      + '失敗している可能性）');
-    return; // ロースターに存在しない相手からのシグナルは無視する（承認フロー経由のみ許可）
-  }
-  if (!peer.pc) {
-    if (!PeerConnectionClass) {
-      diagWarn('RTC', 'このブラウザ環境はRTCPeerConnectionに対応していないため' + msg.signalType
-        + 'を処理できません（' + peer.peerId + '）。window.isSecureContext=' + window.isSecureContext
-        + ' location.origin=' + window.location.origin + '。プライバシー保護系のブラウザ拡張機能が'
-        + 'WebRTCを無効化していないか、非HTTPSアドレスでのアクセスによるセキュアコンテキストの'
-        + '制限に該当していないか確認してください。');
-      return;
-    }
-    try {
-      peer.pc = createPeerConnectionFor(peer, callState.myPeerId < msg.fromPeerId);
-      startConnectTimeoutWatchdog(peer);
-    } catch (err) {
-      diagWarn('RTC', 'createPeerConnectionFor(' + peer.peerId + ') で例外が発生し' + msg.signalType + 'を処理できません', err);
-      return;
-    }
-  }
-  if (!peer.pendingCandidates) peer.pendingCandidates = [];
-
-  if (msg.signalType === 'offer') {
-    diagInfo('WS', 'offer受信 ← ' + msg.fromPeerId + ' (sdp ' + (msg.sdp || '').length + ' bytes)');
-    peer.pc.setRemoteDescription(makeSessionDescription({ type: 'offer', sdp: msg.sdp })).then(function() {
-      flushPendingIceCandidates(peer);
-      return peer.pc.createAnswer();
-    }).then(function(answer) {
-      return peer.pc.setLocalDescription(answer);
-    }).then(function() {
-      diagInfo('WS', 'answer送信 → ' + peer.peerId + ' (sdp ' + peer.pc.localDescription.sdp.length + ' bytes)');
-      sendCallSignal(peer.peerId, 'answer', peer.pc.localDescription.sdp, null);
-    }).catch(function(err) {
-      console.warn('[vrm_stage:call] createAnswer failed', err);
-      diagWarn('RTC', 'offer処理/createAnswer failed (' + peer.peerId + ')', err);
-    });
-  } else if (msg.signalType === 'answer') {
-    diagInfo('WS', 'answer受信 ← ' + msg.fromPeerId + ' (sdp ' + (msg.sdp || '').length + ' bytes)');
-    peer.pc.setRemoteDescription(makeSessionDescription({ type: 'answer', sdp: msg.sdp })).then(function() {
-      flushPendingIceCandidates(peer);
-    }).catch(function(err) {
-      console.warn('[vrm_stage:call] setRemoteDescription(answer) failed', err);
-      diagWarn('RTC', 'setRemoteDescription(answer, ' + peer.peerId + ') failed', err);
-    });
-  } else if (msg.signalType === 'candidate' && msg.candidate) {
-    if (!peer.pc.remoteDescription || !peer.pc.remoteDescription.type) {
-      // まだofferもanswerも適用されていない → 退避して後で一括適用する
-      peer.pendingCandidates.push(msg.candidate);
-      diagInfo('RTC', 'candidate受信 ← ' + msg.fromPeerId + '（remoteDescription未設定のためキューへ退避、'
-        + peer.pendingCandidates.length + '件目）');
-    } else {
-      diagInfo('RTC', 'candidate受信 ← ' + msg.fromPeerId + ' → 即時適用');
-      peer.pc.addIceCandidate(makeIceCandidate(msg.candidate)).catch(function(err) {
-        console.warn('[vrm_stage:call] addIceCandidate failed', err);
-        diagWarn('RTC', 'addIceCandidate(' + peer.peerId + ') failed', err);
-      });
-    }
-  }
-}
-
-// ── データチャンネル（姿勢データ + VRMバイナリ転送） ──────────────────────
-
-function wireDataChannel(peer, channel, label) {
-  channel.onclose = function() {
-    diagInfo('DC', 'dataChannel(' + peer.peerId + ', ' + label + ') closed');
-  };
-  channel.onerror = function(e) {
-    diagWarn('DC', 'dataChannel(' + peer.peerId + ', ' + label + ') error', (e && e.error) || e);
-  };
-  if (label === 'pose') {
-    peer.dataChannel = channel;
-    channel.onopen = function() {
-      diagInfo('DC', 'dataChannel(' + peer.peerId + ', pose) open');
-    };
-    channel.onmessage = function(e) {
-      try { applyRemotePeerPose(peer, JSON.parse(e.data)); } catch (_) {}
-    };
-  } else if (label === 'vrm') {
-    peer.vrmChannel = channel;
-    channel.binaryType = 'arraybuffer';
-    channel.bufferedAmountLowThreshold = 262144;
-    channel.onopen = function() {
-      diagInfo('DC', 'dataChannel(' + peer.peerId + ', vrm) open'
-        + (!isDisplayMode && localVrmArrayBufferForCall
-          ? ' → 自分のVRM送信開始 (' + localVrmArrayBufferForCall.byteLength + ' bytes)'
-          : ' → 送信するVRMなし（Displayまたは未読込）'));
-      if (!isDisplayMode && localVrmArrayBufferForCall) {
-        sendVrmOverDataChannel(peer, localVrmArrayBufferForCall, localVrmFileNameForCall);
-      }
-    };
-    channel.onmessage = function(e) { handleVrmChunkReceived(peer, e.data); };
-  }
-}
-
-function hasActiveCallPeers() {
-  return Object.keys(callState.peers).some(function(id) {
-    var p = callState.peers[id];
-    return p.dataChannel && p.dataChannel.readyState === 'open';
-  });
-}
+// ── モーション同期（WebSocket経由、約30Hz） ────────────────────────────────
+// 以前はRTCDataChannel（'pose'）で各ピアへ個別送信していたが、WebSocket中継方式では
+// WsServerへ1回送るだけで、サーバー側が接続中の全クライアントへブロードキャストする
+// （type: "vrm_peer_motion"）。受信側はroomId一致・自分以外・ロースターに実在する
+// 送信元かどうかでフィルタする。
 
 function maybeSendCallPoseUpdate() {
-  if (isDisplayMode || !hasActiveCallPeers()) return; // Displayは自前のトラッキングを持たないため送信しない
+  if (isDisplayMode) return; // Displayは自前のトラッキングを持たないため送信しない
+  if (!callState.roomId || Object.keys(callState.peers).length === 0) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
   var now = performance.now();
   if (now - lastCallPoseSendTime < CALL_POSE_SEND_INTERVAL_MS) return;
   lastCallPoseSendTime = now;
-  var payload = JSON.stringify({ head: lastHeadRig, eye: lastEyeRig, pupil: lastPupilRig, mouthOpen: currentMouthOpen });
-  Object.keys(callState.peers).forEach(function(peerId) {
-    var peer = callState.peers[peerId];
-    if (peer.dataChannel && peer.dataChannel.readyState === 'open') {
-      try { peer.dataChannel.send(payload); } catch (_) {}
-    }
-  });
+  ws.send(JSON.stringify({
+    type: 'vrm_peer_motion',
+    roomId: callState.roomId,
+    fromPeerId: callState.myPeerId,
+    head: lastHeadRig, eye: lastEyeRig, pupil: lastPupilRig, mouthOpen: currentMouthOpen
+  }));
+}
+
+function handlePeerMotionReceived(data) {
+  if (!callState.roomId || data.roomId !== callState.roomId) return;
+  if (data.fromPeerId === callState.myPeerId) return; // 自分自身のechoは無視
+  var peer = callState.peers[data.fromPeerId];
+  if (!peer) return; // ロースターに存在しない相手からのモーションは無視する（承認フロー経由のみ許可）
+  applyRemotePeerPose(peer, data);
 }
 
 function applyRemotePeerPose(peer, data) {
@@ -2428,68 +2044,104 @@ function applyRemotePeerPose(peer, data) {
   }
 }
 
+// ── VRMモデル配信（WebSocket経由、Base64チャンク転送） ──────────────────────
+// 以前はRTCDataChannel（'vrm'）で各ピアへArrayBufferを直接送っていたが、WebSocket中継方式では
+// バイナリをBase64文字列化してJSONメッセージとしてWsServerへ送る（type: "vrm_peer_model_start"/
+// "vrm_peer_model_chunk"/"vrm_peer_model_end"）。WsServer.broadcast()は任意サイズのテキスト
+// メッセージを部分送信なく送り切る実装（sendAll()）になっているため、この方式でも確実に届く。
+
 // VRMバイナリの送信元保持（自分自身のアバターのみ。要件3によりリモート参加者分は
 // 受信後すぐdisposeし、ここには保持しない）
 var localVrmArrayBufferForCall = null;
 var localVrmFileNameForCall = null;
 
-function sendVrmOverDataChannel(peer, arrayBuffer, fileName) {
-  var channel = peer.vrmChannel;
-  if (!channel || channel.readyState !== 'open') return;
-  diagInfo('DC', 'VRM送信開始 → ' + peer.peerId + ' (' + fileName + ', ' + arrayBuffer.byteLength + ' bytes)');
-  channel.send(JSON.stringify({ kind: 'vrm-start', fileName: fileName, size: arrayBuffer.byteLength }));
-
-  var offset = 0;
-  var pauseCount = 0;
-  function sendNextChunk() {
-    if (!channel || channel.readyState !== 'open') return;
-    while (offset < arrayBuffer.byteLength) {
-      if (channel.bufferedAmount > CALL_VRM_SEND_BUFFER_LIMIT) {
-        pauseCount++;
-        diagInfo('DC', 'VRM送信一時停止 → ' + peer.peerId + '（送信バッファ超過、'
-          + Math.round(offset / arrayBuffer.byteLength * 100) + '%まで送信済み、'
-          + pauseCount + '回目の一時停止）');
-        channel.onbufferedamountlow = function() { channel.onbufferedamountlow = null; sendNextChunk(); };
-        return;
-      }
-      var end = Math.min(offset + CALL_VRM_CHUNK_SIZE, arrayBuffer.byteLength);
-      channel.send(arrayBuffer.slice(offset, end));
-      offset = end;
-    }
-    diagInfo('DC', 'VRM送信完了 → ' + peer.peerId + ' (' + arrayBuffer.byteLength + ' bytes送信済み)');
-    channel.send(JSON.stringify({ kind: 'vrm-end' }));
+function arrayBufferChunkToBase64(buffer, offset, len) {
+  var bytes = new Uint8Array(buffer, offset, len);
+  var binary = '';
+  var STEP = 8192; // String.fromCharCode.applyの引数上限を避けるため小分けにする
+  for (var i = 0; i < bytes.length; i += STEP) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + STEP));
   }
-  sendNextChunk();
+  return btoa(binary);
 }
 
-function handleVrmChunkReceived(peer, data) {
-  if (typeof data === 'string') {
-    try {
-      var msg = JSON.parse(data);
-      if (msg.kind === 'vrm-start') {
-        diagInfo('VRM', '受信開始 ← ' + peer.peerId + ' (' + msg.fileName + ', ' + msg.size + ' bytes)');
-        peer.vrmReceiveBuffer = { chunks: [], receivedSize: 0, totalSize: msg.size, fileName: msg.fileName };
-      } else if (msg.kind === 'vrm-end') {
-        diagInfo('VRM', '受信完了 ← ' + peer.peerId + ' ('
-          + (peer.vrmReceiveBuffer ? peer.vrmReceiveBuffer.receivedSize : '?') + ' bytes受信) → デコード中…');
-        finishRemoteVrmReceive(peer);
-      }
-    } catch (_) {}
-    return;
+function base64ToUint8Array(base64) {
+  var binary = atob(base64);
+  var bytes = new Uint8Array(binary.length);
+  for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+// 不具合2対策の延長: WsServerはメッセージの配信履歴を保持しない単純な中継のため、
+// 自分がVRMを送信した「後」に参加してきた相手には届かない。ルーム参加者の増減や
+// 承認イベントのたびに呼び出し、force=falseの場合はCALL_VRM_BROADCAST_MIN_INTERVAL_MSで
+// 間引く（短時間に複数人を承認した場合等の連続送信を防ぐ）。
+function broadcastOwnVrmModel(force) {
+  if (isDisplayMode) return; // Displayは自分自身の（VMCで動く）localVrmを持つが、
+                              // その送信元は常にController側のため、Display自身は送信しない
+  if (!localVrmArrayBufferForCall) return;
+  if (!callState.roomId) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  var now = performance.now();
+  if (!force && now - lastVrmBroadcastAt < CALL_VRM_BROADCAST_MIN_INTERVAL_MS) return;
+  lastVrmBroadcastAt = now;
+  sendVrmModelOverWs(localVrmArrayBufferForCall, localVrmFileNameForCall);
+}
+
+function sendVrmModelOverWs(arrayBuffer, fileName) {
+  var total = arrayBuffer.byteLength;
+  diagInfo('VRM', '自分のVRMをルームへ送信開始 (' + fileName + ', ' + total + ' bytes)');
+  ws.send(JSON.stringify({
+    type: 'vrm_peer_model_start', roomId: callState.roomId, fromPeerId: callState.myPeerId,
+    fileName: fileName, size: total
+  }));
+  var offset = 0, seq = 0;
+  while (offset < total) {
+    var len = Math.min(CALL_VRM_WS_CHUNK_BYTES, total - offset);
+    var b64 = arrayBufferChunkToBase64(arrayBuffer, offset, len);
+    ws.send(JSON.stringify({
+      type: 'vrm_peer_model_chunk', roomId: callState.roomId, fromPeerId: callState.myPeerId,
+      seq: seq, data: b64
+    }));
+    offset += len;
+    seq++;
   }
-  if (!peer.vrmReceiveBuffer) return; // vrm-start未受信のチャンクは無視（順序保証チャンネルのため通常は発生しない）
-  var buf = peer.vrmReceiveBuffer;
-  buf.chunks.push(data);
-  buf.receivedSize += data.byteLength;
-  // 25%刻みで進捗をログする（チャンクごとだと数百〜数千行になり得るため間引く）
-  if (buf.totalSize > 0) {
-    var pct = Math.floor(buf.receivedSize / buf.totalSize * 100);
-    var milestone = Math.floor(pct / 25) * 25;
-    if (milestone > (buf.lastLoggedMilestone || 0)) {
-      buf.lastLoggedMilestone = milestone;
-      diagInfo('VRM', '受信中 ← ' + peer.peerId + ' ' + milestone + '% ('
-        + buf.receivedSize + ' / ' + buf.totalSize + ' bytes)');
+  ws.send(JSON.stringify({
+    type: 'vrm_peer_model_end', roomId: callState.roomId, fromPeerId: callState.myPeerId, totalChunks: seq
+  }));
+  diagInfo('VRM', '自分のVRM送信完了 (' + seq + 'チャンク)');
+}
+
+// vrm_peer_model_start/chunk/endの3種をまとめて扱う（ws.onmessage参照）。
+function handlePeerModelControl(data) {
+  if (!callState.roomId || data.roomId !== callState.roomId) return;
+  if (data.fromPeerId === callState.myPeerId) return; // 自分自身のechoは無視
+  var peer = callState.peers[data.fromPeerId];
+  if (!peer) return; // ロースターに存在しない相手からのVRMは無視する（承認フロー経由のみ許可）
+
+  if (data.type === 'vrm_peer_model_start') {
+    diagInfo('VRM', '受信開始 ← ' + data.fromPeerId + ' (' + data.fileName + ', ' + data.size + ' bytes)');
+    peer.vrmReceiveBuffer = { chunks: [], receivedSize: 0, totalSize: data.size, fileName: data.fileName, lastLoggedMilestone: 0 };
+  } else if (data.type === 'vrm_peer_model_chunk') {
+    if (!peer.vrmReceiveBuffer) return; // start未受信のchunkは無視（順序保証されたWebSocket接続のため通常は発生しない）
+    var bytes = base64ToUint8Array(data.data);
+    var buf = peer.vrmReceiveBuffer;
+    buf.chunks.push(bytes);
+    buf.receivedSize += bytes.byteLength;
+    // 25%刻みで進捗をログする（チャンクごとだと数百行になり得るため間引く）
+    if (buf.totalSize > 0) {
+      var pct = Math.floor(buf.receivedSize / buf.totalSize * 100);
+      var milestone = Math.floor(pct / 25) * 25;
+      if (milestone > (buf.lastLoggedMilestone || 0)) {
+        buf.lastLoggedMilestone = milestone;
+        diagInfo('VRM', '受信中 ← ' + data.fromPeerId + ' ' + milestone + '% ('
+          + buf.receivedSize + ' / ' + buf.totalSize + ' bytes)');
+      }
     }
+  } else if (data.type === 'vrm_peer_model_end') {
+    diagInfo('VRM', '受信完了 ← ' + data.fromPeerId + ' ('
+      + (peer.vrmReceiveBuffer ? peer.vrmReceiveBuffer.receivedSize : '?') + ' bytes受信) → デコード中…');
+    finishRemoteVrmReceive(peer);
   }
 }
 
@@ -2498,7 +2150,7 @@ function finishRemoteVrmReceive(peer) {
   if (!buf) return;
   var combined = new Uint8Array(buf.receivedSize);
   var pos = 0;
-  buf.chunks.forEach(function(chunk) { combined.set(new Uint8Array(chunk), pos); pos += chunk.byteLength; });
+  buf.chunks.forEach(function(chunk) { combined.set(chunk, pos); pos += chunk.byteLength; });
   peer.vrmReceiveBuffer = null;
   loadRemoteParticipantVrmBinary(peer, combined.buffer, buf.fileName);
 }
@@ -2509,7 +2161,7 @@ function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
   // 不具合1対策: このピアが「自分自身（ローカル操作者）の分身」（shadow join用の
   // 自己接続）の場合、そのVRM/姿勢はlocalVrm（VMC/ローカル姿勢で駆動する自分自身の
   // 描画）と同一人物の二重表示になる。VMCは常にlocalVrmだけに適用し、リモートアバターは
-  // 純粋な他人（DataChannel経由の他ピア）のみに限定するため、ここでロード自体を行わない。
+  // 純粋な他人（WebSocket経由の他ピア）のみに限定するため、ここでロード自体を行わない。
   if (isDisplayMode && callState.shadowParentPeerId && peer.peerId === callState.shadowParentPeerId) {
     diagInfo('VRM', peer.peerId + ' は自分自身の分身のためロードをスキップ'
       + '（localVrmが既にホスト自身のモデルを表示している）');
@@ -2539,41 +2191,6 @@ function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
     console.warn('[vrm_stage:call] remote VRM load failed', err);
     diagWarn('VRM', peer.peerId + ' のロード失敗', err);
   });
-}
-
-// ── 音声（参加者ごとの<audio>要素 + 個別音量/ミュート） ───────────────────
-
-function attachRemoteAudioTrack(peer, stream) {
-  if (!peer.audioEl) {
-    var audioEl = document.createElement('audio');
-    audioEl.autoplay = true;
-    audioEl.muted = true; // 実際の出力はGainNode経由のため、要素自体は消音し二重再生を防ぐ
-    audioEl.style.display = 'none';
-    document.body.appendChild(audioEl);
-    peer.audioEl = audioEl;
-  }
-  peer.audioEl.srcObject = stream;
-
-  if (!callAudioCtx) callAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  var srcNode = callAudioCtx.createMediaStreamSource(stream);
-  var gainNode = callAudioCtx.createGain();
-  gainNode.gain.value = peer.muted ? 0 : peer.volume;
-  srcNode.connect(gainNode).connect(callAudioCtx.destination);
-  peer.gainNode = gainNode;
-}
-
-function setCallPeerVolume(peerId, volumePercent) {
-  var peer = callState.peers[peerId];
-  if (!peer) return;
-  peer.volume = clampRange(volumePercent, 0, 200) / 100;
-  if (peer.gainNode && !peer.muted) peer.gainNode.gain.value = peer.volume;
-}
-
-function setCallPeerMute(peerId, muted) {
-  var peer = callState.peers[peerId];
-  if (!peer) return;
-  peer.muted = muted;
-  if (peer.gainNode) peer.gainNode.gain.value = muted ? 0 : peer.volume;
 }
 
 // ── 3D空間配置（ホストが調整、他クライアントへ同期） ──────────────────────
@@ -2663,16 +2280,7 @@ function disposeCallPeerVrm(peer) {
 function disconnectCallPeer(peerId, statusMessage) {
   var peer = callState.peers[peerId];
   if (!peer) return;
-  clearConnectTimeoutWatchdog(peer);
   disposeCallPeerVrm(peer);
-  if (peer.dataChannel) { try { peer.dataChannel.close(); } catch (_) {} }
-  if (peer.vrmChannel) { try { peer.vrmChannel.close(); } catch (_) {} }
-  if (peer.pc) { try { peer.pc.close(); } catch (_) {} }
-  if (peer.audioEl) {
-    peer.audioEl.pause();
-    peer.audioEl.srcObject = null;
-    if (peer.audioEl.parentNode) peer.audioEl.parentNode.removeChild(peer.audioEl);
-  }
   delete callState.peers[peerId];
   renderCallParticipantsList();
   if (statusMessage) setCallStatus(statusMessage);
@@ -2714,9 +2322,11 @@ function renderCallParticipantsList() {
 
     var nameRow = document.createElement('div'); nameRow.className = 'uiRow';
     var nameSpan = document.createElement('span'); nameSpan.className = 'callParticipantName';
-    var connected = peer.pc && peer.pc.connectionState === 'connected';
-    nameSpan.textContent = (peer.displayName || peerId) + (connected ? ' ● 接続中' : ' ○ 接続待ち');
-    nameSpan.className += connected ? ' callBadgeConnected' : ' callBadgeWaiting';
+    // WebSocket中継方式では個別の「接続状態」を持たないため、VRM受信済みかどうかを
+    // 進捗の目安として表示する（RTCPeerConnectionのconnectionStateに相当するものは無い）。
+    var modelReady = !!peer.vrm;
+    nameSpan.textContent = (peer.displayName || peerId) + (modelReady ? ' ● モデル受信済み' : ' ○ モデル受信待ち');
+    nameSpan.className += modelReady ? ' callBadgeConnected' : ' callBadgeWaiting';
     nameRow.appendChild(nameSpan);
     if (callState.isHost) {
       var kickBtn = document.createElement('button');
@@ -2729,22 +2339,6 @@ function renderCallParticipantsList() {
       nameRow.appendChild(kickBtn);
     }
     row.appendChild(nameRow);
-
-    var volRow = document.createElement('div'); volRow.className = 'uiRow';
-    var volLabel = document.createElement('label'); volLabel.textContent = '音量'; volLabel.style.width = '32px';
-    var volSlider = document.createElement('input');
-    volSlider.type = 'range'; volSlider.min = '0'; volSlider.max = '200'; volSlider.step = '5';
-    volSlider.value = String(Math.round(peer.volume * 100));
-    volSlider.style.flex = '1 1 auto';
-    volSlider.addEventListener('input', function() { setCallPeerVolume(peerId, parseInt(volSlider.value, 10)); });
-    var muteBtn = document.createElement('button');
-    muteBtn.className = 'small-btn'; muteBtn.textContent = peer.muted ? 'ミュート中' : 'ミュート';
-    muteBtn.addEventListener('click', function() {
-      setCallPeerMute(peerId, !peer.muted);
-      muteBtn.textContent = peer.muted ? 'ミュート中' : 'ミュート';
-    });
-    volRow.appendChild(volLabel); volRow.appendChild(volSlider); volRow.appendChild(muteBtn);
-    row.appendChild(volRow);
 
     if (callState.isHost) {
       var layoutRow = document.createElement('div'); layoutRow.className = 'uiRow';
@@ -2780,8 +2374,6 @@ function renderCallParticipantsList() {
 // ── 初期化 ────────────────────────────────────────────────────────────
 
 function initCallUi() {
-  loadUserSettings();
-  initCallModeUi();
   initRtcDiagPanel();
 
   var createBtn = document.getElementById('callCreateRoomBtn');
@@ -2804,8 +2396,7 @@ function initCallUi() {
   var leaveBtn = document.getElementById('callLeaveRoomBtn');
   if (leaveBtn) leaveBtn.addEventListener('click', leaveCallRoom);
 
-  // ページを閉じる際、可能な範囲で他の参加者へ退出を通知する（ベストエフォート。
-  // クラッシュ等でこれが送れない場合はpc.onconnectionstatechangeのfailed/closed処理が保険になる）
+  // ページを閉じる際、可能な範囲で他の参加者へ退出を通知する（ベストエフォート）
   window.addEventListener('beforeunload', function() {
     if (callState.roomId) sendRoomControl({ action: 'leave' });
   });
