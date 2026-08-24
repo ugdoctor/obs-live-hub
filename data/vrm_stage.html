@@ -447,6 +447,19 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 //             OBSブラウザソースに ?mode=display 付きURLを登録して使う）。
 var isDisplayMode = new URLSearchParams(window.location.search).get('mode') === 'display';
 
+// ── WebRTC関連クラスのグローバル参照フォールバック ──────────────────────
+// 通常のブラウザ/OBSブラウザソースでは標準の window.RTCPeerConnection が常に存在するはずだが、
+// 一部の環境（プライバシー系拡張機能がWebRTC IPリーク対策として上書き・削除する場合等）で
+// 未定義になるケースへの保険として、ベンダープレフィックス付きの旧名やglobalThis経由の参照も
+// フォールバックとして試す。コード中で直接 `RTCPeerConnection` 等のグローバル識別子を
+// 参照している箇所は無いか、以降はすべてこれらの変数経由で参照する。
+var PeerConnectionClass = window.RTCPeerConnection ||
+                           window.webkitRTCPeerConnection ||
+                           window.mozRTCPeerConnection ||
+                           globalThis.RTCPeerConnection || null;
+var SessionDescriptionClass = window.RTCSessionDescription || globalThis.RTCSessionDescription || null;
+var IceCandidateClass = window.RTCIceCandidate || globalThis.RTCIceCandidate || null;
+
 // WsServer（プラグイン）が待ち受けるポート。WebSocketだけでなく、
 // vrm_stage.html本体・/vrm/model のHTTP配信も同じポートで行う。
 var WS_PORT      = 8765;
@@ -2072,12 +2085,14 @@ function ensureConnectionToPeer(peerId) {
   var isInitiator = callState.myPeerId < peerId;
   diagInfo('RTC', 'ensureConnectionToPeer(' + peerId + ') isInitiator=' + isInitiator);
 
-  if (typeof RTCPeerConnection === 'undefined') {
+  if (!PeerConnectionClass) {
     // 通常のOBSブラウザソース/一般的なブラウザでは起こり得ないが、万一実行環境が
-    // WebRTCに対応していない場合、new RTCPeerConnection()がReferenceErrorで
+    // WebRTCに対応していない場合（またはプライバシー系拡張機能等でRTCPeerConnectionが
+    // 上書き・削除されている場合）、new RTCPeerConnection()がReferenceError/TypeErrorで
     // 例外を投げて以降の処理（Offer生成等）が一切実行されないまま無言で止まる。
     // 原因が一目でわかるよう、ここで明示的に検知して警告する。
-    diagWarn('RTC', 'このブラウザ環境はRTCPeerConnectionに対応していません（' + peerId + 'への接続不可）');
+    diagWarn('RTC', 'このブラウザ環境はRTCPeerConnectionに対応していません（' + peerId + 'への接続不可）。'
+      + 'プライバシー保護系のブラウザ拡張機能がWebRTCを無効化していないか確認してください。');
     return;
   }
 
@@ -2135,7 +2150,7 @@ function createPeerConnectionFor(peer, isInitiator) {
   var config = { iceServers: iceServers };
   if (callState.connectionMode === 'relay') config.iceTransportPolicy = 'relay';
 
-  var pc = new RTCPeerConnection(config);
+  var pc = new PeerConnectionClass(config);
 
   pc.onicecandidate = function(e) {
     if (e.candidate) sendCallSignal(peer.peerId, 'candidate', null, e.candidate.toJSON());
@@ -2210,6 +2225,26 @@ function sendCallSignal(toPeerId, signalType, sdp, candidate) {
   }));
 }
 
+// setRemoteDescription()/addIceCandidate()はプレーンなinitオブジェクト（RTCSessionDescriptionInit/
+// RTCIceCandidateInit）を直接渡せる仕様のため、本来はRTCSessionDescription/RTCIceCandidateの
+// 明示的なインスタンス化は不要（three-vrm系のコードもこの前提で書かれている）。ここでは
+// SessionDescriptionClass/IceCandidateClassが利用可能な環境ではインスタンス化して渡し、
+// 利用できない場合はプレーンオブジェクトのままフォールバックする（どちらでも仕様上は動作する）。
+function makeSessionDescription(init) {
+  try {
+    return SessionDescriptionClass ? new SessionDescriptionClass(init) : init;
+  } catch (_) {
+    return init; // 環境依存でコンストラクタが使えない場合はプレーンオブジェクトにフォールバック
+  }
+}
+function makeIceCandidate(init) {
+  try {
+    return IceCandidateClass ? new IceCandidateClass(init) : init;
+  } catch (_) {
+    return init;
+  }
+}
+
 // ICE Candidateの取りこぼし対策: setRemoteDescription()が完了する（＝peer.pc.remoteDescription
 // が非nullになる）前にcandidateが届くことがある（offer送信直後、相手のICE gatheringが
 // SDP交換より先に候補を見つけて送ってくるケース等）。setRemoteDescription完了前に
@@ -2222,7 +2257,7 @@ function flushPendingIceCandidates(peer) {
   peer.pendingCandidates = [];
   diagInfo('RTC', 'pendingCandidates(' + peer.peerId + ') ' + queued.length + '件を適用します');
   queued.forEach(function(candidate) {
-    peer.pc.addIceCandidate(candidate).catch(function(err) {
+    peer.pc.addIceCandidate(makeIceCandidate(candidate)).catch(function(err) {
       diagWarn('RTC', 'addIceCandidate(queued, ' + peer.peerId + ') failed', err);
     });
   });
@@ -2243,6 +2278,12 @@ function handleCallSignal(msg) {
     return; // ロースターに存在しない相手からのシグナルは無視する（承認フロー経由のみ許可）
   }
   if (!peer.pc) {
+    if (!PeerConnectionClass) {
+      diagWarn('RTC', 'このブラウザ環境はRTCPeerConnectionに対応していないため' + msg.signalType
+        + 'を処理できません（' + peer.peerId + '）。プライバシー保護系のブラウザ拡張機能が'
+        + 'WebRTCを無効化していないか確認してください。');
+      return;
+    }
     try {
       peer.pc = createPeerConnectionFor(peer, callState.myPeerId < msg.fromPeerId);
       startConnectTimeoutWatchdog(peer);
@@ -2255,7 +2296,7 @@ function handleCallSignal(msg) {
 
   if (msg.signalType === 'offer') {
     diagInfo('WS', 'offer受信 ← ' + msg.fromPeerId + ' (sdp ' + (msg.sdp || '').length + ' bytes)');
-    peer.pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp }).then(function() {
+    peer.pc.setRemoteDescription(makeSessionDescription({ type: 'offer', sdp: msg.sdp })).then(function() {
       flushPendingIceCandidates(peer);
       return peer.pc.createAnswer();
     }).then(function(answer) {
@@ -2269,7 +2310,7 @@ function handleCallSignal(msg) {
     });
   } else if (msg.signalType === 'answer') {
     diagInfo('WS', 'answer受信 ← ' + msg.fromPeerId + ' (sdp ' + (msg.sdp || '').length + ' bytes)');
-    peer.pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp }).then(function() {
+    peer.pc.setRemoteDescription(makeSessionDescription({ type: 'answer', sdp: msg.sdp })).then(function() {
       flushPendingIceCandidates(peer);
     }).catch(function(err) {
       console.warn('[vrm_stage:call] setRemoteDescription(answer) failed', err);
@@ -2283,7 +2324,7 @@ function handleCallSignal(msg) {
         + peer.pendingCandidates.length + '件目）');
     } else {
       diagInfo('RTC', 'candidate受信 ← ' + msg.fromPeerId + ' → 即時適用');
-      peer.pc.addIceCandidate(msg.candidate).catch(function(err) {
+      peer.pc.addIceCandidate(makeIceCandidate(msg.candidate)).catch(function(err) {
         console.warn('[vrm_stage:call] addIceCandidate failed', err);
         diagWarn('RTC', 'addIceCandidate(' + peer.peerId + ') failed', err);
       });
