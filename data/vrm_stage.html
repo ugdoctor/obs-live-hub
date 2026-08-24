@@ -465,9 +465,12 @@ function initScene() {
 
   scene = new THREE.Scene();
 
-  // VRMは正面が+Z（VRM0系はloadVrmBinary内でVRMUtils.rotateVRM0により+Zへ統一済み）を
-  // 向くため、カメラは+Z側（モデルの正面）に置く。Controller/Displayとも同一の初期値
-  // を使うことで、位置・画角調整パネル未操作時でも常に同じアングルで描画される。
+  // three-vrm@1.0.9の正規化後の正面は-Z（VRM0系もloadVrmBinary内のVRMUtils.rotateVRM0で
+  // -Zへ統一される。VRM1系は元々-Z）。カメラは+Z側に置いているため、モデル側に180度
+  // （Math.PI）の補正を掛けて初めて正面がカメラを向く。この補正はapplyTransform()（自分の
+  // アバター）とapplyCallPeerLayout()（通話相手のアバター）の両方で行う（詳細は各関数参照）。
+  // Controller/Displayとも同一の初期値を使うことで、位置・画角調整パネル未操作時でも
+  // 常に同じアングルで描画される。
   camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 20);
   camera.position.set(0, 1.4, 1.2);
   camera.lookAt(0, 1.3, 0);
@@ -660,6 +663,16 @@ var TRANSFORM_DEFAULTS = {
 };
 var vrmTransform = Object.assign({}, TRANSFORM_DEFAULTS);
 var TRANSFORM_LS_KEY = 'vrmStageTransform';
+
+// three-vrm@1.0.9正規化後の正面(-Z)をカメラ側(+Z)へ向けるための固定オフセット
+// （initScene()のコメント参照）。ユーザー操作のyawはこれに加算する。
+var VRM_FRONT_YAW_RAD = Math.PI;
+
+// 通話で自分（自身のアバター＝currentVrm）に割り当てる自動横並びオフセット。
+// 2人（自分＋相手1人）接続時のみrecomputeAutoCallLayout()が左右に振り分け、
+// それ以外は0（中央）に戻る。vrmTransform.posXとは独立に加算する
+// （ユーザーの手動位置調整をリセットせずに済ませるため）。
+var autoHostSlotOffsetX = 0;
 // torsoMulはデバッグパネル内のスライダー（#tTorsoMul）だが、既存の位置・画角と同じ
 // 仕組み（localStorage保存・vrm_transform_updateでのDisplay同期）に乗せるため
 // TRANSFORM_SLIDERSに含める（配列に追加するだけで自動的に配線される）。
@@ -677,8 +690,8 @@ var TRANSFORM_SLIDERS = [
 // Controller/Displayの両方から、モデル読み込み直後・スライダー変更時・受信時に呼ばれる
 function applyTransform(t) {
   if (currentVrm) {
-    currentVrm.scene.position.set(t.posX, t.posY, t.posZ);
-    currentVrm.scene.rotation.y = t.yaw * Math.PI / 180;
+    currentVrm.scene.position.set(t.posX + autoHostSlotOffsetX, t.posY, t.posZ);
+    currentVrm.scene.rotation.y = VRM_FRONT_YAW_RAD + t.yaw * Math.PI / 180;
     currentVrm.scene.scale.setScalar(t.scale);
   }
   if (camera) {
@@ -730,6 +743,7 @@ function sendTransformUpdate(force) {
   // 「マルチユーザー通話」セクションのattemptShadowJoin参照）。
   payload.callRoomId = (typeof callState !== 'undefined' && callState.roomId) || '';
   payload.callParentPeerId = (typeof callState !== 'undefined' && callState.myPeerId) || '';
+  payload.callParentIsHost = !!(typeof callState !== 'undefined' && callState.isHost);
   ws.send(JSON.stringify(payload));
 }
 
@@ -741,7 +755,7 @@ function onTransformUpdateReceived(data) {
   saveTransformToLocalStorage(); // Display側でも次回起動用に保存しておく
 
   if (isDisplayMode && data.callRoomId && typeof attemptShadowJoin === 'function') {
-    attemptShadowJoin(data.callRoomId, data.callParentPeerId);
+    attemptShadowJoin(data.callRoomId, data.callParentPeerId, data.callParentIsHost);
   }
 }
 
@@ -1463,7 +1477,16 @@ var callState = {
   myDisplayName: null,
   waitingPeers: {},     // ホストのみ: peerId -> { displayName, requestedAt }
   bannedPeerIds: {},    // ホストのみ: peerId -> true（キック済み、以後の再参加を拒否）
-  peers: {}             // peerId -> CallPeer
+  peers: {},            // peerId -> CallPeer
+  // Displayモードのshadow join専用。attemptShadowJoin()参照。
+  // 「自分（ローカル操作者）の分身」であるピアのIDを覚えておき、そのピア経由で届く
+  // VRM/姿勢はcurrentVrm（VMC/ローカル姿勢で駆動する自分自身の描画）と二重表示に
+  // なるため無視する（不具合1対策：VMCは常にcurrentVrmだけに適用し、リモートは
+  // DataChannel経由のデータだけを適用するよう分離する）。
+  shadowParentPeerId: null,
+  // shadow joinしている相手（＝ローカル操作者）がホストかどうか。Controller自身の場合は
+  // isHostをそのまま使うため未使用（isLocalOperatorHost()参照）。
+  localIsHost: false
 };
 var turnConfig = null;       // user_settings.jsonから読み込んだTURN設定（{urls,username,credential}）
 var callAudioCtx = null;     // 参加者音声のボリューム調整用（Web Audio、<audio>要素は消音してこちら経由で再生）
@@ -1643,14 +1666,26 @@ function leaveCallRoom() {
   callState.inviteCode = null;
   callState.waitingPeers = {};
   callState.bannedPeerIds = {};
+  callState.shadowParentPeerId = null;
+  callState.localIsHost = false;
+  autoHostSlotOffsetX = 0;
+  applyTransform(vrmTransform);
   hideCallRoomUi();
   setCallStatus('ルームから退出しました。');
   sendTransformUpdate(true);
 }
 
+// ローカル操作者（このページインスタンスが表示しているcurrentVrmの持ち主）がホストかどうか。
+// Controller自身はcallState.isHostがそのまま使えるが、Displayはshadow joinにより
+// callState.isHostが常にfalseになる（自分自身は待合室承認フローを経由しないゲスト扱いの
+// ダミー参加のため）ので、attemptShadowJoin()で受け取ったcallState.localIsHostを使う。
+function isLocalOperatorHost() {
+  return isDisplayMode ? !!callState.localIsHost : !!callState.isHost;
+}
+
 // Displayモード専用: Controllerが参加しているルームへ、待合室承認を経由せず自動参加する。
 // ホスト側はshadowOfPeerIdが現在のロースターに実在する場合のみ自動承認する（handleRoomControl参照）。
-function attemptShadowJoin(roomId, parentPeerId) {
+function attemptShadowJoin(roomId, parentPeerId, parentIsHost) {
   if (!isDisplayMode || !roomId) return;
   if (callState.roomId === roomId) return; // 既に参加済み
   if (callState.roomId) leaveCallRoom(); // 別ルームに参加中だった場合は先に抜ける
@@ -1658,6 +1693,11 @@ function attemptShadowJoin(roomId, parentPeerId) {
   callState.myPeerId = generatePeerId();
   callState.myDisplayName = 'Display';
   callState.roomId = roomId;
+  // 「自分（ローカル操作者）の分身」ピアのIDを覚えておく（不具合1対策）。
+  // このピア経由で届くVRM/姿勢はcurrentVrmと二重表示になるため、
+  // loadRemoteParticipantVrmBinary()側で無視する。
+  callState.shadowParentPeerId = parentPeerId || null;
+  callState.localIsHost = !!parentIsHost;
   sendRoomControl({ action: 'shadow_join_request', shadowOfPeerId: parentPeerId });
   setCallStatus('通話ルームへ自動参加中…（Displayモード）');
 }
@@ -2035,6 +2075,13 @@ function finishRemoteVrmReceive(peer) {
 // 要件3: 受信したVRMバイナリはBlob/ArrayBufferのみで展開し、IndexedDB/localStorageへは
 // 一切書き込まない（saveVrmToCache()を呼ばない点が自分自身のアバター読み込みとの違い）。
 function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
+  // 不具合1対策: このピアが「自分自身（ローカル操作者）の分身」（shadow join用の
+  // 自己接続）の場合、そのVRM/姿勢はcurrentVrm（VMC/ローカル姿勢で駆動する自分自身の
+  // 描画）と同一人物の二重表示になる。VMCは常にcurrentVrmだけに適用し、リモートアバターは
+  // 純粋な他人（DataChannel経由の他ピア）のみに限定するため、ここでロード自体を行わない。
+  if (isDisplayMode && callState.shadowParentPeerId && peer.peerId === callState.shadowParentPeerId) {
+    return;
+  }
   var blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: 'model/gltf-binary' }));
   peer.pendingBlobUrl = blobUrl;
   gltfLoader.load(blobUrl, function(gltf) {
@@ -2097,6 +2144,10 @@ function applyCallPeerLayout(peer) {
   var l = peer.layout;
   var slotX = CALL_SLOT_OFFSET_X[l.slot] || 0;
   peer.vrm.scene.position.set(slotX + l.offsetX, l.offsetY, l.offsetZ);
+  // 通話相手のアバターにはyaw調整UIが無いため、正面補正（VRM_FRONT_YAW_RAD）を固定で適用する。
+  // これを入れないとVRMUtils.rotateVRM0で正規化された「正面-Z」のままになり、
+  // カメラ（+Z側）から見て背中を向けて見える（applyTransform()と同じ補正、initScene()のコメント参照）。
+  peer.vrm.scene.rotation.y = VRM_FRONT_YAW_RAD;
   peer.vrm.scene.scale.setScalar(l.scale || 1);
 }
 
@@ -2106,6 +2157,45 @@ function updateCallPeerLayout(peerId, partial) {
   Object.assign(peer.layout, partial);
   applyCallPeerLayout(peer);
   if (callState.isHost) sendRoomControl({ action: 'layout_update', targetPeerId: peerId, layout: peer.layout });
+}
+
+// callState.peersのうち「自分自身の分身」（Displayのshadow join接続）を除いた、
+// 本当に別人であるピアのIDだけを返す（不具合3の自動レイアウト判定・参加者リスト表示で使う）。
+function realCallPeerIds() {
+  return Object.keys(callState.peers).filter(function(peerId) {
+    return peerId !== callState.shadowParentPeerId;
+  });
+}
+
+// 不具合3対策: 自分＋相手1人のちょうど2人接続時のみ、自分（currentVrm）とその相手を
+// 左右（-0.6 / +0.6）に自動で振り分けて重なりを防ぐ。3人以上、または1人だけの場合は
+// 中央（0）に戻す。ユーザーが相手側のスロットを手動変更済み（'center'以外、またはoffsetXが
+// 0以外）の場合はそれを尊重し、自動割り当てで上書きしない。
+// renderCallParticipantsList()から、参加者構成が変わるたびに呼ばれる。
+function recomputeAutoCallLayout() {
+  var peerIds = realCallPeerIds();
+  if (peerIds.length !== 1) {
+    if (autoHostSlotOffsetX !== 0) { autoHostSlotOffsetX = 0; applyTransform(vrmTransform); }
+    return;
+  }
+  var onlyPeer = callState.peers[peerIds[0]];
+  var iAmHost = isLocalOperatorHost();
+  var wantHostSlotX = iAmHost ? CALL_SLOT_OFFSET_X.left : CALL_SLOT_OFFSET_X.right;
+  if (autoHostSlotOffsetX !== wantHostSlotX) {
+    autoHostSlotOffsetX = wantHostSlotX;
+    applyTransform(vrmTransform);
+  }
+  var untouched = onlyPeer.layout.slot === 'center' && onlyPeer.layout.offsetX === 0;
+  if (untouched) {
+    var wantPeerSlot = iAmHost ? 'right' : 'left';
+    if (onlyPeer.layout.slot !== wantPeerSlot) {
+      onlyPeer.layout.slot = wantPeerSlot;
+      applyCallPeerLayout(onlyPeer);
+      if (callState.isHost) {
+        sendRoomControl({ action: 'layout_update', targetPeerId: onlyPeer.peerId, layout: onlyPeer.layout });
+      }
+    }
+  }
 }
 
 // ── 退出・キック時のクリーンアップ（メモリ完全破棄） ──────────────────────
@@ -2173,10 +2263,11 @@ function renderCallWaitingList() {
 }
 
 function renderCallParticipantsList() {
+  recomputeAutoCallLayout(); // 参加者構成が変わるたびに自動横並び配置（不具合3対策）を再計算する
   var container = document.getElementById('callParticipantsList');
   if (!container) return;
   container.innerHTML = '';
-  Object.keys(callState.peers).forEach(function(peerId) {
+  realCallPeerIds().forEach(function(peerId) {
     var peer = callState.peers[peerId];
     var row = document.createElement('div');
     row.className = 'callParticipantRow';
