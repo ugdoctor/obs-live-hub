@@ -454,7 +454,7 @@ var POSE_SEND_INTERVAL_MS = 50; // 約20Hz
 // ── Three.js / VRM 基盤 ──────────────────────────────────────────────────
 var canvas, renderer, scene, camera, clock;
 var lookAtTarget;
-var currentVrm = null;
+var localVrm = null;
 var gltfLoader;
 
 function initScene() {
@@ -503,7 +503,7 @@ function onResize() {
 function animate() {
   requestAnimationFrame(animate);
   var delta = clock.getDelta();
-  if (currentVrm) {
+  if (localVrm) {
     // VMC（VSeeFace等）が全身ボーンを直接駆動している間は、Kalidokit由来の
     // 頭部連動背骨/呼吸モーション・マイク由来リップシンクを止め、VMCデータと
     // 競合して見た目がガタつくのを防ぐ（onVmcUpdateReceived参照）
@@ -513,9 +513,9 @@ function animate() {
       if (testSwingActive) applyFaceRig({ head: getTestSwingRig(clock.elapsedTime) });
       applySpineChestFollow(lastHeadRig, clock.elapsedTime);
       var mouthTarget = isDisplayMode ? lastReceivedMouthTarget : computeMicMouthTarget();
-      applyMouthOpenToVrm(currentVrm, mouthTarget, LIPSYNC_LERP);
+      applyMouthOpenToVrm(localVrm, mouthTarget, LIPSYNC_LERP);
     }
-    currentVrm.update(delta);
+    localVrm.update(delta);
   }
 
   // マルチユーザー通話: 各リモート参加者のVRMもここで一括更新する
@@ -539,7 +539,7 @@ var BONE_NAMES = ['head', 'neck', 'chest', 'spine',
                    'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm'];
 var currentBones = {}; // name -> { node, source } | undefined
 var torsoFollow = { spine: SPINE_FOLLOW, chest: CHEST_FOLLOW }; // spine/chest欠落時に再配分される
-var currentVrmVersionLabel = '未読込';
+var localVrmVersionLabel = '未読込';
 
 function resolveBoneWithFallback(humanoid, name) {
   if (!humanoid) return null;
@@ -563,9 +563,9 @@ function resolveBoneWithFallback(humanoid, name) {
 
 function resolveBonesForCurrentVrm() {
   currentBones = {};
-  if (!currentVrm || !currentVrm.humanoid) return;
+  if (!localVrm || !localVrm.humanoid) return;
   BONE_NAMES.forEach(function(name) {
-    currentBones[name] = resolveBoneWithFallback(currentVrm.humanoid, name);
+    currentBones[name] = resolveBoneWithFallback(localVrm.humanoid, name);
   });
 
   // spine/chestのどちらか一方しか存在しないモデルでは、要件の「30〜40%」の総量を
@@ -595,10 +595,10 @@ function logBoneResolution() {
 
 function detectVrmVersion(vrm) {
   var meta = vrm && vrm.meta;
-  if (!meta) { currentVrmVersionLabel = '不明（metaなし）'; return; }
-  if (meta.metaVersion === '0')      currentVrmVersionLabel = 'VRM 0.x';
-  else if (meta.metaVersion === '1') currentVrmVersionLabel = 'VRM 1.0';
-  else                                currentVrmVersionLabel = '不明 (metaVersion=' + meta.metaVersion + ')';
+  if (!meta) { localVrmVersionLabel = '不明（metaなし）'; return; }
+  if (meta.metaVersion === '0')      localVrmVersionLabel = 'VRM 0.x';
+  else if (meta.metaVersion === '1') localVrmVersionLabel = 'VRM 1.0';
+  else                                localVrmVersionLabel = '不明 (metaVersion=' + meta.metaVersion + ')';
 }
 
 // ── Tポーズ解消（初期姿勢） ──────────────────────────────────────────────
@@ -622,7 +622,7 @@ var lastSpineTarget = { x: 0, y: 0, z: 0 }; // デバッグパネル表示用
 var lastChestTarget = { x: 0, y: 0, z: 0 };
 
 function applySpineChestFollow(headRig, elapsedTime) {
-  if (!currentVrm) return;
+  if (!localVrm) return;
   var spine = currentBones.spine && currentBones.spine.node;
   var chest = currentBones.chest && currentBones.chest.node;
   if (!spine && !chest) return;
@@ -668,7 +668,7 @@ var TRANSFORM_LS_KEY = 'vrmStageTransform';
 // （initScene()のコメント参照）。ユーザー操作のyawはこれに加算する。
 var VRM_FRONT_YAW_RAD = Math.PI;
 
-// 通話で自分（自身のアバター＝currentVrm）に割り当てる自動横並びオフセット。
+// 通話で自分（自身のアバター＝localVrm）に割り当てる自動横並びオフセット。
 // 2人（自分＋相手1人）接続時のみrecomputeAutoCallLayout()が左右に振り分け、
 // それ以外は0（中央）に戻る。vrmTransform.posXとは独立に加算する
 // （ユーザーの手動位置調整をリセットせずに済ませるため）。
@@ -689,10 +689,10 @@ var TRANSFORM_SLIDERS = [
 
 // Controller/Displayの両方から、モデル読み込み直後・スライダー変更時・受信時に呼ばれる
 function applyTransform(t) {
-  if (currentVrm) {
-    currentVrm.scene.position.set(t.posX + autoHostSlotOffsetX, t.posY, t.posZ);
-    currentVrm.scene.rotation.y = VRM_FRONT_YAW_RAD + t.yaw * Math.PI / 180;
-    currentVrm.scene.scale.setScalar(t.scale);
+  if (localVrm) {
+    localVrm.scene.position.set(t.posX + autoHostSlotOffsetX, t.posY, t.posZ);
+    localVrm.scene.rotation.y = VRM_FRONT_YAW_RAD + t.yaw * Math.PI / 180;
+    localVrm.scene.scale.setScalar(t.scale);
   }
   if (camera) {
     // initScene()の初期カメラ位置と同じY/lookAtを使用し、Controller/Displayで
@@ -821,7 +821,7 @@ function fmtVmcQuat(b) {
 }
 
 function updateDebugPanel() {
-  setDebugText('dbgVrmVersion', currentVrm ? currentVrmVersionLabel : '未読込');
+  setDebugText('dbgVrmVersion', localVrm ? localVrmVersionLabel : '未読込');
 
   var vmcOn = isVmcActive();
   var vmcStatusEl = document.getElementById('dbgVmcStatus');
@@ -878,13 +878,13 @@ function initDebugPanel() {
 
 // ── VRMモデル読み込み（ファイル / IndexedDBキャッシュ 共通処理） ─────────
 
-function disposeCurrentVrm() {
-  if (!currentVrm) return;
-  scene.remove(currentVrm.scene);
-  VRMUtils.deepDispose(currentVrm.scene);
-  currentVrm = null;
+function disposeLocalVrm() {
+  if (!localVrm) return;
+  scene.remove(localVrm.scene);
+  VRMUtils.deepDispose(localVrm.scene);
+  localVrm = null;
   currentBones = {};
-  currentVrmVersionLabel = '未読込';
+  localVrmVersionLabel = '未読込';
 }
 
 function loadVrmBinary(arrayBuffer, fileName, opts) {
@@ -898,14 +898,14 @@ function loadVrmBinary(arrayBuffer, fileName, opts) {
       setStatus('VRMとして認識できませんでした: ' + fileName);
       return;
     }
-    disposeCurrentVrm();
+    disposeLocalVrm();
 
     // VRM0系モデルは前後が反転しているため、three-vrmの補助関数でカメラ向きに揃える
     if (vrm.meta && vrm.meta.metaVersion === '0' && VRMUtils.rotateVRM0) {
       VRMUtils.rotateVRM0(vrm);
     }
 
-    currentVrm = vrm;
+    localVrm = vrm;
     scene.add(vrm.scene);
     if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
     detectVrmVersion(vrm);
@@ -915,9 +915,17 @@ function loadVrmBinary(arrayBuffer, fileName, opts) {
     if (!isVmcActive()) applyRestPose();
     applyTransform(vrmTransform);
 
-    setStatus('VRM読み込み完了: ' + fileName + '（' + currentVrmVersionLabel + '）');
+    setStatus('VRM読み込み完了: ' + fileName + '（' + localVrmVersionLabel + '）');
     if (opts.persist !== false) saveVrmToCache(arrayBuffer, fileName);
-    if (opts.upload !== false && !isDisplayMode) uploadVrmToPlugin(arrayBuffer, fileName);
+    // 不具合1対策: shouldSyncLocalModelToPlugin()参照。ゲストとして通話に参加している間は
+    // /vrm/model（このPCの「ローカル操作者のモデル」を表す共有スロット）へアップロードしない。
+    if (opts.upload !== false && !isDisplayMode && shouldSyncLocalModelToPlugin()) {
+      uploadVrmToPlugin(arrayBuffer, fileName);
+    } else if (opts.upload !== false && !isDisplayMode) {
+      console.info('[vrm_stage:model] ゲスト役のため/vrm/modelへのアップロードをスキップします'
+        + '（roomId=' + callState.roomId + '）。ホストのDisplayに表示されるモデルを'
+        + '上書きしないため。VRMは通話のDataChannel経由でのみ相手に配信されます。');
+    }
 
     // マルチユーザー通話用に自分自身のVRMバイナリを保持しておく（新規ピア接続時に送信する。
     // loadVrmBinary()は常に「自分自身のアバター」の読み込みにのみ使われる関数のため無条件で良い。
@@ -1002,6 +1010,20 @@ function autoLoadCachedVrm() {
 // Display   : 起動時・"vrm_model_sync" 受信時にプラグインから GET /vrm/model で取得する。
 // これによりOBS側での手動D&Dが不要になる（Controller/DisplayはIndexedDBを共有できないため、
 // プラグインを仲介した配布が唯一のOBS側自動ロード手段となる）。
+
+// 不具合1対策（最重要）: /vrm/model はWsServerインスタンス（＝1台のPC）につき1枠しかない
+// 共有キャッシュで、「このPCのローカル操作者（Controller）が読み込んだモデル」を表す設計。
+// 本番運用（参加者ごとに別PC）ではこれで問題ないが、同一PC上で複数のControllerタブを
+// 開いてローカルテストする場合（ホスト役タブ＋ゲスト役タブ）、両方が同じ/vrm/modelスロットを
+// 共有してしまう。ゲスト役タブが自分の（通話送信用の）VRMを読み込むと、この共有スロットを
+// 上書きし、"vrm_model_sync"がブロードキャストされて、ホストのOBS Displayが
+// ゲストのモデルへ切り替わってしまう（＝ホストのモデルが消える不具合の実体）。
+// ゲストの通話用モデルはWebRTC DataChannel（localVrmArrayBufferForCall経由）でのみ相手に
+// 配信されるため、/vrm/modelへは同期不要。ルームに「ゲストとして」参加している間だけ
+// アップロードを止めることで、この上書きを防ぐ。
+function shouldSyncLocalModelToPlugin() {
+  return !callState.roomId || isLocalOperatorHost();
+}
 
 function uploadVrmToPlugin(arrayBuffer, fileName) {
   fetch(VRM_MODEL_URL, {
@@ -1105,8 +1127,8 @@ var lastHeadTarget = { x: 0, y: 0, z: 0 }; // デバッグパネル表示用
 var lastNeckTarget = { x: 0, y: 0, z: 0 };
 
 function applyFaceRig(riggedFace) {
-  if (!currentVrm || !riggedFace) return;
-  var expr = currentVrm.expressionManager;
+  if (!localVrm || !riggedFace) return;
+  var expr = localVrm.expressionManager;
 
   if (riggedFace.head) lastHeadRig = riggedFace.head;
 
@@ -1326,7 +1348,7 @@ function shouldApplyLocalVmc() {
 }
 
 function onVmcUpdateReceived(data) {
-  if (!currentVrm) return;
+  if (!localVrm) return;
   // ここでreturnする場合、lastVmcReceivedAt等は一切更新しない＝「VMCを受信していない」のと
   // 同じ扱いにすることで、このタブ自身のWebカメラトラッキング（Kalidokit）が
   // isVmcActive()判定に妨げられず正常に動き続けるようにする。
@@ -1343,7 +1365,7 @@ function onVmcUpdateReceived(data) {
     setStatus('VMCデータを受信中のため、Webカメラトラッキングを一時停止しました。');
   }
 
-  var humanoid = currentVrm.humanoid;
+  var humanoid = localVrm.humanoid;
   var boneCount = 0;
   if (humanoid && data.bones) {
     Object.keys(data.bones).forEach(function(vmcName) {
@@ -1363,8 +1385,8 @@ function onVmcUpdateReceived(data) {
   vmcLastBoneCount = boneCount;
 
   var morphCount = 0;
-  if (currentVrm.expressionManager && data.blendShapes) {
-    var expr = currentVrm.expressionManager;
+  if (localVrm.expressionManager && data.blendShapes) {
+    var expr = localVrm.expressionManager;
     Object.keys(data.blendShapes).forEach(function(name) {
       var v = data.blendShapes[name];
       if (typeof v !== 'number') return;
@@ -1438,13 +1460,13 @@ function connectWs() {
 }
 
 function onPoseUpdateReceived(data) {
-  if (!currentVrm) return;
+  if (!localVrm) return;
   applyFaceRig(data);
   lastReceivedMouthTarget = (typeof data.mouthOpen === 'number') ? data.mouthOpen : 0;
 }
 
 function maybeSendPoseUpdate() {
-  if (isDisplayMode || !currentVrm) return;
+  if (isDisplayMode || !localVrm) return;
   if (isVmcActive()) return; // VMC受信中はWebカメラ由来の（一時停止済み・古い）姿勢を送らない
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   var now = performance.now();
@@ -1513,8 +1535,8 @@ var callState = {
   peers: {},            // peerId -> CallPeer
   // Displayモードのshadow join専用。attemptShadowJoin()参照。
   // 「自分（ローカル操作者）の分身」であるピアのIDを覚えておき、そのピア経由で届く
-  // VRM/姿勢はcurrentVrm（VMC/ローカル姿勢で駆動する自分自身の描画）と二重表示に
-  // なるため無視する（不具合1対策：VMCは常にcurrentVrmだけに適用し、リモートは
+  // VRM/姿勢はlocalVrm（VMC/ローカル姿勢で駆動する自分自身の描画）と二重表示に
+  // なるため無視する（不具合1対策：VMCは常にlocalVrmだけに適用し、リモートは
   // DataChannel経由のデータだけを適用するよう分離する）。
   shadowParentPeerId: null,
   // shadow joinしている相手（＝ローカル操作者）がホストかどうか。Controller自身の場合は
@@ -1708,7 +1730,7 @@ function leaveCallRoom() {
   sendTransformUpdate(true);
 }
 
-// ローカル操作者（このページインスタンスが表示しているcurrentVrmの持ち主）がホストかどうか。
+// ローカル操作者（このページインスタンスが表示しているlocalVrmの持ち主）がホストかどうか。
 // Controller自身はcallState.isHostがそのまま使えるが、Displayはshadow joinにより
 // callState.isHostが常にfalseになる（自分自身は待合室承認フローを経由しないゲスト扱いの
 // ダミー参加のため）ので、attemptShadowJoin()で受け取ったcallState.localIsHostを使う。
@@ -1727,7 +1749,7 @@ function attemptShadowJoin(roomId, parentPeerId, parentIsHost) {
   callState.myDisplayName = 'Display';
   callState.roomId = roomId;
   // 「自分（ローカル操作者）の分身」ピアのIDを覚えておく（不具合1対策）。
-  // このピア経由で届くVRM/姿勢はcurrentVrmと二重表示になるため、
+  // このピア経由で届くVRM/姿勢はlocalVrmと二重表示になるため、
   // loadRemoteParticipantVrmBinary()側で無視する。
   callState.shadowParentPeerId = parentPeerId || null;
   callState.localIsHost = !!parentIsHost;
@@ -1878,6 +1900,11 @@ function handleRoomControl(msg) {
     console.info('[vrm_stage:room] approve受信 → ルーム参加完了、roster待ち');
     setCallStatus('ルームに参加しました。');
     showCallRoomUi();
+    // 不具合2対策: 参加者リストDOMは本来rosterメッセージ受信（applyRosterUpdate）で
+    // 埋まるが、showCallRoomUi()でセクションを表示した直後に一度描画しておくことで、
+    // rosterが遅延・欠落した場合でも「セクションは出るがリストは空のまま」という
+    // 中途半端な表示にならないようにする（自分の分も含めてrealCallPeerIds()を評価し直す）。
+    renderCallParticipantsList();
     return;
   }
   if (action === 'reject') {
@@ -2177,12 +2204,12 @@ function finishRemoteVrmReceive(peer) {
 // 一切書き込まない（saveVrmToCache()を呼ばない点が自分自身のアバター読み込みとの違い）。
 function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
   // 不具合1対策: このピアが「自分自身（ローカル操作者）の分身」（shadow join用の
-  // 自己接続）の場合、そのVRM/姿勢はcurrentVrm（VMC/ローカル姿勢で駆動する自分自身の
-  // 描画）と同一人物の二重表示になる。VMCは常にcurrentVrmだけに適用し、リモートアバターは
+  // 自己接続）の場合、そのVRM/姿勢はlocalVrm（VMC/ローカル姿勢で駆動する自分自身の
+  // 描画）と同一人物の二重表示になる。VMCは常にlocalVrmだけに適用し、リモートアバターは
   // 純粋な他人（DataChannel経由の他ピア）のみに限定するため、ここでロード自体を行わない。
   if (isDisplayMode && callState.shadowParentPeerId && peer.peerId === callState.shadowParentPeerId) {
     console.info('[vrm_stage:call] ' + peer.peerId + ' は自分自身の分身のためVRMロードをスキップ'
-      + '（currentVrmが既にホスト自身のモデルを表示している）');
+      + '（localVrmが既にホスト自身のモデルを表示している）');
     return;
   }
   var blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: 'model/gltf-binary' }));
@@ -2275,7 +2302,7 @@ function realCallPeerIds() {
   });
 }
 
-// 不具合3対策: 自分＋相手1人のちょうど2人接続時のみ、自分（currentVrm）とその相手を
+// 不具合3対策: 自分＋相手1人のちょうど2人接続時のみ、自分（localVrm）とその相手を
 // 左右（-0.6 / +0.6）に自動で振り分けて重なりを防ぐ。3人以上、または1人だけの場合は
 // 中央（0）に戻す。ユーザーが相手側のスロットを手動変更済み（'center'以外、またはoffsetXが
 // 0以外）の場合はそれを尊重し、自動割り当てで上書きしない。
@@ -2476,6 +2503,14 @@ function initCallUi() {
   window.addEventListener('beforeunload', function() {
     if (callState.roomId) sendRoomControl({ action: 'leave' });
   });
+
+  // 不具合2対策: 参加者リストは本来イベント駆動（roster/approve/kick/切断等）で再描画されるが、
+  // 万一いずれかのイベント処理が例外・メッセージ欠落等で漏れても「空のまま固まる」ことがないよう、
+  // ルーム参加中は1秒ごとに再描画するセルフヒーリングのウォッチドッグを設ける
+  // （renderCallParticipantsList()はcallState.peersから毎回作り直す設計のため冪等・安全）。
+  setInterval(function() {
+    if (callState.roomId) renderCallParticipantsList();
+  }, 1000);
 }
 
 // ── モード切替（UIトグル。通常はURLの ?mode=display を使うが、同一ブラウザ内での
@@ -2505,14 +2540,14 @@ function setDisplayMode(flag) {
 // 完了してしまっていた（"init()"内でinitModelForMode()がconnectWsWatchdog()より先に
 // 呼ばれるため、その間に発生したvrm_model_syncを取りこぼす）等の理由で、Displayが
 // 一度のGET /vrm/modelでホストのモデルを取得できないケースがある。
-// currentVrmが読み込まれるまで一定間隔でリトライし続けることで、
+// localVrmが読み込まれるまで一定間隔でリトライし続けることで、
 // 「OBS Displayにホスト自身のモデルが描画されない」不具合を解消する。
 var HOST_MODEL_FETCH_RETRY_MS = 3000;
 function scheduleHostModelRetry() {
   if (!isDisplayMode) return;
   setTimeout(function() {
-    if (currentVrm) return; // vrm_model_sync受信等、別経路で既に読み込めていれば不要
-    console.warn('[vrm_stage:model] ホスト自身のモデル（currentVrm）が未読込のため再取得を試みます');
+    if (localVrm) return; // vrm_model_sync受信等、別経路で既に読み込めていれば不要
+    console.warn('[vrm_stage:model] ホスト自身のモデル（localVrm）が未読込のため再取得を試みます');
     fetchVrmModelFromServer().catch(function() { scheduleHostModelRetry(); });
   }, HOST_MODEL_FETCH_RETRY_MS);
 }
