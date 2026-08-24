@@ -112,6 +112,26 @@ static std::string contentTypeForFile(const std::string &fileName)
 	return "application/octet-stream";
 }
 
+// send()は一度の呼び出しで全バイトを送信する保証がない（部分送信=short write）。
+// 特にVRMバイナリ（/vrm/model、数MB）やvrm_stage.html本体（数十〜百KB超）、WebRTCの
+// SDP（vrm_call_signal、数百〜数KB）等サイズの大きいペイロードで顕在化しやすく、これを
+// 考慮せず戻り値をエラー判定にしか使わないと、クライアント側は「Content-Lengthより短い
+// ボディ」（fetch()がERR_CONTENT_LENGTH_MISMATCH等で失敗）や「途中で切れたJSON/HTML」
+// （JSON.parse()の例外やスクリプトの構文エラー）を受け取ることになる。いずれも症状としては
+// 「何も起きていないように見える」失敗になり、切り分けが難しい。送信できたバイト数ぶんだけ
+// ポインタを進めて全部送り切るまでループする。
+static bool sendAll(SOCKET sock, const char *data, size_t len)
+{
+	size_t sent = 0;
+	while (sent < len) {
+		const int n = ::send(sock, data + sent, static_cast<int>(len - sent), 0);
+		if (n == SOCKET_ERROR || n == 0)
+			return false;
+		sent += static_cast<size_t>(n);
+	}
+	return true;
+}
+
 // ─────────────────────────────────────────
 // SHA-1 (RFC 3174)
 // ─────────────────────────────────────────
@@ -272,8 +292,7 @@ bool WsServer::completeWsHandshake(SOCKET sock, const std::string &req)
 		"Connection: Upgrade\r\n"
 		"Sec-WebSocket-Accept: " +
 		computeAcceptKey(key) + "\r\n\r\n";
-	return ::send(sock, resp.c_str(), static_cast<int>(resp.size()), 0) ==
-	       static_cast<int>(resp.size());
+	return sendAll(sock, resp.c_str(), resp.size());
 }
 
 bool WsServer::parseEmoteGetPath(const std::string &req, std::string &outFileName)
@@ -315,7 +334,7 @@ static void sendFileResponse(SOCKET sock, const std::wstring &filePath,
 	if (hFile == INVALID_HANDLE_VALUE) {
 		if (notFoundLogTag)
 			obs_log(LOG_INFO, "[%s] file not found: %s", WSTAG, notFoundLogTag);
-		::send(sock, resp404, static_cast<int>(strlen(resp404)), 0);
+		sendAll(sock, resp404, strlen(resp404));
 		return;
 	}
 
@@ -323,7 +342,7 @@ static void sendFileResponse(SOCKET sock, const std::wstring &filePath,
 	if (!GetFileSizeEx(hFile, &size) || size.QuadPart < 0 ||
 	    static_cast<size_t>(size.QuadPart) > maxSize) {
 		CloseHandle(hFile);
-		::send(sock, resp413, static_cast<int>(strlen(resp413)), 0);
+		sendAll(sock, resp413, strlen(resp413));
 		return;
 	}
 
@@ -335,7 +354,7 @@ static void sendFileResponse(SOCKET sock, const std::wstring &filePath,
 	CloseHandle(hFile);
 
 	if (!ok) {
-		::send(sock, resp500, static_cast<int>(strlen(resp500)), 0);
+		sendAll(sock, resp500, strlen(resp500));
 		return;
 	}
 
@@ -346,9 +365,8 @@ static void sendFileResponse(SOCKET sock, const std::wstring &filePath,
 		"Cache-Control: no-cache\r\n"
 		"Access-Control-Allow-Origin: *\r\n"
 		"Connection: close\r\n\r\n";
-	::send(sock, header.c_str(), static_cast<int>(header.size()), 0);
-	if (!data.empty())
-		::send(sock, data.data(), static_cast<int>(data.size()), 0);
+	if (sendAll(sock, header.c_str(), header.size()) && !data.empty())
+		sendAll(sock, data.data(), data.size());
 }
 
 // メモリ上のバイナリをHTTPレスポンスとして返す共通ヘルパー（/vrm/model の配信で使用）。
@@ -362,10 +380,16 @@ static void sendBufferResponse(SOCKET sock, const std::vector<uint8_t> &data,
 		"Cache-Control: no-cache\r\n"
 		"Access-Control-Allow-Origin: *\r\n"
 		"Connection: close\r\n\r\n";
-	::send(sock, header.c_str(), static_cast<int>(header.size()), 0);
-	if (!data.empty())
-		::send(sock, reinterpret_cast<const char *>(data.data()),
-		       static_cast<int>(data.size()), 0);
+	// VRMバイナリは数MB〜十数MBに達することがあり、単発のsend()では確実に部分送信になる
+	// （Displayが受け取るボディがContent-Lengthより短くなり、fetch()が失敗する／glTFの
+	// パースが壊れる原因になっていた。sendAll()参照）。
+	if (sendAll(sock, header.c_str(), header.size()) && !data.empty()) {
+		if (!sendAll(sock, reinterpret_cast<const char *>(data.data()), data.size())) {
+			obs_log(LOG_WARNING,
+				"[%s] sendBufferResponse: VRMボディ送信が完了しませんでした（%zu bytes）",
+				WSTAG, data.size());
+		}
+	}
 }
 
 void WsServer::serveEmoteImage(SOCKET sock, const std::string &fileName)
@@ -489,7 +513,7 @@ void WsServer::serveVrmModel(SOCKET sock)
 	if (data.empty()) {
 		static const char *resp404 =
 			"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-		::send(sock, resp404, static_cast<int>(strlen(resp404)), 0);
+		sendAll(sock, resp404, strlen(resp404));
 		return;
 	}
 	sendBufferResponse(sock, data, "application/octet-stream");
@@ -509,7 +533,7 @@ void WsServer::handleVrmModelUpload(SOCKET sock, const std::string &request)
 	const long contentLength = parseContentLength(request);
 	const size_t kMaxVrmSize = 256 * 1024 * 1024; // 256MB上限（異常アップロードへの防御）
 	if (contentLength < 0 || static_cast<size_t>(contentLength) > kMaxVrmSize) {
-		::send(sock, resp400, static_cast<int>(strlen(resp400)), 0);
+		sendAll(sock, resp400, strlen(resp400));
 		return;
 	}
 
@@ -533,13 +557,13 @@ void WsServer::handleVrmModelUpload(SOCKET sock, const std::string &request)
 		timeval tv{10, 0};
 		if (select(0, &fds, nullptr, nullptr, &tv) <= 0) {
 			obs_log(LOG_WARNING, "[%s] VRMアップロード: recv timeout/error", WSTAG);
-			::send(sock, resp500, static_cast<int>(strlen(resp500)), 0);
+			sendAll(sock, resp500, strlen(resp500));
 			return;
 		}
 		char tmp[65536];
 		const int n = recv(sock, tmp, sizeof(tmp), 0);
 		if (n <= 0) {
-			::send(sock, resp500, static_cast<int>(strlen(resp500)), 0);
+			sendAll(sock, resp500, strlen(resp500));
 			return;
 		}
 		body.insert(body.end(), tmp, tmp + n);
@@ -560,7 +584,7 @@ void WsServer::handleVrmModelUpload(SOCKET sock, const std::string &request)
 	obs_log(LOG_INFO, "[%s] VRMモデルをキャッシュしました: %s (%ld bytes)", WSTAG, name.c_str(),
 	        contentLength);
 
-	::send(sock, resp200, static_cast<int>(strlen(resp200)), 0);
+	sendAll(sock, resp200, strlen(resp200));
 
 	// Displayクライアント（OBSブラウザソース等）へモデル更新を通知する
 	const std::string syncJson =
@@ -713,9 +737,11 @@ void WsServer::broadcast(const std::string &jsonText)
 	int sent = 0;
 	auto it = clients_.begin();
 	while (it != clients_.end()) {
-		const int n = ::send(*it, reinterpret_cast<const char *>(frame.data()),
-				     static_cast<int>(frame.size()), 0);
-		if (n == SOCKET_ERROR) {
+		// sendAll(): 1回のsend()で全バイト送れる保証がない（部分送信）。特に
+		// vrm_room_control/vrm_call_signal（SDPを含み数百〜数KBになりうる）で
+		// これを怠ると、受信側は「途中で切れたJSON」を受け取ってJSON.parse()に失敗し、
+		// 承認・SDP/ICE交換が理由不明のまま止まって見える不具合の原因になっていた。
+		if (!sendAll(*it, reinterpret_cast<const char *>(frame.data()), frame.size())) {
 			obs_log(LOG_WARNING, "[%s] broadcast: send failed, removing client (WSA=%d)",
 				WSTAG, WSAGetLastError());
 			closesocket(*it);
@@ -856,7 +882,7 @@ void WsServer::clientLoop(SOCKET sock)
 			"Access-Control-Max-Age: 86400\r\n"
 			"Content-Length: 0\r\n"
 			"Connection: close\r\n\r\n";
-		::send(sock, respOptions, static_cast<int>(strlen(respOptions)), 0);
+		sendAll(sock, respOptions, strlen(respOptions));
 		closesocket(sock);
 		--activeClients_;
 		return;

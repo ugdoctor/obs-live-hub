@@ -1020,13 +1020,16 @@ function uploadVrmToPlugin(arrayBuffer, fileName) {
 
 function fetchVrmModelFromServer(name) {
   setStatus('VRMをOBS側キャッシュから取得中…');
+  console.info('[vrm_stage:model] GET ' + VRM_MODEL_URL + ' を開始します');
   return fetch(VRM_MODEL_URL).then(function(res) {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     return res.arrayBuffer();
   }).then(function(buf) {
+    console.info('[vrm_stage:model] GET ' + VRM_MODEL_URL + ' 成功（' + buf.byteLength + ' bytes）');
     loadVrmBinary(buf, name || 'model.vrm', { persist: false, upload: false });
   }).catch(function(err) {
     setStatus('VRM取得に失敗しました: ' + (err && err.message ? err.message : String(err)));
+    console.warn('[vrm_stage:model] GET ' + VRM_MODEL_URL + ' 失敗:', err);
     throw err;
   });
 }
@@ -1302,8 +1305,33 @@ var vmcLastBoneCount = 0;
 var vmcLastMorphCount = 0;
 var vmcLastBoneSamples = {}; // デバッグパネル表示用（主要ボーンの受信値をそのまま保持）
 
+// 不具合3対策: WsServerが流すVMCブロードキャストは「1台のPC＝1人のトラッキング対象」を
+// 前提にしている（本番運用では参加者ごとに別PC・別WsServerインスタンスを使うため、
+// 他人のVMCデータが混ざることはない）。ただし同一PC上で複数のControllerタブを開いて
+// ローカルテストする場合は1つのWsServerインスタンスを全タブが共有するため、VMC
+// ブロードキャストが「ルーム作成者（ホスト）」以外のタブ（ゲスト役のタブ）にも届いてしまい、
+// ゲストのアバターまでホストの動きに乗っ取られてしまう。ルームに「ゲストとして」参加している
+// 間だけ、このタブではローカルVMCを無視して自分のWebカメラ入力のみを反映する。
+var lastVmcApplyDecisionLogged = null; // 状態が変わった時だけログを出す（VMCは高頻度のためスパム防止）
+function shouldApplyLocalVmc() {
+  var apply = !callState.roomId || isLocalOperatorHost(); // 通話未参加時は従来通り常に適用する
+  if (apply !== lastVmcApplyDecisionLogged) {
+    lastVmcApplyDecisionLogged = apply;
+    console.info('[vrm_stage:vmc] ローカルVMCブロードキャストの適用可否が変化: '
+      + (apply ? '適用する' : '無視する（ゲスト役のタブのため）')
+      + '（roomId=' + callState.roomId + ', isHost=' + callState.isHost
+      + ', localIsHost=' + callState.localIsHost + '）');
+  }
+  return apply;
+}
+
 function onVmcUpdateReceived(data) {
   if (!currentVrm) return;
+  // ここでreturnする場合、lastVmcReceivedAt等は一切更新しない＝「VMCを受信していない」のと
+  // 同じ扱いにすることで、このタブ自身のWebカメラトラッキング（Kalidokit）が
+  // isVmcActive()判定に妨げられず正常に動き続けるようにする。
+  if (!shouldApplyLocalVmc()) return;
+
   lastVmcReceivedAt = performance.now();
   vmcMsgCount++;
 
@@ -1400,7 +1428,12 @@ function connectWs() {
       if (data.type === 'vrm_pose_update') onPoseUpdateReceived(data);
       else if (data.type === 'vrm_model_sync') fetchVrmModelFromServer(data.name);
       else if (data.type === 'vrm_transform_update') onTransformUpdateReceived(data);
-    } catch (_) {}
+    } catch (err) {
+      // 不具合1対策: 以前はここで例外を完全に握りつぶしており、承認・SDP/ICE交換処理中に
+      // 例外が起きても「何も起きていないように見える」まま止まってしまい切り分けが困難だった。
+      // 受信データそのものも出力し、どのメッセージの処理で失敗したかを追えるようにする。
+      console.error('[vrm_stage:ws] onmessage処理中にエラー:', err, 'raw=', e.data);
+    }
   };
 }
 
@@ -1751,6 +1784,7 @@ function approveWaitingPeer(peerId) {
   delete callState.waitingPeers[peerId];
   renderCallWaitingList();
   callState.peers[peerId] = makeCallPeer(peerId, waiting.displayName);
+  console.info('[vrm_stage:room] 承認: ' + peerId + ' (' + waiting.displayName + ') → approve送信 + roster配信');
   sendRoomControl({ action: 'approve', targetPeerId: peerId });
   broadcastRoster();
   ensureConnectionToPeer(peerId);
@@ -1760,12 +1794,14 @@ function approveWaitingPeer(peerId) {
 function rejectWaitingPeer(peerId, reason) {
   delete callState.waitingPeers[peerId];
   renderCallWaitingList();
+  console.info('[vrm_stage:room] 拒否: ' + peerId + ' reason=' + (reason || 'host_declined'));
   sendRoomControl({ action: 'reject', targetPeerId: peerId, reason: reason || 'host_declined' });
 }
 
 function kickCallPeer(peerId) {
   if (!callState.isHost) return;
   callState.bannedPeerIds[peerId] = true; // セッションBAN: このルームが存続する間、再参加を拒否する
+  console.info('[vrm_stage:room] キック: ' + peerId);
   sendRoomControl({ action: 'kick', targetPeerId: peerId });
   disconnectCallPeer(peerId, null);
   broadcastRoster();
@@ -1773,16 +1809,25 @@ function kickCallPeer(peerId) {
 
 function handleRoomControl(msg) {
   var action = msg.action;
+  console.info('[vrm_stage:room] 受信 action=' + action + ' from=' + msg.fromPeerId
+    + ' roomId=' + msg.roomId + ' (自分: myPeerId=' + callState.myPeerId
+    + ' isHost=' + callState.isHost + ' roomId=' + callState.roomId + ')');
 
   // join_request / join_ack はroomId確定前に処理する必要があるため、roomIdゲートより先に扱う
   if (action === 'join_request') {
     if (!callState.isHost) return;
-    if (msg.inviteCode !== callState.inviteCode) return; // 失効済み・誤入力のコードは無視
+    if (msg.inviteCode !== callState.inviteCode) {
+      console.warn('[vrm_stage:room] join_request却下: 招待コード不一致 (受信="' + msg.inviteCode
+        + '" 現在="' + callState.inviteCode + '")');
+      return;
+    }
     if (callState.bannedPeerIds[msg.fromPeerId]) {
+      console.warn('[vrm_stage:room] join_request却下: banned peerId=' + msg.fromPeerId);
       sendRoomControl({ action: 'reject', targetPeerId: msg.fromPeerId, reason: 'banned' });
       return;
     }
     if (Object.keys(callState.peers).length >= CALL_MAX_PARTICIPANTS - 1) {
+      console.warn('[vrm_stage:room] join_request却下: room_full');
       sendRoomControl({ action: 'reject', targetPeerId: msg.fromPeerId, reason: 'room_full' });
       return;
     }
@@ -1790,12 +1835,14 @@ function handleRoomControl(msg) {
       displayName: msg.displayName || msg.fromPeerId, requestedAt: Date.now()
     };
     renderCallWaitingList();
+    console.info('[vrm_stage:room] join_request受理 → 待合室へ追加 + join_ack送信: ' + msg.fromPeerId);
     sendRoomControl({ action: 'join_ack', targetPeerId: msg.fromPeerId, roomId: callState.roomId });
     return;
   }
   if (action === 'join_ack') {
     if (msg.targetPeerId !== callState.myPeerId) return;
     callState.roomId = msg.roomId; // ここで初めて内部roomIdを取得する
+    console.info('[vrm_stage:room] join_ack受信 → roomId確定=' + callState.roomId + '、ホストの承認待ち');
     setCallStatus('ホストの承認待ちです…');
     return;
   }
@@ -1803,9 +1850,15 @@ function handleRoomControl(msg) {
     if (!callState.isHost) return;
     if (msg.roomId !== callState.roomId) return;
     var parentOk = msg.shadowOfPeerId === callState.myPeerId || !!callState.peers[msg.shadowOfPeerId];
-    if (!parentOk) return; // 現在のロースターに存在しない相手の「分身」は信用しない
+    if (!parentOk) {
+      console.warn('[vrm_stage:room] shadow_join_request却下: shadowOfPeerId='
+        + msg.shadowOfPeerId + ' がロースターに存在しません');
+      return; // 現在のロースターに存在しない相手の「分身」は信用しない
+    }
     callState.peers[msg.fromPeerId] = makeCallPeer(
       msg.fromPeerId, rosterDisplayName(msg.shadowOfPeerId) + '(Display)');
+    console.info('[vrm_stage:room] shadow_join_request自動承認: ' + msg.fromPeerId
+      + ' (shadowOf=' + msg.shadowOfPeerId + ')');
     sendRoomControl({ action: 'approve', targetPeerId: msg.fromPeerId });
     broadcastRoster();
     ensureConnectionToPeer(msg.fromPeerId);
@@ -1814,26 +1867,36 @@ function handleRoomControl(msg) {
   }
 
   // 以降はroomIdが既知かつ一致する場合のみ処理する
-  if (!callState.roomId || msg.roomId !== callState.roomId) return;
+  if (!callState.roomId || msg.roomId !== callState.roomId) {
+    console.warn('[vrm_stage:room] action=' + action + ' をroomId不一致のため無視 (受信='
+      + msg.roomId + ' 現在=' + callState.roomId + ')');
+    return;
+  }
 
   if (action === 'approve') {
     if (msg.targetPeerId !== callState.myPeerId) return;
+    console.info('[vrm_stage:room] approve受信 → ルーム参加完了、roster待ち');
     setCallStatus('ルームに参加しました。');
     showCallRoomUi();
     return;
   }
   if (action === 'reject') {
     if (msg.targetPeerId !== callState.myPeerId) return;
+    console.warn('[vrm_stage:room] reject受信: reason=' + msg.reason);
     setCallStatus('参加を拒否されました' + (msg.reason ? '（' + msg.reason + '）' : ''));
     callState.roomId = null;
     return;
   }
   if (action === 'roster') {
-    if (!callState.isHost) applyRosterUpdate(msg);
+    if (!callState.isHost) {
+      console.info('[vrm_stage:room] roster受信 members=' + JSON.stringify((msg.members || []).map(function(m) { return m.peerId; })));
+      applyRosterUpdate(msg);
+    }
     return;
   }
   if (action === 'kick') {
     if (msg.targetPeerId === callState.myPeerId) {
+      console.warn('[vrm_stage:room] 自分がキックされました');
       setCallStatus('ホストにより退出させられました。');
       leaveCallRoom();
     } else {
@@ -1862,6 +1925,7 @@ function ensureConnectionToPeer(peerId) {
   var peer = callState.peers[peerId];
   if (!peer || peer.pc) return;
   var isInitiator = callState.myPeerId < peerId;
+  console.info('[vrm_stage:call] ensureConnectionToPeer(' + peerId + ') isInitiator=' + isInitiator);
   peer.pc = createPeerConnectionFor(peer, isInitiator);
   if (isInitiator) negotiateOffer(peer);
 }
@@ -1883,6 +1947,9 @@ function createPeerConnectionFor(peer, isInitiator) {
     if (e.streams && e.streams[0]) attachRemoteAudioTrack(peer, e.streams[0]);
   };
   pc.onconnectionstatechange = function() {
+    // 承認・SDP/ICE交換がどこまで進んだかを切り分けやすくするため、全状態遷移を出力する
+    // （new → connecting → connected、または failed/disconnected 等）
+    console.info('[vrm_stage:call] pc(' + peer.peerId + ').connectionState = ' + pc.connectionState);
     renderCallParticipantsList();
     if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
       // 相手がクラッシュ/回線切断等で"leave"を送れないまま消えた場合の保険。
@@ -1892,7 +1959,16 @@ function createPeerConnectionFor(peer, isInitiator) {
       disconnectCallPeer(peer.peerId, (peer.displayName || peer.peerId) + ' との接続が切断されました');
     }
   };
-  pc.ondatachannel = function(e) { wireDataChannel(peer, e.channel, e.channel.label); };
+  pc.oniceconnectionstatechange = function() {
+    // NAT越え・ファイアウォール起因の失敗はconnectionStateよりこちらに先に現れることが多い
+    // （checking → connected/failed 等）。ICE自体が失敗している場合はTURN設定や
+    // 「プライバシー保護（TURN中継）モード」への切替を検討する
+    console.info('[vrm_stage:call] pc(' + peer.peerId + ').iceConnectionState = ' + pc.iceConnectionState);
+  };
+  pc.ondatachannel = function(e) {
+    console.info('[vrm_stage:call] ondatachannel(' + peer.peerId + ') label=' + e.channel.label);
+    wireDataChannel(peer, e.channel, e.channel.label);
+  };
 
   // Controllerのみローカルのマイク音声を送る（Displayは受信専用として動作する）
   if (!isDisplayMode && localMediaStream) {
@@ -1911,6 +1987,7 @@ function negotiateOffer(peer) {
   peer.pc.createOffer().then(function(offer) {
     return peer.pc.setLocalDescription(offer);
   }).then(function() {
+    console.info('[vrm_stage:call] offer送信 → ' + peer.peerId + ' (sdp ' + peer.pc.localDescription.sdp.length + ' bytes)');
     sendCallSignal(peer.peerId, 'offer', peer.pc.localDescription.sdp, null);
   }).catch(function(err) { console.warn('[vrm_stage:call] createOffer failed', err); });
 }
@@ -1933,18 +2010,29 @@ function handleCallSignal(msg) {
   if (msg.toPeerId !== callState.myPeerId) return;
 
   var peer = callState.peers[msg.fromPeerId];
-  if (!peer) return; // ロースターに存在しない相手からのシグナルは無視する（承認フロー経由のみ許可）
+  if (!peer) {
+    // 不具合1対策: 以前はここで完全に無言でdropしていたが、これは「roster/approveの処理が
+    // signalTypeの到着より遅れている（もしくは失敗している）」ことの直接の兆候であり、
+    // 承認フローが停止して見える不具合の切り分けに重要なため警告として出力する。
+    console.warn('[vrm_stage:call] signalType=' + msg.signalType + ' from=' + msg.fromPeerId
+      + ' を無視: ロースターにこのpeerIdが存在しません（roster/approveの受信が遅れているか'
+      + '失敗している可能性）');
+    return; // ロースターに存在しない相手からのシグナルは無視する（承認フロー経由のみ許可）
+  }
   if (!peer.pc) peer.pc = createPeerConnectionFor(peer, callState.myPeerId < msg.fromPeerId);
 
   if (msg.signalType === 'offer') {
+    console.info('[vrm_stage:call] offer受信 ← ' + msg.fromPeerId + ' (sdp ' + (msg.sdp || '').length + ' bytes)');
     peer.pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp }).then(function() {
       return peer.pc.createAnswer();
     }).then(function(answer) {
       return peer.pc.setLocalDescription(answer);
     }).then(function() {
+      console.info('[vrm_stage:call] answer送信 → ' + peer.peerId + ' (sdp ' + peer.pc.localDescription.sdp.length + ' bytes)');
       sendCallSignal(peer.peerId, 'answer', peer.pc.localDescription.sdp, null);
     }).catch(function(err) { console.warn('[vrm_stage:call] createAnswer failed', err); });
   } else if (msg.signalType === 'answer') {
+    console.info('[vrm_stage:call] answer受信 ← ' + msg.fromPeerId + ' (sdp ' + (msg.sdp || '').length + ' bytes)');
     peer.pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp }).catch(function(err) {
       console.warn('[vrm_stage:call] setRemoteDescription(answer) failed', err);
     });
@@ -1958,8 +2046,14 @@ function handleCallSignal(msg) {
 // ── データチャンネル（姿勢データ + VRMバイナリ転送） ──────────────────────
 
 function wireDataChannel(peer, channel, label) {
+  channel.onclose = function() {
+    console.info('[vrm_stage:call] dataChannel(' + peer.peerId + ', ' + label + ') closed');
+  };
   if (label === 'pose') {
     peer.dataChannel = channel;
+    channel.onopen = function() {
+      console.info('[vrm_stage:call] dataChannel(' + peer.peerId + ', pose) open');
+    };
     channel.onmessage = function(e) {
       try { applyRemotePeerPose(peer, JSON.parse(e.data)); } catch (_) {}
     };
@@ -1968,6 +2062,10 @@ function wireDataChannel(peer, channel, label) {
     channel.binaryType = 'arraybuffer';
     channel.bufferedAmountLowThreshold = 262144;
     channel.onopen = function() {
+      console.info('[vrm_stage:call] dataChannel(' + peer.peerId + ', vrm) open'
+        + (!isDisplayMode && localVrmArrayBufferForCall
+          ? ' → 自分のVRM送信開始 (' + localVrmArrayBufferForCall.byteLength + ' bytes)'
+          : ' → 送信するVRMなし（Displayまたは未読込）'));
       if (!isDisplayMode && localVrmArrayBufferForCall) {
         sendVrmOverDataChannel(peer, localVrmArrayBufferForCall, localVrmFileNameForCall);
       }
@@ -2050,8 +2148,11 @@ function handleVrmChunkReceived(peer, data) {
     try {
       var msg = JSON.parse(data);
       if (msg.kind === 'vrm-start') {
+        console.info('[vrm_stage:call] VRM受信開始 ← ' + peer.peerId + ' (' + msg.fileName + ', ' + msg.size + ' bytes)');
         peer.vrmReceiveBuffer = { chunks: [], receivedSize: 0, totalSize: msg.size, fileName: msg.fileName };
       } else if (msg.kind === 'vrm-end') {
+        console.info('[vrm_stage:call] VRM受信完了 ← ' + peer.peerId + ' ('
+          + (peer.vrmReceiveBuffer ? peer.vrmReceiveBuffer.receivedSize : '?') + ' bytes受信)');
         finishRemoteVrmReceive(peer);
       }
     } catch (_) {}
@@ -2080,6 +2181,8 @@ function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
   // 描画）と同一人物の二重表示になる。VMCは常にcurrentVrmだけに適用し、リモートアバターは
   // 純粋な他人（DataChannel経由の他ピア）のみに限定するため、ここでロード自体を行わない。
   if (isDisplayMode && callState.shadowParentPeerId && peer.peerId === callState.shadowParentPeerId) {
+    console.info('[vrm_stage:call] ' + peer.peerId + ' は自分自身の分身のためVRMロードをスキップ'
+      + '（currentVrmが既にホスト自身のモデルを表示している）');
     return;
   }
   var blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: 'model/gltf-binary' }));
@@ -2088,7 +2191,12 @@ function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
     URL.revokeObjectURL(blobUrl); // ロード完了後は即座に解放する（メモリ限定保持）
     if (peer.pendingBlobUrl === blobUrl) peer.pendingBlobUrl = null;
     var vrm = gltf.userData.vrm;
-    if (!vrm) return;
+    if (!vrm) {
+      console.warn('[vrm_stage:call] ' + peer.peerId + ' のVRMパース失敗: gltf.userData.vrmが空です'
+        + '（受信データが壊れている可能性）');
+      return;
+    }
+    console.info('[vrm_stage:call] ' + peer.peerId + ' のVRMロード成功 → シーンに追加します');
     disposeCallPeerVrm(peer); // 差し替え時は古いモデルを完全破棄してから入れ替える
     if (vrm.meta && vrm.meta.metaVersion === '0' && VRMUtils.rotateVRM0) VRMUtils.rotateVRM0(vrm);
     peer.vrm = vrm;
@@ -2391,9 +2499,30 @@ function setDisplayMode(flag) {
 //          フォールバックする。
 // Controller: 常に自分のIndexedDBキャッシュから復元する（復元後、プラグイン側キャッシュも
 //          再アップロードで最新化される。autoLoadCachedVrm参照）。
+// 不具合2対策: initModelForMode()実行時点ではControllerがまだ/vrm/modelへホスト自身の
+// モデルをアップロードし切っていない（起動直後の一瞬のタイミング差）、またはこのDisplayの
+// WebSocket接続が確立する前にアップロード（vrm_model_syncのブロードキャスト契機）が
+// 完了してしまっていた（"init()"内でinitModelForMode()がconnectWsWatchdog()より先に
+// 呼ばれるため、その間に発生したvrm_model_syncを取りこぼす）等の理由で、Displayが
+// 一度のGET /vrm/modelでホストのモデルを取得できないケースがある。
+// currentVrmが読み込まれるまで一定間隔でリトライし続けることで、
+// 「OBS Displayにホスト自身のモデルが描画されない」不具合を解消する。
+var HOST_MODEL_FETCH_RETRY_MS = 3000;
+function scheduleHostModelRetry() {
+  if (!isDisplayMode) return;
+  setTimeout(function() {
+    if (currentVrm) return; // vrm_model_sync受信等、別経路で既に読み込めていれば不要
+    console.warn('[vrm_stage:model] ホスト自身のモデル（currentVrm）が未読込のため再取得を試みます');
+    fetchVrmModelFromServer().catch(function() { scheduleHostModelRetry(); });
+  }, HOST_MODEL_FETCH_RETRY_MS);
+}
+
 function initModelForMode() {
   if (isDisplayMode) {
-    fetchVrmModelFromServer().catch(function() { autoLoadCachedVrm(); });
+    fetchVrmModelFromServer().catch(function() {
+      autoLoadCachedVrm();
+      scheduleHostModelRetry();
+    });
   } else {
     autoLoadCachedVrm();
   }
