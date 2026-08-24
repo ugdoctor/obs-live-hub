@@ -2088,28 +2088,45 @@ function broadcastOwnVrmModel(force) {
   sendVrmModelOverWs(localVrmArrayBufferForCall, localVrmFileNameForCall);
 }
 
-function sendVrmModelOverWs(arrayBuffer, fileName) {
+var CALL_VRM_CHUNK_PACING_EVERY = 10; // このチャンク数ごとに一呼吸置く（要件1: バースト送信対策）
+var CALL_VRM_CHUNK_PACING_MS = 5;
+
+function wait(ms) { return new Promise(function(resolve) { setTimeout(resolve, ms); }); }
+
+// 不具合対策: 送信の取りこぼし自体はWebSocket（TCP）の性質上考えにくいが、大きなVRMを
+// チャンクに分けて一気に(同期的に)送ると、他の低遅延メッセージ（モーション同期等）が
+// 詰まって遅延する・WsServer側の送信キューが一時的に肥大化するおそれがあるため、
+// 一定チャンクごとに小休止を挟んで送信をならす。各チャンクにindex/totalChunksを付与し、
+// 受信側が抜け漏れなく揃ったかを確実に検証できるようにする（要件1）。
+async function sendVrmModelOverWs(arrayBuffer, fileName) {
   var total = arrayBuffer.byteLength;
-  diagInfo('VRM', '自分のVRMをルームへ送信開始 (' + fileName + ', ' + total + ' bytes)');
+  var totalChunks = Math.max(1, Math.ceil(total / CALL_VRM_WS_CHUNK_BYTES));
+  diagInfo('VRM', '自分のVRMをルームへ送信開始 (' + fileName + ', ' + total + ' bytes, ' + totalChunks + 'チャンク)');
   ws.send(JSON.stringify({
     type: 'vrm_peer_model_start', roomId: callState.roomId, fromPeerId: callState.myPeerId,
-    fileName: fileName, size: total
+    fileName: fileName, size: total, totalChunks: totalChunks
   }));
-  var offset = 0, seq = 0;
-  while (offset < total) {
+  var offset = 0;
+  for (var index = 0; index < totalChunks; index++) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      diagWarn('VRM', '自分のVRM送信を中断しました（WebSocket切断、' + index + '/' + totalChunks + 'チャンク送信済み）');
+      return;
+    }
     var len = Math.min(CALL_VRM_WS_CHUNK_BYTES, total - offset);
     var b64 = arrayBufferChunkToBase64(arrayBuffer, offset, len);
     ws.send(JSON.stringify({
       type: 'vrm_peer_model_chunk', roomId: callState.roomId, fromPeerId: callState.myPeerId,
-      seq: seq, data: b64
+      index: index, totalChunks: totalChunks, data: b64
     }));
     offset += len;
-    seq++;
+    if ((index + 1) % CALL_VRM_CHUNK_PACING_EVERY === 0 && index + 1 < totalChunks) {
+      await wait(CALL_VRM_CHUNK_PACING_MS);
+    }
   }
   ws.send(JSON.stringify({
-    type: 'vrm_peer_model_end', roomId: callState.roomId, fromPeerId: callState.myPeerId, totalChunks: seq
+    type: 'vrm_peer_model_end', roomId: callState.roomId, fromPeerId: callState.myPeerId, totalChunks: totalChunks
   }));
-  diagInfo('VRM', '自分のVRM送信完了 (' + seq + 'チャンク)');
+  diagInfo('VRM', '自分のVRM送信完了 (' + totalChunks + 'チャンク)');
 }
 
 // vrm_peer_model_start/chunk/endの3種をまとめて扱う（ws.onmessage参照）。
@@ -2120,13 +2137,31 @@ function handlePeerModelControl(data) {
   if (!peer) return; // ロースターに存在しない相手からのVRMは無視する（承認フロー経由のみ許可）
 
   if (data.type === 'vrm_peer_model_start') {
-    diagInfo('VRM', '受信開始 ← ' + data.fromPeerId + ' (' + data.fileName + ', ' + data.size + ' bytes)');
-    peer.vrmReceiveBuffer = { chunks: [], receivedSize: 0, totalSize: data.size, fileName: data.fileName, lastLoggedMilestone: 0 };
+    diagInfo('VRM', '受信開始 ← ' + data.fromPeerId + ' (' + data.fileName + ', ' + data.size
+      + ' bytes, ' + data.totalChunks + 'チャンク)');
+    // 不具合対策: chunks は index をキーとしたスパース配列として管理し、receivedCount で
+    // 実際に揃った件数を追跡する（到着順への依存を排し、抜け漏れを確実に検出する。要件1）。
+    peer.vrmReceiveBuffer = {
+      chunks: new Array(data.totalChunks || 0),
+      receivedCount: 0,
+      totalChunks: data.totalChunks || 0,
+      receivedSize: 0,
+      totalSize: data.size,
+      fileName: data.fileName,
+      lastLoggedMilestone: 0
+    };
   } else if (data.type === 'vrm_peer_model_chunk') {
-    if (!peer.vrmReceiveBuffer) return; // start未受信のchunkは無視（順序保証されたWebSocket接続のため通常は発生しない）
-    var bytes = base64ToUint8Array(data.data);
     var buf = peer.vrmReceiveBuffer;
-    buf.chunks.push(bytes);
+    if (!buf) return; // start未受信のchunkは無視
+    var index = data.index;
+    if (typeof index !== 'number' || index < 0 || (buf.totalChunks && index >= buf.totalChunks)) {
+      diagWarn('VRM', data.fromPeerId + ' から範囲外のindex=' + index + 'のチャンクを受信、破棄します');
+      return;
+    }
+    if (buf.chunks[index] !== undefined) return; // 重複受信は無視（何らかの理由で再送された場合）
+    var bytes = base64ToUint8Array(data.data);
+    buf.chunks[index] = bytes;
+    buf.receivedCount++;
     buf.receivedSize += bytes.byteLength;
     // 25%刻みで進捗をログする（チャンクごとだと数百行になり得るため間引く）
     if (buf.totalSize > 0) {
@@ -2135,22 +2170,42 @@ function handlePeerModelControl(data) {
       if (milestone > (buf.lastLoggedMilestone || 0)) {
         buf.lastLoggedMilestone = milestone;
         diagInfo('VRM', '受信中 ← ' + data.fromPeerId + ' ' + milestone + '% ('
+          + buf.receivedCount + '/' + buf.totalChunks + 'チャンク, '
           + buf.receivedSize + ' / ' + buf.totalSize + ' bytes)');
       }
     }
   } else if (data.type === 'vrm_peer_model_end') {
-    diagInfo('VRM', '受信完了 ← ' + data.fromPeerId + ' ('
-      + (peer.vrmReceiveBuffer ? peer.vrmReceiveBuffer.receivedSize : '?') + ' bytes受信) → デコード中…');
-    finishRemoteVrmReceive(peer);
+    finishRemoteVrmReceive(peer, data.fromPeerId);
   }
 }
 
-function finishRemoteVrmReceive(peer) {
+// 要件1: 全チャンクが揃った（receivedCount === totalChunks、かつchunks配列に穴が無い）ことを
+// 確認してから結合・デコードする。欠落がある場合はデコードを行わず警告のみ出す
+// （中途半端なArrayBufferをgltfLoaderへ渡すと分かりにくいパースエラーになるため）。
+function finishRemoteVrmReceive(peer, fromPeerId) {
   var buf = peer.vrmReceiveBuffer;
   if (!buf) return;
+  if (buf.totalChunks > 0 && buf.receivedCount !== buf.totalChunks) {
+    diagWarn('VRM', fromPeerId + ' のVRM受信が不完全です（' + buf.receivedCount + '/'
+      + buf.totalChunks + 'チャンクのみ受信）。デコードを中止します。');
+    peer.vrmReceiveBuffer = null;
+    return;
+  }
+  for (var i = 0; i < buf.chunks.length; i++) {
+    if (buf.chunks[i] === undefined) {
+      diagWarn('VRM', fromPeerId + ' のVRM受信データにindex=' + i + 'の欠落があります。デコードを中止します。');
+      peer.vrmReceiveBuffer = null;
+      return;
+    }
+  }
+  diagInfo('VRM', '受信完了 ← ' + fromPeerId + '（全' + buf.receivedCount + '/' + buf.totalChunks
+    + 'チャンク、' + buf.receivedSize + ' bytes）→ デコード中…');
   var combined = new Uint8Array(buf.receivedSize);
   var pos = 0;
-  buf.chunks.forEach(function(chunk) { combined.set(chunk, pos); pos += chunk.byteLength; });
+  for (var j = 0; j < buf.chunks.length; j++) {
+    combined.set(buf.chunks[j], pos);
+    pos += buf.chunks[j].byteLength;
+  }
   peer.vrmReceiveBuffer = null;
   loadRemoteParticipantVrmBinary(peer, combined.buffer, buf.fileName);
 }
