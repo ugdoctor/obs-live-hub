@@ -519,14 +519,53 @@ void WsServer::serveVrmModel(SOCKET sock)
 	sendBufferResponse(sock, data, "application/octet-stream");
 }
 
+// Content-Lengthヘッダの値ぶんだけボディを読み切る共通ヘルパー（POST /vrm/model と
+// POST /vrm/peer_upload で共用）。readHttpRequest()が既に読んでいたヘッダ後方のスピルオーバー
+// 分を起点に、残りをrecv()で読み進める。失敗時は500応答を送信済みでfalseを返す。
+static bool readHttpBodyByContentLength(SOCKET sock, const std::string &request, long contentLength,
+                                         std::vector<uint8_t> &outBody)
+{
+	static const char *resp500 =
+		"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+	outBody.clear();
+	outBody.reserve(static_cast<size_t>(contentLength));
+	const size_t headerEnd = request.find("\r\n\r\n");
+	if (headerEnd != std::string::npos) {
+		const size_t spillStart = headerEnd + 4;
+		if (spillStart < request.size())
+			outBody.assign(request.begin() + spillStart, request.end());
+	}
+	if (outBody.size() > static_cast<size_t>(contentLength))
+		outBody.resize(static_cast<size_t>(contentLength));
+
+	while (outBody.size() < static_cast<size_t>(contentLength)) {
+		fd_set fds;
+		FD_ZERO(&fds);
+		FD_SET(sock, &fds);
+		timeval tv{10, 0};
+		if (select(0, &fds, nullptr, nullptr, &tv) <= 0) {
+			obs_log(LOG_WARNING, "[%s] HTTPボディ読み込み: recv timeout/error", WSTAG);
+			sendAll(sock, resp500, strlen(resp500));
+			return false;
+		}
+		char tmp[65536];
+		const int n = recv(sock, tmp, sizeof(tmp), 0);
+		if (n <= 0) {
+			sendAll(sock, resp500, strlen(resp500));
+			return false;
+		}
+		outBody.insert(outBody.end(), tmp, tmp + n);
+	}
+	if (outBody.size() > static_cast<size_t>(contentLength))
+		outBody.resize(static_cast<size_t>(contentLength));
+	return true;
+}
+
 void WsServer::handleVrmModelUpload(SOCKET sock, const std::string &request)
 {
 	static const char *resp400 =
 		"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-	static const char *resp413 =
-		"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-	static const char *resp500 =
-		"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 	static const char *resp200 =
 		"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
 
@@ -537,39 +576,9 @@ void WsServer::handleVrmModelUpload(SOCKET sock, const std::string &request)
 		return;
 	}
 
-	// readHttpRequest() が読んだバッファの中に、ヘッダに続くボディの先頭部分（スピルオーバー）が
-	// 既に含まれている場合があるため、それを起点に残りをrecv()で読み進める。
 	std::vector<uint8_t> body;
-	body.reserve(static_cast<size_t>(contentLength));
-	const size_t headerEnd = request.find("\r\n\r\n");
-	if (headerEnd != std::string::npos) {
-		const size_t spillStart = headerEnd + 4;
-		if (spillStart < request.size())
-			body.assign(request.begin() + spillStart, request.end());
-	}
-	if (body.size() > static_cast<size_t>(contentLength))
-		body.resize(static_cast<size_t>(contentLength));
-
-	while (body.size() < static_cast<size_t>(contentLength)) {
-		fd_set fds;
-		FD_ZERO(&fds);
-		FD_SET(sock, &fds);
-		timeval tv{10, 0};
-		if (select(0, &fds, nullptr, nullptr, &tv) <= 0) {
-			obs_log(LOG_WARNING, "[%s] VRMアップロード: recv timeout/error", WSTAG);
-			sendAll(sock, resp500, strlen(resp500));
-			return;
-		}
-		char tmp[65536];
-		const int n = recv(sock, tmp, sizeof(tmp), 0);
-		if (n <= 0) {
-			sendAll(sock, resp500, strlen(resp500));
-			return;
-		}
-		body.insert(body.end(), tmp, tmp + n);
-	}
-	if (body.size() > static_cast<size_t>(contentLength))
-		body.resize(static_cast<size_t>(contentLength));
+	if (!readHttpBodyByContentLength(sock, request, contentLength, body))
+		return; // 失敗時はreadHttpBodyByContentLength内で500応答済み
 
 	std::string name = urlDecode(parseHeaderValue(request, "x-vrm-name"));
 	if (name.empty())
@@ -590,6 +599,105 @@ void WsServer::handleVrmModelUpload(SOCKET sock, const std::string &request)
 	const std::string syncJson =
 		"{\"type\":\"vrm_model_sync\",\"name\":\"" + jsonEscape(name) + "\"}";
 	broadcast(syncJson);
+}
+
+std::string WsServer::parseQueryParam(const std::string &request, const std::string &paramName)
+{
+	const size_t lineEnd = request.find("\r\n");
+	const std::string requestLine = (lineEnd != std::string::npos) ? request.substr(0, lineEnd) : request;
+	const size_t qPos = requestLine.find('?');
+	if (qPos == std::string::npos)
+		return {};
+	const size_t spacePos = requestLine.find(' ', qPos);
+	const std::string query = requestLine.substr(
+		qPos + 1, spacePos == std::string::npos ? std::string::npos : spacePos - qPos - 1);
+
+	const std::string key = paramName + "=";
+	size_t pos = 0;
+	while (pos < query.size()) {
+		const size_t amp = query.find('&', pos);
+		const std::string pair =
+			query.substr(pos, amp == std::string::npos ? std::string::npos : amp - pos);
+		if (pair.compare(0, key.size(), key) == 0)
+			return urlDecode(pair.substr(key.size()));
+		if (amp == std::string::npos)
+			break;
+		pos = amp + 1;
+	}
+	return {};
+}
+
+void WsServer::servePeerModel(SOCKET sock, const std::string &peerId)
+{
+	std::vector<uint8_t> data;
+	if (!peerId.empty()) {
+		std::lock_guard<std::mutex> lock(peerModelsMutex_);
+		auto it = peerModels_.find(peerId);
+		if (it != peerModels_.end())
+			data = it->second; // ロック区間を短くするためコピーする
+	}
+	if (data.empty()) {
+		static const char *resp404 =
+			"HTTP/1.1 404 Not Found\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+		sendAll(sock, resp404, strlen(resp404));
+		return;
+	}
+	sendBufferResponse(sock, data, "application/octet-stream");
+}
+
+void WsServer::handlePeerModelUpload(SOCKET sock, const std::string &request, const std::string &peerId)
+{
+	static const char *resp400 =
+		"HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+	static const char *resp200 =
+		"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
+
+	if (peerId.empty()) {
+		sendAll(sock, resp400, strlen(resp400));
+		return;
+	}
+
+	const long contentLength = parseContentLength(request);
+	const size_t kMaxVrmSize = 256 * 1024 * 1024; // 256MB上限（異常アップロードへの防御）
+	if (contentLength < 0 || static_cast<size_t>(contentLength) > kMaxVrmSize) {
+		sendAll(sock, resp400, strlen(resp400));
+		return;
+	}
+
+	std::vector<uint8_t> body;
+	if (!readHttpBodyByContentLength(sock, request, contentLength, body))
+		return; // 失敗時はreadHttpBodyByContentLength内で500応答済み
+
+	{
+		std::lock_guard<std::mutex> lock(peerModelsMutex_);
+		peerModels_[peerId] = std::move(body);
+	}
+
+	obs_log(LOG_INFO, "[%s] ピアVRMをキャッシュしました: peerId=%s (%ld bytes)", WSTAG, peerId.c_str(),
+	        contentLength);
+
+	sendAll(sock, resp200, strlen(resp200));
+
+	// ルーム内の他ピアへこのpeerIdのモデルが取得可能になったことを通知する。サーバー側では
+	// ルーム/宛先の概念を持たないため、他のvrm_*系メッセージと同じく全WebSocketクライアントへ
+	// ブロードキャストし、宛先フィルタ（roomId一致・ロースターに実在するpeerIdか）は
+	// vrm_stage.html側のJSが行う。
+	const std::string readyJson =
+		"{\"type\":\"vrm_peer_model_ready\",\"peerId\":\"" + jsonEscape(peerId) + "\"}";
+	broadcast(readyJson);
+}
+
+void WsServer::handlePeerModelRemove(SOCKET sock, const std::string &peerId)
+{
+	static const char *resp200 =
+		"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
+	if (!peerId.empty()) {
+		std::lock_guard<std::mutex> lock(peerModelsMutex_);
+		const size_t erased = peerModels_.erase(peerId);
+		if (erased > 0)
+			obs_log(LOG_INFO, "[%s] ピアVRMを破棄しました: peerId=%s", WSTAG, peerId.c_str());
+	}
+	sendAll(sock, resp200, strlen(resp200));
 }
 
 // ─────────────────────────────────────────
@@ -879,6 +987,43 @@ void WsServer::clientLoop(SOCKET sock)
 			"Access-Control-Allow-Origin: *\r\n"
 			"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
 			"Access-Control-Allow-Headers: Content-Type, X-Vrm-Name\r\n"
+			"Access-Control-Max-Age: 86400\r\n"
+			"Content-Length: 0\r\n"
+			"Connection: close\r\n\r\n";
+		sendAll(sock, respOptions, strlen(respOptions));
+		closesocket(sock);
+		--activeClients_;
+		return;
+	}
+
+	// マルチユーザーVRM通話: 参加者ごとのVRMバイナリのHTTP一括転送（peerId指定）。
+	if (isRequestForPath(request, "GET", "/vrm/peer_model")) {
+		servePeerModel(sock, parseQueryParam(request, "peerId"));
+		closesocket(sock);
+		--activeClients_;
+		return;
+	}
+	if (isRequestForPath(request, "POST", "/vrm/peer_upload")) {
+		handlePeerModelUpload(sock, request, parseQueryParam(request, "peerId"));
+		closesocket(sock);
+		--activeClients_;
+		return;
+	}
+	if (isRequestForPath(request, "POST", "/vrm/peer_remove")) {
+		handlePeerModelRemove(sock, parseQueryParam(request, "peerId"));
+		closesocket(sock);
+		--activeClients_;
+		return;
+	}
+	// POST /vrm/peer_upload はContent-Type:application/octet-streamのPOSTのため、
+	// クロスオリジンから呼ばれた場合はCORSプリフライト（OPTIONS）が飛ぶ（/vrm/modelと同様）。
+	if (isRequestForPath(request, "OPTIONS", "/vrm/peer_upload")
+	    || isRequestForPath(request, "OPTIONS", "/vrm/peer_remove")) {
+		static const char *respOptions =
+			"HTTP/1.1 204 No Content\r\n"
+			"Access-Control-Allow-Origin: *\r\n"
+			"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+			"Access-Control-Allow-Headers: Content-Type\r\n"
 			"Access-Control-Max-Age: 86400\r\n"
 			"Content-Length: 0\r\n"
 			"Connection: close\r\n\r\n";

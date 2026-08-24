@@ -960,7 +960,7 @@ function loadVrmBinary(arrayBuffer, fileName, opts) {
     // ここには影響しない）
     localVrmArrayBufferForCall = arrayBuffer;
     localVrmFileNameForCall = fileName;
-    broadcastOwnVrmModel(true); // 既にルーム参加中に(再)読み込みした場合、即座に相手へ送り直す
+    uploadOwnVrmModel(true); // 既にルーム参加中に(再)読み込みした場合、即座に相手へ送り直す
   }, undefined, function(err) {
     URL.revokeObjectURL(blobUrl);
     setStatus('VRM読み込み失敗: ' + (err && err.message ? err.message : String(err)));
@@ -1047,8 +1047,8 @@ function autoLoadCachedVrm() {
 // 共有してしまう。ゲスト役タブが自分の（通話送信用の）VRMを読み込むと、この共有スロットを
 // 上書きし、"vrm_model_sync"がブロードキャストされて、ホストのOBS Displayが
 // ゲストのモデルへ切り替わってしまう（＝ホストのモデルが消える不具合の実体）。
-// ゲストの通話用モデルはWebSocket中継（localVrmArrayBufferForCall経由、
-// broadcastOwnVrmModel()参照）でのみ相手に配信されるため、/vrm/modelへは同期不要。
+// ゲストの通話用モデルはHTTP一括転送（localVrmArrayBufferForCall経由、
+// uploadOwnVrmModel()参照）でのみ相手に配信されるため、/vrm/modelへは同期不要。
 // ルームに「ゲストとして」参加している間だけアップロードを止めることで、この上書きを防ぐ。
 function shouldSyncLocalModelToPlugin() {
   return !callState.roomId || isLocalOperatorHost();
@@ -1469,13 +1469,14 @@ function connectWs() {
       // vrm_vmc_update はプラグイン（VmcReceiver）が発信元であり、ControllerもDisplayも
       // 対等なWebSocketクライアントとして受け取る（自分自身のechoではないため両方で処理する）
       if (data.type === 'vrm_vmc_update') { onVmcUpdateReceived(data); return; }
-      // マルチユーザー通話（ルーム管理・モーション/VRM同期）はプラグイン中継のみで
-      // サーバー発信ではないが、ControllerとDisplayが「別ピア」として独立参加する設計のため
+      // マルチユーザー通話（ルーム管理・モーション同期）はプラグイン中継のみでサーバー発信では
+      // ないが、ControllerとDisplayが「別ピア」として独立参加する設計のため
       // vrm_vmc_updateと同様にisDisplayModeガードの外側で処理する
       if (data.type === 'vrm_room_control') { handleRoomControl(data); return; }
       if (data.type === 'vrm_peer_motion') { handlePeerMotionReceived(data); return; }
-      if (data.type === 'vrm_peer_model_start' || data.type === 'vrm_peer_model_chunk'
-        || data.type === 'vrm_peer_model_end') { handlePeerModelControl(data); return; }
+      // vrm_peer_model_readyはWsServer.cppがHTTPアップロード完了時に直接broadcast()する
+      // （roomIdを持たない点に注意、handlePeerModelReady()参照）。
+      if (data.type === 'vrm_peer_model_ready') { handlePeerModelReady(data); return; }
 
       if (!isDisplayMode) return; // 以下はController自身が発信したデータのechoなので無視する
       if (data.type === 'vrm_pose_update') onPoseUpdateReceived(data);
@@ -1525,17 +1526,27 @@ function connectWsWatchdog() {
 // ── マルチユーザーVRM通話（フェーズ2） ──────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════
 //
-// アーキテクチャ概要（2026-08-24 WebSocket完全中継方式へ全面リファクタリング）:
-// - WebRTC（RTCPeerConnection/RTCDataChannel）は一切使用しない。ルーム管理・モーション同期・
-//   VRMモデル配信のすべてを、既存のWsServer（プラグイン、type: "vrm_room_control" /
-//   "vrm_peer_motion" / "vrm_peer_model_start" / "vrm_peer_model_chunk" /
-//   "vrm_peer_model_end"）経由のWebSocketメッセージ中継のみで実現する。
-//   WebRTCのSDP/ICE交換・RTCPeerConnection未対応環境・NAT越え失敗等に起因する接続不能
-//   （2026-08-24の一連の"接続待ち"問題）を構造的に無くすための設計変更。
-// - WsServerはメッセージの内容を解釈せず、type/roomIdに応じて接続中の全WebSocketクライアントへ
-//   ブロードキャストするだけの単純な中継サーバーとして動作する（他のvrm_*系メッセージと同じ
-//   「宛先フィルタはJS側で行う」方針）。ホストのOBSプラグイン（＝WsServer）を経由するため、
-//   WebRTCのようなP2P直接接続は発生せず、相手にIPアドレスは開示されない。
+// アーキテクチャ概要（2026-08-24 WebRTC撤去→WebSocket中継＋HTTP一括転送方式）:
+// - WebRTC（RTCPeerConnection/RTCDataChannel）は一切使用しない。ルーム管理（招待コード・
+//   待合室承認・キック、type: "vrm_room_control"）とモーション同期（頭部/表情/口の開き、約30Hz、
+//   type: "vrm_peer_motion"）は既存のWsServer（プラグイン）経由のWebSocketメッセージ中継で
+//   実現する。WsServerはメッセージの内容を解釈せず、接続中の全WebSocketクライアントへ
+//   ブロードキャストするだけの単純な中継サーバーとして動作し、宛先フィルタ（roomId一致・
+//   ロースターに実在するpeerIdか）はJS側で行う。
+// - VRMモデル本体は2026-08-24時点でBase64チャンク分割によるWebSocket転送を採用していたが、
+//   実機テストで大きなテキストフレームの送受信時にチャンクの大半が脱落する事象
+//   （356チャンク中34チャンクのみ受信等）が報告されたため、WsServerのHTTPエンドポイント
+//   （POST /vrm/peer_upload?peerId=、GET /vrm/peer_model?peerId=、
+//   POST /vrm/peer_remove?peerId=。WsServer.cpp参照）経由の一括転送へ移行した。
+//   各ピアはHTTP POSTで自分のVRMバイナリをWsServerへ一時的にアップロードし（メモリ上のみ、
+//   要件3）、アップロード完了時にWsServerが全クライアントへ"vrm_peer_model_ready"を
+//   直接ブロードキャストする。他の参加者はこれを受けてHTTP GETで一括取得する
+//   （fetchPeerVrmModel()参照。取得したArrayBufferはBlobのみで展開し、IndexedDB・
+//   localStorageへは一切保存しない）。退出・キック時は disposeCallPeerVrm() でThree.jsの
+//   ジオメトリ/マテリアル/テクスチャを dispose() しBlob URLも revokeObjectURL() する一方、
+//   サーバー側に残ったキャッシュも POST /vrm/peer_remove で破棄する。
+//   ホストのOBSプラグイン（＝WsServer）を必ず経由するため、WebRTCのようなP2P直接接続は
+//   発生せず、相手にIPアドレスは開示されない。
 // - Controller/DisplayはそれぞれWsServerの独立したクライアントとして、原則独立に
 //   ルームへ「参加」する。ただし同一PC上のDisplay（OBSブラウザソース）は、招待コード入力や
 //   待合室承認のUIを操作できない（#uiPanelごと非表示のため）。そこでControllerは自分の
@@ -1544,18 +1555,12 @@ function connectWsWatchdog() {
 //   ホストに『信頼できるControllerの分身です』と自己申告して自動参加する）を行う。
 //   ホスト側は shadow_join_request の shadowOfPeerId が現在のロースターに実在する場合のみ
 //   自動承認する。
-// - VRMバイナリは各ピアが自分自身の分をBase64エンコードしてチャンク分割し、WebSocket経由で
-//   ルーム全体へブロードキャストする（要件2）。受信側は自分のロースターに存在する送信元からの
-//   ものだけを受け取り、ArrayBuffer/Blobのみでモデルを構築する。IndexedDB・localStorageへは
-//   一切保存しない（要件3）。退出・キック時は disposeCallPeerVrm() でジオメトリ/マテリアル/
-//   テクスチャを dispose() し、Blob URLも revokeObjectURL() する。
-// - 音声通話（マイク音声の相互配信）はWebRTCに依存していた機能のため、本リファクタリングで
-//   撤去した。現在はモーション（頭部/表情/口の開き）とVRMモデルの同期のみに対応する。
+// - 音声通話（マイク音声の相互配信）はWebRTCに依存していた機能のため、2026-08-24の
+//   WebRTC撤去に伴い撤去した。現在はモーションとVRMモデルの同期のみに対応する。
 
 var CALL_MAX_PARTICIPANTS   = 8;
 var CALL_POSE_SEND_INTERVAL_MS = 33; // 約30Hz
-var CALL_VRM_WS_CHUNK_BYTES = 64 * 1024; // WebSocket 1メッセージあたりの生バイト数（Base64化で約1.33倍になる）
-var CALL_VRM_BROADCAST_MIN_INTERVAL_MS = 2000; // 短時間にroster更新が連続しても送信し過ぎないようにする
+var CALL_VRM_UPLOAD_MIN_INTERVAL_MS = 2000; // 短時間にroster更新が連続してもアップロードし過ぎないようにする
 var CALL_SLOT_OFFSET_X = { left: -0.6, center: 0, right: 0.6 };
 
 var callState = {
@@ -1578,7 +1583,6 @@ var callState = {
   localIsHost: false
 };
 var lastCallPoseSendTime = 0;
-var lastVrmBroadcastAt = 0; // broadcastOwnVrmModel()の連続送信を間引くためのタイムスタンプ
 
 function generateRandomCode(chars, len) {
   var s = '';
@@ -1598,7 +1602,6 @@ function makeCallPeer(peerId, displayName) {
   return {
     peerId: peerId,
     displayName: displayName || peerId,
-    vrmReceiveBuffer: null,
     pendingBlobUrl: null,
     vrm: null,
     layout: { slot: 'center', offsetX: 0, offsetY: 0, offsetZ: 0, scale: 1 },
@@ -1751,6 +1754,7 @@ function callJoinRoom(inviteCodeInput) {
 function leaveCallRoom() {
   if (!callState.roomId) return;
   sendRoomControl({ action: 'leave' });
+  removeOwnVrmModelFromServer(); // サーバー側に残った自分のVRMキャッシュを破棄する
   Object.keys(callState.peers).forEach(function(peerId) { disconnectCallPeer(peerId, null); });
   callState.roomId = null;
   callState.isHost = false;
@@ -1828,14 +1832,13 @@ function broadcastRoster() {
 
 function applyRosterUpdate(msg) {
   var seen = {};
-  var hasNewPeer = false;
+  var newPeerIds = [];
   (msg.members || []).forEach(function(m) {
     seen[m.peerId] = true;
     if (m.peerId === callState.myPeerId) return;
     if (!callState.peers[m.peerId]) {
       callState.peers[m.peerId] = makeCallPeer(m.peerId, m.displayName);
-      hasNewPeer = true; // WebSocket中継方式では「接続確立」の概念が無いため、
-                          // 新規ピア検出＝自分のVRMを（再）送信するトリガーとする
+      newPeerIds.push(m.peerId);
     } else {
       callState.peers[m.peerId].displayName = m.displayName;
     }
@@ -1844,10 +1847,15 @@ function applyRosterUpdate(msg) {
     if (!seen[peerId]) disconnectCallPeer(peerId, null);
   });
   renderCallParticipantsList();
-  // 自分より後に参加した相手は、自分が過去に送ったVRMブロードキャストを受け取れていない
-  // （WsServerは受信履歴を保持せず、その時点で接続中のクライアントへ配るだけのため）。
-  // roster更新のたびに新規ピアの有無をチェックし、いれば自分のVRMを再送する。
-  if (hasNewPeer) broadcastOwnVrmModel(false);
+  if (newPeerIds.length > 0) {
+    // 自分のVRMはWsServer上に残り続けるが（HTTP一括転送方式、要件2）、承認直後の
+    // リアルタイム通知として改めてアップロード（force=false、短時間の連続実行は間引く）。
+    uploadOwnVrmModel(false);
+    // 新規ピアが自分より先にVRMをアップロード済みだった「後から参加」のケースを、
+    // vrm_peer_model_readyイベントを待たずに拾うため、各新規ピアのモデルを能動的に取得する
+    // （未アップロードならHTTP 404が返るだけで、fetchPeerVrmModel()側で静かに無視される）。
+    newPeerIds.forEach(function(peerId) { fetchPeerVrmModel(callState.peers[peerId]); });
+  }
 }
 
 function approveWaitingPeer(peerId) {
@@ -1859,7 +1867,7 @@ function approveWaitingPeer(peerId) {
   diagInfo('WS', '承認: ' + peerId + ' (' + waiting.displayName + ') → approve送信 + roster配信');
   sendRoomControl({ action: 'approve', targetPeerId: peerId });
   broadcastRoster();
-  broadcastOwnVrmModel(true); // 承認直後に確実に自分のVRMを送る
+  uploadOwnVrmModel(true); // 承認直後に確実に自分のVRMを送る
   renderCallParticipantsList();
 }
 
@@ -1933,7 +1941,7 @@ function handleRoomControl(msg) {
       + ' (shadowOf=' + msg.shadowOfPeerId + ')');
     sendRoomControl({ action: 'approve', targetPeerId: msg.fromPeerId });
     broadcastRoster();
-    broadcastOwnVrmModel(true);
+    uploadOwnVrmModel(true);
     renderCallParticipantsList();
     return;
   }
@@ -1955,7 +1963,7 @@ function handleRoomControl(msg) {
     // rosterが遅延・欠落した場合でも「セクションは出るがリストは空のまま」という
     // 中途半端な表示にならないようにする（自分の分も含めてrealCallPeerIds()を評価し直す）。
     renderCallParticipantsList();
-    broadcastOwnVrmModel(true); // 承認された時点で、既にルームにいる相手へ自分のVRMを送る
+    uploadOwnVrmModel(true); // 承認された時点で、既にルームにいる相手へ自分のVRMを送る
     return;
   }
   if (action === 'reject') {
@@ -2044,170 +2052,90 @@ function applyRemotePeerPose(peer, data) {
   }
 }
 
-// ── VRMモデル配信（WebSocket経由、Base64チャンク転送） ──────────────────────
-// 以前はRTCDataChannel（'vrm'）で各ピアへArrayBufferを直接送っていたが、WebSocket中継方式では
-// バイナリをBase64文字列化してJSONメッセージとしてWsServerへ送る（type: "vrm_peer_model_start"/
-// "vrm_peer_model_chunk"/"vrm_peer_model_end"）。WsServer.broadcast()は任意サイズのテキスト
-// メッセージを部分送信なく送り切る実装（sendAll()）になっているため、この方式でも確実に届く。
+// ── VRMモデル配信（HTTP一括転送） ────────────────────────────────────────
+// 以前はWebSocketメッセージでBase64チャンク分割送信していたが、実機テストで大きな
+// テキストフレームの送受信時にチャンクの大半が脱落する事象が報告された
+// （356チャンク中34チャンクのみ受信等）。自前のチャンク分割・順序管理・フロー制御を
+// 廃止し、既存の/vrm/model（ホスト自身のモデルのHTTP同期）と同じ枠組みをピア単位に
+// 拡張したHTTPエンドポイント（WsServer.cpp、POST/GET /vrm/peer_upload,peer_model）
+// 経由の一括転送へ移行した。ブラウザのfetch()/HTTPスタックが持つ標準的な信頼性の高い
+// 転送に任せることで、この種の脱落を構造的に避ける。
 
 // VRMバイナリの送信元保持（自分自身のアバターのみ。要件3によりリモート参加者分は
 // 受信後すぐdisposeし、ここには保持しない）
 var localVrmArrayBufferForCall = null;
 var localVrmFileNameForCall = null;
 
-function arrayBufferChunkToBase64(buffer, offset, len) {
-  var bytes = new Uint8Array(buffer, offset, len);
-  var binary = '';
-  var STEP = 8192; // String.fromCharCode.applyの引数上限を避けるため小分けにする
-  for (var i = 0; i < bytes.length; i += STEP) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + STEP));
-  }
-  return btoa(binary);
-}
+var lastVrmUploadAt = 0;
 
-function base64ToUint8Array(base64) {
-  var binary = atob(base64);
-  var bytes = new Uint8Array(binary.length);
-  for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
-
-// 不具合2対策の延長: WsServerはメッセージの配信履歴を保持しない単純な中継のため、
-// 自分がVRMを送信した「後」に参加してきた相手には届かない。ルーム参加者の増減や
-// 承認イベントのたびに呼び出し、force=falseの場合はCALL_VRM_BROADCAST_MIN_INTERVAL_MSで
-// 間引く（短時間に複数人を承認した場合等の連続送信を防ぐ）。
-function broadcastOwnVrmModel(force) {
+// WsServerにアップロード済みのピアVRMはHTTP GETでいつでも取得できる（WebSocket
+// ブロードキャストと違い、サーバー上に残り続けるため配信履歴の問題は生じない）。
+// それでも承認直後は即座に他の参加者へ知らせたいため、承認・ルーム参加イベントの
+// たびに呼び出す。force=falseの場合は短時間の連続アップロードを間引く。
+function uploadOwnVrmModel(force) {
   if (isDisplayMode) return; // Displayは自分自身の（VMCで動く）localVrmを持つが、
-                              // その送信元は常にController側のため、Display自身は送信しない
-  if (!localVrmArrayBufferForCall) return;
-  if (!callState.roomId) return;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                              // その送信元は常にController側のため、Display自身はアップロードしない
+  if (!localVrmArrayBufferForCall || !callState.roomId || !callState.myPeerId) return;
   var now = performance.now();
-  if (!force && now - lastVrmBroadcastAt < CALL_VRM_BROADCAST_MIN_INTERVAL_MS) return;
-  lastVrmBroadcastAt = now;
-  sendVrmModelOverWs(localVrmArrayBufferForCall, localVrmFileNameForCall);
+  if (!force && now - lastVrmUploadAt < CALL_VRM_UPLOAD_MIN_INTERVAL_MS) return;
+  lastVrmUploadAt = now;
+  var arrayBuffer = localVrmArrayBufferForCall;
+  diagInfo('VRM', '自分のVRMをアップロード開始 (' + localVrmFileNameForCall + ', ' + arrayBuffer.byteLength + ' bytes)');
+  fetch(HTTP_BASE + '/vrm/peer_upload?peerId=' + encodeURIComponent(callState.myPeerId), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: arrayBuffer
+  }).then(function(res) {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    diagInfo('VRM', '自分のVRMアップロード完了 (' + arrayBuffer.byteLength + ' bytes)');
+  }).catch(function(err) {
+    diagWarn('VRM', '自分のVRMアップロードに失敗しました', err);
+  });
 }
 
-var CALL_VRM_CHUNK_PACING_EVERY = 10; // このチャンク数ごとに一呼吸置く（要件1: バースト送信対策）
-var CALL_VRM_CHUNK_PACING_MS = 5;
-
-function wait(ms) { return new Promise(function(resolve) { setTimeout(resolve, ms); }); }
-
-// 不具合対策: 送信の取りこぼし自体はWebSocket（TCP）の性質上考えにくいが、大きなVRMを
-// チャンクに分けて一気に(同期的に)送ると、他の低遅延メッセージ（モーション同期等）が
-// 詰まって遅延する・WsServer側の送信キューが一時的に肥大化するおそれがあるため、
-// 一定チャンクごとに小休止を挟んで送信をならす。各チャンクにindex/totalChunksを付与し、
-// 受信側が抜け漏れなく揃ったかを確実に検証できるようにする（要件1）。
-async function sendVrmModelOverWs(arrayBuffer, fileName) {
-  var total = arrayBuffer.byteLength;
-  var totalChunks = Math.max(1, Math.ceil(total / CALL_VRM_WS_CHUNK_BYTES));
-  diagInfo('VRM', '自分のVRMをルームへ送信開始 (' + fileName + ', ' + total + ' bytes, ' + totalChunks + 'チャンク)');
-  ws.send(JSON.stringify({
-    type: 'vrm_peer_model_start', roomId: callState.roomId, fromPeerId: callState.myPeerId,
-    fileName: fileName, size: total, totalChunks: totalChunks
-  }));
-  var offset = 0;
-  for (var index = 0; index < totalChunks; index++) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      diagWarn('VRM', '自分のVRM送信を中断しました（WebSocket切断、' + index + '/' + totalChunks + 'チャンク送信済み）');
-      return;
-    }
-    var len = Math.min(CALL_VRM_WS_CHUNK_BYTES, total - offset);
-    var b64 = arrayBufferChunkToBase64(arrayBuffer, offset, len);
-    ws.send(JSON.stringify({
-      type: 'vrm_peer_model_chunk', roomId: callState.roomId, fromPeerId: callState.myPeerId,
-      index: index, totalChunks: totalChunks, data: b64
-    }));
-    offset += len;
-    if ((index + 1) % CALL_VRM_CHUNK_PACING_EVERY === 0 && index + 1 < totalChunks) {
-      await wait(CALL_VRM_CHUNK_PACING_MS);
-    }
-  }
-  ws.send(JSON.stringify({
-    type: 'vrm_peer_model_end', roomId: callState.roomId, fromPeerId: callState.myPeerId, totalChunks: totalChunks
-  }));
-  diagInfo('VRM', '自分のVRM送信完了 (' + totalChunks + 'チャンク)');
+// 自分がルームを退出する際、サーバー側に残った自分のVRMキャッシュを破棄する。
+function removeOwnVrmModelFromServer() {
+  if (isDisplayMode || !callState.myPeerId) return; // Displayはアップロードしていないため何もしない
+  fetch(HTTP_BASE + '/vrm/peer_remove?peerId=' + encodeURIComponent(callState.myPeerId), { method: 'POST' })
+    .catch(function(err) { console.warn('[vrm_stage:call] 自分のVRM削除リクエスト失敗', err); });
 }
 
-// vrm_peer_model_start/chunk/endの3種をまとめて扱う（ws.onmessage参照）。
-function handlePeerModelControl(data) {
-  if (!callState.roomId || data.roomId !== callState.roomId) return;
-  if (data.fromPeerId === callState.myPeerId) return; // 自分自身のechoは無視
-  var peer = callState.peers[data.fromPeerId];
-  if (!peer) return; // ロースターに存在しない相手からのVRMは無視する（承認フロー経由のみ許可）
-
-  if (data.type === 'vrm_peer_model_start') {
-    diagInfo('VRM', '受信開始 ← ' + data.fromPeerId + ' (' + data.fileName + ', ' + data.size
-      + ' bytes, ' + data.totalChunks + 'チャンク)');
-    // 不具合対策: chunks は index をキーとしたスパース配列として管理し、receivedCount で
-    // 実際に揃った件数を追跡する（到着順への依存を排し、抜け漏れを確実に検出する。要件1）。
-    peer.vrmReceiveBuffer = {
-      chunks: new Array(data.totalChunks || 0),
-      receivedCount: 0,
-      totalChunks: data.totalChunks || 0,
-      receivedSize: 0,
-      totalSize: data.size,
-      fileName: data.fileName,
-      lastLoggedMilestone: 0
-    };
-  } else if (data.type === 'vrm_peer_model_chunk') {
-    var buf = peer.vrmReceiveBuffer;
-    if (!buf) return; // start未受信のchunkは無視
-    var index = data.index;
-    if (typeof index !== 'number' || index < 0 || (buf.totalChunks && index >= buf.totalChunks)) {
-      diagWarn('VRM', data.fromPeerId + ' から範囲外のindex=' + index + 'のチャンクを受信、破棄します');
-      return;
-    }
-    if (buf.chunks[index] !== undefined) return; // 重複受信は無視（何らかの理由で再送された場合）
-    var bytes = base64ToUint8Array(data.data);
-    buf.chunks[index] = bytes;
-    buf.receivedCount++;
-    buf.receivedSize += bytes.byteLength;
-    // 25%刻みで進捗をログする（チャンクごとだと数百行になり得るため間引く）
-    if (buf.totalSize > 0) {
-      var pct = Math.floor(buf.receivedSize / buf.totalSize * 100);
-      var milestone = Math.floor(pct / 25) * 25;
-      if (milestone > (buf.lastLoggedMilestone || 0)) {
-        buf.lastLoggedMilestone = milestone;
-        diagInfo('VRM', '受信中 ← ' + data.fromPeerId + ' ' + milestone + '% ('
-          + buf.receivedCount + '/' + buf.totalChunks + 'チャンク, '
-          + buf.receivedSize + ' / ' + buf.totalSize + ' bytes)');
-      }
-    }
-  } else if (data.type === 'vrm_peer_model_end') {
-    finishRemoteVrmReceive(peer, data.fromPeerId);
-  }
+// ホスト（callState.isHost）が、退出・キックされた他ピアのVRMキャッシュをサーバー側から
+// 破棄する（本人がクラッシュ等で自分自身の後始末ができないケースへの保険。disconnectCallPeer参照）。
+function removeVrmModelFromServer(peerId) {
+  if (!peerId) return;
+  fetch(HTTP_BASE + '/vrm/peer_remove?peerId=' + encodeURIComponent(peerId), { method: 'POST' })
+    .catch(function(err) { console.warn('[vrm_stage:call] ' + peerId + ' のVRM削除リクエスト失敗', err); });
 }
 
-// 要件1: 全チャンクが揃った（receivedCount === totalChunks、かつchunks配列に穴が無い）ことを
-// 確認してから結合・デコードする。欠落がある場合はデコードを行わず警告のみ出す
-// （中途半端なArrayBufferをgltfLoaderへ渡すと分かりにくいパースエラーになるため）。
-function finishRemoteVrmReceive(peer, fromPeerId) {
-  var buf = peer.vrmReceiveBuffer;
-  if (!buf) return;
-  if (buf.totalChunks > 0 && buf.receivedCount !== buf.totalChunks) {
-    diagWarn('VRM', fromPeerId + ' のVRM受信が不完全です（' + buf.receivedCount + '/'
-      + buf.totalChunks + 'チャンクのみ受信）。デコードを中止します。');
-    peer.vrmReceiveBuffer = null;
-    return;
-  }
-  for (var i = 0; i < buf.chunks.length; i++) {
-    if (buf.chunks[i] === undefined) {
-      diagWarn('VRM', fromPeerId + ' のVRM受信データにindex=' + i + 'の欠落があります。デコードを中止します。');
-      peer.vrmReceiveBuffer = null;
-      return;
-    }
-  }
-  diagInfo('VRM', '受信完了 ← ' + fromPeerId + '（全' + buf.receivedCount + '/' + buf.totalChunks
-    + 'チャンク、' + buf.receivedSize + ' bytes）→ デコード中…');
-  var combined = new Uint8Array(buf.receivedSize);
-  var pos = 0;
-  for (var j = 0; j < buf.chunks.length; j++) {
-    combined.set(buf.chunks[j], pos);
-    pos += buf.chunks[j].byteLength;
-  }
-  peer.vrmReceiveBuffer = null;
-  loadRemoteParticipantVrmBinary(peer, combined.buffer, buf.fileName);
+// vrm_peer_model_ready受信時（ws.onmessage参照。WsServer.cppがHTTPアップロード完了時に
+// 直接broadcast()するメッセージのため、他のvrm_*系メッセージと異なりroomIdを持たない。
+// ロースターに実在するpeerIdかどうかだけで宛先フィルタする）。
+function handlePeerModelReady(data) {
+  if (!callState.roomId) return; // 通話ルームに参加していなければ無視
+  if (data.peerId === callState.myPeerId) return; // 自分自身のechoは無視
+  var peer = callState.peers[data.peerId];
+  if (!peer) return; // ロースターに存在しない相手のモデルは無視する（承認フロー経由のみ許可）
+  fetchPeerVrmModel(peer);
+}
+
+// peerIdのVRMバイナリをHTTP一括取得してロードする。vrm_peer_model_ready受信時に加え、
+// applyRosterUpdate()で新規ピアを検出した際にも呼ぶ（自分が参加する前に相手が既に
+// アップロード済みだった「後から参加」のケースを、readyイベントを待たず拾うため）。
+function fetchPeerVrmModel(peer) {
+  diagInfo('VRM', peer.peerId + ' のVRMを取得開始');
+  fetch(HTTP_BASE + '/vrm/peer_model?peerId=' + encodeURIComponent(peer.peerId)).then(function(res) {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.arrayBuffer();
+  }).then(function(buf) {
+    diagInfo('VRM', peer.peerId + ' のVRM取得完了 (' + buf.byteLength + ' bytes) → デコード中…');
+    loadRemoteParticipantVrmBinary(peer, buf, peer.peerId + '.vrm');
+  }).catch(function(err) {
+    // 404は相手がまだアップロードしていないだけの正常系（相手のuploadOwnVrmModel()完了時に
+    // vrm_peer_model_readyが飛んでくるので取りこぼさない）。それ以外のみ警告として出す。
+    if (err && err.message === 'HTTP 404') return;
+    diagWarn('VRM', peer.peerId + ' のVRM取得に失敗しました', err);
+  });
 }
 
 // 要件3: 受信したVRMバイナリはBlob/ArrayBufferのみで展開し、IndexedDB/localStorageへは
@@ -2338,6 +2266,11 @@ function disconnectCallPeer(peerId, statusMessage) {
   disposeCallPeerVrm(peer);
   delete callState.peers[peerId];
   renderCallParticipantsList();
+  // ホストのみ、退出・キックされた相手のVRMキャッシュをサーバー側から破棄する（本人が
+  // クラッシュ等で自分自身の後始末ができないケースへの保険。ホスト以外が呼ぶと、
+  // 一時的なロースター不整合等で実際にはまだ在室している相手のモデルを誤って消しかねないため
+  // ホストからの呼び出しに限定する）。
+  if (callState.isHost) removeVrmModelFromServer(peerId);
   if (statusMessage) setCallStatus(statusMessage);
 }
 

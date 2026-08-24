@@ -1277,14 +1277,16 @@ static void handleWsClientMessage(const QString &json)
 		s_lastVrmTransformJson = json.toStdString();
 		if (s_wsServer)
 			s_wsServer->broadcast(s_lastVrmTransformJson);
-	} else if (type == "vrm_room_control" || type == "vrm_peer_motion" ||
-	           type == "vrm_peer_model_start" || type == "vrm_peer_model_chunk" ||
-	           type == "vrm_peer_model_end") {
-		// マルチユーザーVRM通話（フェーズ2、2026-08-24よりWebSocket完全中継方式）: ルーム管理
-		// （招待・待合室承認・キック等）・モーション同期・VRMモデル配信（Base64チャンク転送）。
-		// WebRTC（RTCPeerConnection/RTCDataChannel）は使用しない。サーバー側では内容を解釈せず、
-		// roomId/fromPeerIdによる宛先フィルタはvrm_stage.html側のJSが行う
-		// （他のvrm_*系メッセージと同じ中継のみ方針）。
+	} else if (type == "vrm_room_control" || type == "vrm_peer_motion") {
+		// マルチユーザーVRM通話（フェーズ2）: ルーム管理（招待・待合室承認・キック等）と
+		// モーション同期。WebRTC（RTCPeerConnection/RTCDataChannel）は使用しない。
+		// VRMモデル本体は2026-08-24よりWebSocketのBase64チャンク中継ではなく、
+		// HTTP一括転送（POST/GET /vrm/peer_upload, /vrm/peer_model。WsServer.cpp参照）へ
+		// 移行した（大きなテキストフレームの送受信で稀にチャンクが脱落する実機報告への対応）。
+		// vrm_peer_model_ready通知はHTTPアップロード完了時にWsServer.cppが直接broadcast()
+		// するため、ここでの中継は不要。
+		// サーバー側では内容を解釈せず、roomId/fromPeerIdによる宛先フィルタは
+		// vrm_stage.html側のJSが行う（他のvrm_*系メッセージと同じ中継のみ方針）。
 		if (s_wsServer)
 			s_wsServer->broadcast(json.toStdString());
 	}

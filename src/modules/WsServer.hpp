@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -83,6 +84,24 @@ private:
 	// マルチユーザーVRM通話機能（Git管理外の個人設定）用。
 	void serveUserSettings(SOCKET sock);
 
+	// マルチユーザーVRM通話（フェーズ2、2026-08-24よりHTTP一括転送方式）: 各参加者が自分の
+	// VRMバイナリをHTTP経由でこのプラグインへ一時的に保持させ、他の参加者はHTTP GETで
+	// 一括取得する。以前のWebSocketメッセージによるBase64チャンク分割送信
+	// （vrm_peer_model_start/chunk/end）は、大きなテキストフレームの送受信で稀にチャンクが
+	// 脱落する実機報告を受けて廃止した（詳細はdata/vrm_stage.html側のコメント・ai_logs参照）。
+	// POST /vrm/peer_upload?peerId=<id> : ボディのVRMバイナリをpeerModels_[id]へ保持し、
+	//                                     全WebSocketクライアントへ"vrm_peer_model_ready"を
+	//                                     ブロードキャストする
+	// GET  /vrm/peer_model?peerId=<id>  : peerModels_[id]をapplication/octet-streamで返す
+	//                                     （未保持時は404）
+	// POST /vrm/peer_remove?peerId=<id> : peerModels_[id]を即座に破棄する（退出・キック時）
+	void handlePeerModelUpload(SOCKET sock, const std::string &request, const std::string &peerId);
+	void servePeerModel(SOCKET sock, const std::string &peerId);
+	void handlePeerModelRemove(SOCKET sock, const std::string &peerId);
+	// リクエスト行のクエリ文字列（?key=value&...）からkeyに対応する値をURLデコードして返す
+	// （無ければ空文字列）。
+	static std::string parseQueryParam(const std::string &request, const std::string &paramName);
+
 	uint16_t port_;
 	SOCKET listenSock_ = INVALID_SOCKET;
 	std::atomic<bool> running_{false};
@@ -100,6 +119,13 @@ private:
 	std::mutex modelMutex_;
 	std::vector<uint8_t> vrmModelData_;
 	std::string vrmModelName_;
+
+	// マルチユーザーVRM通話: 参加者ごとのVRMバイナリ（メモリキャッシュのみ、ディスク永続化なし。
+	// 要件3「IndexedDB/localStorageへは一切保存しない」のサーバー側での相当方針）。
+	// peerIdは接続確立ごとにJS側でランダム生成される使い捨てID（generatePeerId()参照）のため、
+	// 無制限に増え続けることはない（ルーム退出・キック時にhandlePeerModelRemove()で破棄される）。
+	std::mutex peerModelsMutex_;
+	std::map<std::string, std::vector<uint8_t>> peerModels_;
 };
 
 #endif // _WIN32
