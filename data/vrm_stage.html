@@ -1615,7 +1615,11 @@ function makeCallPeer(peerId, displayName) {
     lastPoseRig: null,
     // ICE Candidateの取りこぼし対策: setRemoteDescription()完了前に届いたcandidateを
     // 一時的に退避しておくキュー（handleCallSignal参照）。
-    pendingCandidates: []
+    pendingCandidates: [],
+    // 接続確立タイムアウトの監視用タイマーID（ensureConnectionToPeer参照）。
+    // ICEはNAT越えに失敗した場合でも"failed"へ遷移せず"checking"のまま無期限に
+    // 止まることがあるため、connectionstatechangeだけに頼らず能動的に検知する。
+    connectTimeoutId: null
   };
 }
 
@@ -2060,13 +2064,67 @@ function handleRoomControl(msg) {
 // 送り合う（グレア）を避ける。データチャンネルもofferを送る側だけが作成する
 // （createDataChannel側の変更がSDPに載り、相手はondatachannelで受け取る）。
 
+var CALL_CONNECT_TIMEOUT_MS = 15000; // この時間内にconnectedへ到達しなければ診断ログを出す
+
 function ensureConnectionToPeer(peerId) {
   var peer = callState.peers[peerId];
   if (!peer || peer.pc) return;
   var isInitiator = callState.myPeerId < peerId;
   diagInfo('RTC', 'ensureConnectionToPeer(' + peerId + ') isInitiator=' + isInitiator);
-  peer.pc = createPeerConnectionFor(peer, isInitiator);
+
+  if (typeof RTCPeerConnection === 'undefined') {
+    // 通常のOBSブラウザソース/一般的なブラウザでは起こり得ないが、万一実行環境が
+    // WebRTCに対応していない場合、new RTCPeerConnection()がReferenceErrorで
+    // 例外を投げて以降の処理（Offer生成等）が一切実行されないまま無言で止まる。
+    // 原因が一目でわかるよう、ここで明示的に検知して警告する。
+    diagWarn('RTC', 'このブラウザ環境はRTCPeerConnectionに対応していません（' + peerId + 'への接続不可）');
+    return;
+  }
+
+  try {
+    // isInitiator=true時にここでcreateOffer()まで完了させる（onnegotiationneededには
+    // 依存しない。createPeerConnectionFor()内でDataChannelを同期的に作成した直後、
+    // 呼び出し元のこの関数からnegotiateOffer()を明示的に呼ぶ設計）。
+    peer.pc = createPeerConnectionFor(peer, isInitiator);
+  } catch (err) {
+    // createPeerConnectionFor()は同期処理のみ（RTCPeerConnection生成・
+    // createDataChannel・イベントハンドラ登録）だが、万一ここで例外が起きると
+    // peer.pcが未設定のまま以降のOffer送信が一切走らず、ログ上は
+    // 「isInitiator=true」の直後で完全に停止して見える。呼び出し元
+    // （applyRosterUpdate等のforEachループ）まで例外を伝播させると他ピアの接続まで
+    // 巻き添えで止まりかねないため、ここで捕捉して診断ログに出す。
+    diagWarn('RTC', 'createPeerConnectionFor(' + peerId + ') で例外が発生し接続を開始できません', err);
+    return;
+  }
+
+  startConnectTimeoutWatchdog(peer);
+
   if (isInitiator) negotiateOffer(peer);
+}
+
+// ICEはNAT越えに失敗した場合でも"failed"へ遷移せず"checking"のまま無期限に止まる
+// ことがあり、connectionstatechange任せでは「接続待ち」の停止に気づけないケースがある。
+// 一定時間内にconnectedへ到達しなければ、現在の各種stateを診断ログへまとめて出す。
+function startConnectTimeoutWatchdog(peer) {
+  if (peer.connectTimeoutId) clearTimeout(peer.connectTimeoutId);
+  peer.connectTimeoutId = setTimeout(function() {
+    peer.connectTimeoutId = null;
+    if (!peer.pc || peer.pc.connectionState === 'connected') return;
+    diagWarn('RTC', peer.peerId + ' への接続が' + (CALL_CONNECT_TIMEOUT_MS / 1000) + '秒経っても確立しません'
+      + '（connectionState=' + peer.pc.connectionState
+      + ' iceConnectionState=' + peer.pc.iceConnectionState
+      + ' signalingState=' + peer.pc.signalingState + '）。'
+      + 'signalingStateが"stable"以外のまま止まっている場合はOffer/Answerが相手に届いていない、'
+      + 'iceConnectionStateが"checking"のまま止まっている場合はNAT越えに失敗している可能性が高く、'
+      + '「プライバシー保護（TURN中継）モード」への切替を検討してください。');
+  }, CALL_CONNECT_TIMEOUT_MS);
+}
+
+function clearConnectTimeoutWatchdog(peer) {
+  if (peer.connectTimeoutId) {
+    clearTimeout(peer.connectTimeoutId);
+    peer.connectTimeoutId = null;
+  }
 }
 
 function createPeerConnectionFor(peer, isInitiator) {
@@ -2090,6 +2148,7 @@ function createPeerConnectionFor(peer, isInitiator) {
     // （new → connecting → connected、または failed/disconnected 等）
     diagInfo('RTC', 'pc(' + peer.peerId + ').connectionState = ' + pc.connectionState);
     renderCallParticipantsList();
+    if (pc.connectionState === 'connected') clearConnectTimeoutWatchdog(peer);
     if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
       // 相手がクラッシュ/回線切断等で"leave"を送れないまま消えた場合の保険。
       // ルームの正式なメンバー管理（waitingPeers/bannedPeerIds/roster再送出）はホストが行うため、
@@ -2183,7 +2242,15 @@ function handleCallSignal(msg) {
       + '失敗している可能性）');
     return; // ロースターに存在しない相手からのシグナルは無視する（承認フロー経由のみ許可）
   }
-  if (!peer.pc) peer.pc = createPeerConnectionFor(peer, callState.myPeerId < msg.fromPeerId);
+  if (!peer.pc) {
+    try {
+      peer.pc = createPeerConnectionFor(peer, callState.myPeerId < msg.fromPeerId);
+      startConnectTimeoutWatchdog(peer);
+    } catch (err) {
+      diagWarn('RTC', 'createPeerConnectionFor(' + peer.peerId + ') で例外が発生し' + msg.signalType + 'を処理できません', err);
+      return;
+    }
+  }
   if (!peer.pendingCandidates) peer.pendingCandidates = [];
 
   if (msg.signalType === 'offer') {
@@ -2535,6 +2602,7 @@ function disposeCallPeerVrm(peer) {
 function disconnectCallPeer(peerId, statusMessage) {
   var peer = callState.peers[peerId];
   if (!peer) return;
+  clearConnectTimeoutWatchdog(peer);
   disposeCallPeerVrm(peer);
   if (peer.dataChannel) { try { peer.dataChannel.close(); } catch (_) {} }
   if (peer.vrmChannel) { try { peer.vrmChannel.close(); } catch (_) {} }
