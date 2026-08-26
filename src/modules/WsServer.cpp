@@ -588,6 +588,36 @@ void WsServer::serveUserSettings(SOCKET sock)
 	                  64 * 1024, "user_settings.json");
 }
 
+void WsServer::setTunnelInfo(bool active, const std::string &url)
+{
+	std::lock_guard<std::mutex> lock(tunnelInfoMutex_);
+	tunnelActive_ = active;
+	tunnelUrl_ = url;
+}
+
+void WsServer::serveTunnelInfo(SOCKET sock)
+{
+	bool active;
+	std::string url;
+	{
+		std::lock_guard<std::mutex> lock(tunnelInfoMutex_);
+		active = tunnelActive_;
+		url = tunnelUrl_;
+	}
+
+	const std::string body = std::string("{\"active\":") + (active ? "true" : "false") +
+	                          ",\"url\":\"" + jsonEscape(url) + "\"}";
+	const std::string header =
+		"HTTP/1.1 200 OK\r\n"
+		"Content-Type: application/json; charset=UTF-8\r\n"
+		"Content-Length: " + std::to_string(body.size()) + "\r\n"
+		"Cache-Control: no-cache, no-store, must-revalidate\r\n"
+		"Access-Control-Allow-Origin: *\r\n"
+		"Connection: close\r\n\r\n";
+	if (sendAll(sock, header.c_str(), header.size()))
+		sendAll(sock, body.c_str(), body.size());
+}
+
 void WsServer::serveVrmModel(SOCKET sock)
 {
 	std::vector<uint8_t> data;
@@ -1020,6 +1050,27 @@ void WsServer::handleRegenerateTokenRequest(SOCKET sock)
 	disconnectAllClients();
 }
 
+// 実機バグ対策（ログ肥大化）: VMC受信・Webカメラトラッキング稼働時、これらのtypeは
+// 毎秒10〜数十回broadcast()される（vrm_pose_update/vrm_peer_motionは約30Hz、
+// vrm_vmc_updateはVmcReceiverが受信したフレームレート依存、vrm_transform_updateも
+// スライダードラッグ中は最短100ms間隔）。broadcast()側の通常ログ（JSON全文＋送信結果の
+// 2行/回）を毎回出していると、これだけでOBSログが瞬時に埋め尽くされ、他の重要な
+// イベント（エラー・接続/切断・ルーム管理等）が見えなくなっていた。これら高頻度な
+// モーション/位置同期メッセージのみログ出力をスキップする（低頻度な制御メッセージ
+// ——vrm_room_control・vrm_auth_result・vrm_peer_model_ready・コメント表示・TTS等——は
+// 引き続き通常通りログに残す）。
+static bool isHighFrequencyBroadcastType(const std::string &jsonText)
+{
+	static const char *kHighFreqTypes[] = {
+		"vrm_vmc_update", "vrm_pose_update", "vrm_peer_motion", "vrm_transform_update", nullptr
+	};
+	for (int i = 0; kHighFreqTypes[i]; ++i) {
+		if (jsonHasStringField(jsonText, "type", kHighFreqTypes[i]))
+			return true;
+	}
+	return false;
+}
+
 void WsServer::broadcast(const std::string &jsonText)
 {
 	if (!running_.load()) {
@@ -1031,7 +1082,9 @@ void WsServer::broadcast(const std::string &jsonText)
 	const auto frame = encodeTextFrame(jsonText);
 	std::lock_guard<std::mutex> lock(clientsMutex_);
 	const size_t total = clients_.size();
-	obs_log(LOG_INFO, "[%s] broadcast: %zu client(s) — %s", WSTAG, total, jsonText.c_str());
+	const bool skipLog = isHighFrequencyBroadcastType(jsonText);
+	if (!skipLog)
+		obs_log(LOG_INFO, "[%s] broadcast: %zu client(s) — %s", WSTAG, total, jsonText.c_str());
 
 	int sent = 0;
 	auto it = clients_.begin();
@@ -1041,6 +1094,8 @@ void WsServer::broadcast(const std::string &jsonText)
 		// これを怠ると、受信側は「途中で切れたJSON」を受け取ってJSON.parse()に失敗し、
 		// 承認・SDP/ICE交換が理由不明のまま止まって見える不具合の原因になっていた。
 		if (!sendAll(*it, reinterpret_cast<const char *>(frame.data()), frame.size())) {
+			// 送信失敗（クライアント切断等）は高頻度メッセージであっても常にログを残す
+			// （エラー診断のための情報のため、ログ抑制の対象外とする）。
 			obs_log(LOG_WARNING, "[%s] broadcast: send failed, removing client (WSA=%d)",
 				WSTAG, WSAGetLastError());
 			closesocket(*it);
@@ -1051,8 +1106,9 @@ void WsServer::broadcast(const std::string &jsonText)
 		}
 	}
 
-	obs_log(LOG_INFO, "[%s] broadcast: sent to %d/%zu client(s)", WSTAG, sent,
-		static_cast<size_t>(total));
+	if (!skipLog)
+		obs_log(LOG_INFO, "[%s] broadcast: sent to %d/%zu client(s)", WSTAG, sent,
+			static_cast<size_t>(total));
 }
 
 void WsServer::acceptLoop()
@@ -1153,6 +1209,12 @@ void WsServer::clientLoop(SOCKET sock)
 	}
 	if (isRequestForPath(request, "GET", "/vrm/user_settings.json")) {
 		serveUserSettings(sock);
+		closesocket(sock);
+		--activeClients_;
+		return;
+	}
+	if (isRequestForPath(request, "GET", "/vrm/tunnel_info")) {
+		serveTunnelInfo(sock);
 		closesocket(sock);
 		--activeClients_;
 		return;

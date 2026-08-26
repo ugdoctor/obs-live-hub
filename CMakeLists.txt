@@ -71,6 +71,10 @@ target_sources(
     src/modules/WsServer.hpp
     src/modules/VmcReceiver.cpp
     src/modules/VmcReceiver.hpp
+    src/modules/CloudflareTunnelManager.cpp
+    src/modules/CloudflareTunnelManager.hpp
+    src/ui/GlobalServerSettingsDialog.cpp
+    src/ui/GlobalServerSettingsDialog.hpp
     src/modules/AivisEngine.cpp
     src/modules/AivisEngine.hpp
     src/modules/AivisStyleCache.cpp

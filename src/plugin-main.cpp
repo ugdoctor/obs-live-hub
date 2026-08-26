@@ -69,6 +69,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "modules/ViewerTtsSettings.hpp"
 #include "modules/WsServer.hpp"
 #include "modules/VmcReceiver.hpp"
+#include "modules/CloudflareTunnelManager.hpp"
+#include "ui/GlobalServerSettingsDialog.hpp"
 #include "platforms/TwitchPlatform.hpp"
 #include "platforms/YouTubePlatform.hpp"
 #include "ui/CommentDock.hpp"
@@ -109,6 +111,7 @@ static YouTubePlatform *s_youtube = nullptr;
 static TwitchPlatform *s_twitch = nullptr;
 static WsServer *s_wsServer = nullptr;
 static VmcReceiver *s_vmcReceiver = nullptr;
+static CloudflareTunnelManager *s_cloudflareTunnel = nullptr;
 static EffectManager *s_effectManager = nullptr;
 static PointManager *s_pointManager = nullptr;
 static XPostDock *s_xPostDock = nullptr;
@@ -1676,6 +1679,13 @@ static void onBrowserDiagMenuClick(void * /* data */)
 	dlg.exec();
 }
 
+static void onGlobalServerSettingsMenuClick(void * /* data */)
+{
+	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	GlobalServerSettingsDialog dlg(s_cloudflareTunnel, s_wsServer, mainWindow);
+	dlg.exec();
+}
+
 static void onSettingsMenuClick(void * /* data */)
 {
 	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
@@ -2110,6 +2120,7 @@ static void buildObsLiveHubMenu()
 	auto *vrmMenu = hubMenu->addMenu("VRMステージ");
 	vrmMenu->addAction("ページを開く", []() { onOpenVrmStageMenuClick(nullptr); });
 	vrmMenu->addAction("VRMステージ設定（VMC受信）", []() { onVrmStageSettingsMenuClick(nullptr); });
+	vrmMenu->addAction("グローバルサーバー設定 (WAN公開)", []() { onGlobalServerSettingsMenuClick(nullptr); });
 
 	auto *xMenu = hubMenu->addMenu("X投稿");
 	xMenu->addAction("X手動投稿",               []() { onXManualPostMenuClick(nullptr); });
@@ -2504,6 +2515,26 @@ bool obs_module_load(void)
 	// VMC（VSeeFace等の外部トラッキングソフト）受信開始
 	restartVmcReceiver();
 
+	// WAN公開対応: Cloudflare Tunnel管理（cloudflared.exeのダウンロード・起動/停止・
+	// 公開URL取得）。ここではインスタンス生成のみ行い、実際のダウンロード/起動は
+	// ユーザーがグローバルサーバー設定ダイアログから明示的に操作するまで行わない。
+	s_cloudflareTunnel = new CloudflareTunnelManager();
+	// WsServer（Qt非依存）はCloudflareTunnelManagerを直接参照できないため、
+	// シグナルを受けてsetTunnelInfo()へ反映する（GET /vrm/tunnel_info・
+	// data/vrm_stage.html側の表示に使われる）。
+	QObject::connect(s_cloudflareTunnel, &CloudflareTunnelManager::statusChanged,
+			  [](CloudflareTunnelManager::Status status) {
+				  if (!s_wsServer || !s_cloudflareTunnel)
+					  return;
+				  const bool active = (status == CloudflareTunnelManager::Status::Published);
+				  s_wsServer->setTunnelInfo(
+					  active, active ? s_cloudflareTunnel->publicUrl().toStdString() : std::string());
+			  });
+	QObject::connect(s_cloudflareTunnel, &CloudflareTunnelManager::urlResolved, [](const QString &url) {
+		if (s_wsServer)
+			s_wsServer->setTunnelInfo(true, url.toStdString());
+	});
+
 	// YouTube（Qt シグナル直結、配信開始で connect()）
 	s_youtube = new YouTubePlatform(QString::fromStdString(cfg.youtubeApiKey),
 					QString::fromStdString(cfg.youtubeBroadcastId),
@@ -2583,6 +2614,14 @@ void obs_module_unload(void)
 		s_vmcReceiver->stop();
 		delete s_vmcReceiver;
 		s_vmcReceiver = nullptr;
+	}
+
+	if (s_cloudflareTunnel) {
+		// デストラクタ内でもstopTunnel()するが、OBS終了シーケンス中に確実に
+		// cloudflaredプロセスを終了させるためここでも明示的に呼ぶ。
+		s_cloudflareTunnel->stopTunnel();
+		delete s_cloudflareTunnel;
+		s_cloudflareTunnel = nullptr;
 	}
 
 	obs_log(LOG_INFO, "plugin unloaded");

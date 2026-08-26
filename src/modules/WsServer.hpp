@@ -50,6 +50,12 @@ public:
 	size_t maxVrmUploadBytes() const { return maxVrmUploadBytes_; }
 	void setMaxVrmUploadBytes(size_t bytes) { maxVrmUploadBytes_ = bytes; }
 
+	// WAN公開対応: Cloudflare Tunnel（CloudflareTunnelManager、Qt層）の現在の稼働状態・
+	// 公開URLを保持する。WsServer自体はQt非依存のためCloudflareTunnelManagerを直接
+	// 参照せず、plugin-main.cpp側がシグナル（statusChanged/urlResolved）を受けて
+	// このセッターを呼ぶことで間接的に連携する（GET /vrm/tunnel_infoで参照する）。
+	void setTunnelInfo(bool active, const std::string &url);
+
 	// 接続確立済みクライアント数を返す (スレッドセーフ)
 	int clientCount() const
 	{
@@ -115,6 +121,9 @@ private:
 	// GET /vrm/user_settings.json: TURNサーバー設定等（user_settings.json）を配信する。
 	// マルチユーザーVRM通話機能（Git管理外の個人設定）用。
 	void serveUserSettings(SOCKET sock);
+	// GET /vrm/tunnel_info: Cloudflare Tunnelの現在の稼働状態・公開URLを
+	// {"active":bool,"url":string} で返す（setTunnelInfo()参照）。
+	void serveTunnelInfo(SOCKET sock);
 
 	// マルチユーザーVRM通話（フェーズ2、2026-08-24よりHTTP一括転送方式）: 各参加者が自分の
 	// VRMバイナリをHTTP経由でこのプラグインへ一時的に保持させ、他の参加者はHTTP GETで
@@ -140,6 +149,11 @@ private:
 	std::string controllerSecretToken_;
 	// WAN公開対応: maxVrmUploadBytes()参照。既定50MB（52,428,800 bytes）。
 	std::atomic<size_t> maxVrmUploadBytes_{50 * 1024 * 1024};
+	// WAN公開対応: setTunnelInfo()参照。boolのatomicと違いstd::stringはatomicにできない
+	// ため、専用のmutexで保護する（読み書き頻度・保持サイズとも小さいため十分軽量）。
+	std::mutex tunnelInfoMutex_;
+	bool tunnelActive_ = false;
+	std::string tunnelUrl_;
 	SOCKET listenSock_ = INVALID_SOCKET;
 	std::atomic<bool> running_{false};
 	std::atomic<ListenState> listenState_{ListenState::NotStarted};

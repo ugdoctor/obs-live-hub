@@ -168,7 +168,7 @@ html.mode-display #uiToggleTab {
   line-height: 1.4;
   margin-bottom: 8px;
 }
-#callJoinCodeInput {
+#callJoinCodeInput, #callDisplayNameInput {
   background: rgba(255,255,255,0.1);
   border: 1px solid rgba(255,255,255,0.25);
   color: #fff;
@@ -298,7 +298,7 @@ html.mode-display #uiToggleTab {
     <!-- ビルド反映確認用バッジ: ブラウザのスーパーリロード無しでも最新版のHTMLが
          読み込まれているか目視確認できるようにする。今後この行を変更するたびに
          値も更新すること（形式: vYYYY.MM.DD-HHmm、変更を加えた日時）。 -->
-    <span style="font-size:11px; opacity:0.7; background:#333; padding:2px 6px; border-radius:4px; vertical-align:middle;">v2026.08.27-0100</span>
+    <span style="font-size:11px; opacity:0.7; background:#333; padding:2px 6px; border-radius:4px; vertical-align:middle;">v2026.08.27-0200</span>
   </h1>
 
   <div id="dropZone">
@@ -417,6 +417,10 @@ html.mode-display #uiToggleTab {
       音声通話機能は含まれません。
     </div>
 
+    <div class="uiRow">
+      <input type="text" id="callDisplayNameInput" maxlength="20" placeholder="名前を入力（最大20文字）" style="flex:1 1 auto; min-width:0;">
+    </div>
+
     <div id="callRoomSetup">
       <div class="uiRow">
         <button class="small-btn" id="callCreateRoomBtn">ルームを作成（ホスト）</button>
@@ -436,6 +440,13 @@ html.mode-display #uiToggleTab {
         <button class="small-btn" id="callRegenCodeBtn">コード再発行</button>
         <button class="small-btn" id="callCopyCodeBtn">コピー</button>
         <button class="small-btn" id="callLeaveRoomBtn">退出</button>
+      </div>
+      <!-- 3-3: Cloudflare Tunnelが有効な場合のみ表示（fetchTunnelInfo()参照）。 -->
+      <div class="uiRow" id="callTunnelInfoRow" style="display:none;">
+        <span>🌐 WAN公開URL:</span>
+        <a id="callTunnelUrlLink" href="#" target="_blank" rel="noopener"
+           style="flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#7ec8ff;"></a>
+        <button class="small-btn" id="callTunnelCopyBtn">コピー</button>
       </div>
       <div id="callStatusLine" class="debugRow" style="margin-bottom:6px;"></div>
     </div>
@@ -1448,8 +1459,12 @@ var localMediaStream = null; // マイク音声解析（ローカルのリップ
 // このタブが「外部アプリ連携」を明示的に選択している場合のみVMCを受け入れるようにする。
 var trackingSourceMode = 'camera';
 
+// 要件2（トラッキング入力ソースの保存）: 選択したモードをlocalStorageへ永続化する。
+var TRACKING_SOURCE_LS_KEY = 'vrm_tracking_source';
+
 function setTrackingSourceMode(mode) {
   if (mode !== 'camera' && mode !== 'external') return;
+  try { localStorage.setItem(TRACKING_SOURCE_LS_KEY, mode); } catch (_) {}
   if (trackingSourceMode === mode) return;
   trackingSourceMode = mode;
   var startBtn = document.getElementById('startTrackingBtn');
@@ -2187,11 +2202,57 @@ function hideCallRoomUi() {
   var pl = document.getElementById('callParticipantsList'); if (pl) pl.innerHTML = '';
 }
 
+// 要件1（名前の変更）: #callDisplayNameInputの値をlocalStorageへ永続化する。
+var CALL_DISPLAY_NAME_LS_KEY = 'vrm_display_name';
+function saveDisplayName(name) {
+  try { localStorage.setItem(CALL_DISPLAY_NAME_LS_KEY, name); } catch (_) {}
+}
+function loadSavedDisplayName() {
+  try { return localStorage.getItem(CALL_DISPLAY_NAME_LS_KEY) || ''; } catch (_) { return ''; }
+}
+// ルーム作成/参加ボタン押下時点での名前欄の値を確定させる（blur/changeを待たない）。
+// 空欄ならdefaultName（ホスト作成時は'ホスト'、参加申請時は'ゲスト'）を使う。
+function currentDisplayNameOrDefault(defaultName) {
+  var input = document.getElementById('callDisplayNameInput');
+  var name = input ? input.value.trim().slice(0, 20) : '';
+  if (input) input.value = name;
+  if (name) saveDisplayName(name);
+  return name || defaultName;
+}
+
+// 3-3: グローバルサーバー設定（Cloudflare Tunnel）が有効な場合、招待コード欄の近くに
+// 公開URLを表示する。WsServer.cpp GET /vrm/tunnel_infoをポーリングするだけの
+// ベストエフォート表示のため、取得失敗時は単に非表示のままにする（エラー通知はしない）。
+function updateTunnelInfoUi(url) {
+  var row = document.getElementById('callTunnelInfoRow');
+  var link = document.getElementById('callTunnelUrlLink');
+  if (!row || !link) return;
+  if (url) {
+    row.style.display = 'flex';
+    link.textContent = url;
+    link.href = url;
+  } else {
+    row.style.display = 'none';
+  }
+}
+function fetchTunnelInfo() {
+  if (isDisplayMode) return; // Displayはこの表示自体を持たない（uiPanel非表示のため無意味）
+  fetch(HTTP_BASE + '/vrm/tunnel_info').then(function(res) {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.json();
+  }).then(function(data) {
+    updateTunnelInfoUi(data && data.active ? data.url : null);
+  }).catch(function() {
+    // 旧バージョンのプラグイン（このエンドポイント未対応）・一時的な通信失敗等は
+    // 静かに無視する（このAPIはベストエフォート表示のためエラー通知しない）。
+  });
+}
+
 function callCreateRoom() {
   if (callState.roomId) { setCallStatus('既にルームに参加中です。先に退出してください。'); return; }
   callState.isHost = true;
   callState.myPeerId = generatePeerId();
-  callState.myDisplayName = 'ホスト';
+  callState.myDisplayName = currentDisplayNameOrDefault('ホスト');
   callState.roomId = generatePeerId(); // 招待コードとは独立の内部識別子（コード再発行時も維持する）
   callState.inviteCode = generateInviteCode();
   callState.waitingPeers = {};
@@ -2203,6 +2264,7 @@ function callCreateRoom() {
   renderCallWaitingList();
   setCallStatus('ルームを作成しました。招待コードを知人に共有してください。');
   sendTransformUpdate(true); // Display側へroomId/自分のpeerIdを共有（shadow join用）
+  fetchTunnelInfo(); // 3-3: ルーム作成時点でのWAN公開URLを即座に反映しておく
 }
 
 function callRegenerateInviteCode() {
@@ -2244,7 +2306,7 @@ function callJoinRoom(inviteCodeInput) {
   if (!codeUsed) { setCallStatus('招待コードを入力してください。'); return; }
   callState.isHost = false;
   callState.myPeerId = generatePeerId();
-  callState.myDisplayName = 'ゲスト';
+  callState.myDisplayName = currentDisplayNameOrDefault('ゲスト');
   callState.roomId = null; // join_ack受信時に設定される
   callState.myJoinInviteCode = codeUsed;
   var joinPayload = { action: 'join_request', inviteCode: codeUsed, displayName: callState.myDisplayName };
@@ -2643,6 +2705,20 @@ function handleRoomControl(msg) {
   if (action === 'layout_update') {
     var peer = callState.peers[msg.targetPeerId];
     if (peer) { peer.layout = msg.layout; applyCallPeerLayout(peer); }
+    return;
+  }
+  if (action === 'update_name') {
+    // 要件1（名前の変更）: ゲストからの改名リクエスト。ロースター（callState.peers）の
+    // 権威はホストのみが持つため、ホストだけが実際にdisplayNameを更新してroster再配信する
+    // （ホスト自身の改名はcallState.peersにエントリを持たないため、この経路ではなく
+    // commitDisplayNameChange()内で直接broadcastRoster()する）。
+    if (!callState.isHost) return;
+    var renamedPeer = callState.peers[msg.fromPeerId];
+    if (!renamedPeer) return;
+    var newName = (msg.displayName || '').trim().slice(0, 20);
+    if (newName) renamedPeer.displayName = newName;
+    broadcastRoster();
+    renderCallParticipantsList();
     return;
   }
 }
@@ -3127,8 +3203,21 @@ function buildLayoutControlsRow(layout, onChange) {
 }
 
 function renderCallParticipantsList() {
-  recomputeAutoCallLayout(); // 参加者構成が変わるたびに自動横並び配置（要件1）を再計算する
   var container = document.getElementById('callParticipantsList');
+  // 実機バグ対策（フォーカスガード）: この関数は1秒間隔の自己修復ウォッチドッグ
+  // （initCallUi()参照）を含む複数の経路（roster受信・承認・退出・レイアウト変更等）
+  // から呼ばれるたびcontainer.innerHTML=''でDOM全体を作り直す。ユーザーがメンバー別
+  // レイアウト調整UIの<select>を開いている最中・スライダーをドラッグ中にこの再描画が
+  // 走ると、フォーカスされていた要素ごと破棄され、開いていたドロップダウンが数秒で
+  // 勝手に閉じてしまっていた。フォーカスがこのリスト内（container.contains）にある間は
+  // 再描画自体をスキップし、操作を終えてフォーカスが外れたタイミングの次回呼び出しで
+  // 反映する（recomputeAutoCallLayout()による自動配置の再計算も含めて丸ごと見送る。
+  // 操作中の一時的な遅延は許容し、DOM破棄によるドロップダウンの強制クローズを防ぐことを
+  // 優先する）。
+  if (container && document.activeElement && container.contains(document.activeElement)) {
+    return;
+  }
+  recomputeAutoCallLayout(); // 参加者構成が変わるたびに自動横並び配置（要件1）を再計算する
   if (!container) return;
   container.innerHTML = '';
 
@@ -3201,6 +3290,32 @@ function initCallUi() {
   // ここで一度呼んでおく必要がある）。
   updateHostSettingsSectionVisibility();
 
+  // 要件1（名前の変更）: 保存済みの表示名を入力欄へ復元し、確定（change/blur）のたび
+  // localStorageへ保存する。ルーム参加中であれば、自分の表示名を更新してホスト/ゲスト
+  // それぞれの経路で全員へ同期する。
+  var displayNameInput = document.getElementById('callDisplayNameInput');
+  if (displayNameInput) {
+    displayNameInput.value = loadSavedDisplayName();
+    var commitDisplayNameChange = function() {
+      var name = displayNameInput.value.trim().slice(0, 20);
+      displayNameInput.value = name;
+      saveDisplayName(name);
+      if (!callState.roomId || !callState.myPeerId) return; // ルーム未参加中は保存のみ
+      var defaultName = callState.isHost ? 'ホスト' : 'ゲスト';
+      callState.myDisplayName = name || defaultName;
+      if (callState.isHost) {
+        // 自分自身（ホスト）はcallState.peersにエントリを持たないため、update_nameでは
+        // なく直接broadcastRoster()で反映する（members[0]が自分自身のエントリのため）。
+        broadcastRoster();
+        renderCallParticipantsList();
+      } else {
+        sendRoomControl({ action: 'update_name', displayName: callState.myDisplayName });
+      }
+    };
+    displayNameInput.addEventListener('change', commitDisplayNameChange);
+    displayNameInput.addEventListener('blur', commitDisplayNameChange);
+  }
+
   var createBtn = document.getElementById('callCreateRoomBtn');
   if (createBtn) createBtn.addEventListener('click', callCreateRoom);
 
@@ -3217,6 +3332,18 @@ function initCallUi() {
       if (callState.inviteCode && navigator.clipboard) navigator.clipboard.writeText(callState.inviteCode);
     });
   }
+
+  // 3-3: WAN公開URLのコピーボタン、および定期ポーリング（トンネルを後から起動/停止した
+  // 場合でも、ルーム作成直後だけでなく継続的に表示状態を追従させる）。
+  var tunnelCopyBtn = document.getElementById('callTunnelCopyBtn');
+  if (tunnelCopyBtn) {
+    tunnelCopyBtn.addEventListener('click', function() {
+      var link = document.getElementById('callTunnelUrlLink');
+      if (link && link.textContent && navigator.clipboard) navigator.clipboard.writeText(link.textContent);
+    });
+  }
+  fetchTunnelInfo();
+  setInterval(fetchTunnelInfo, 8000);
 
   var leaveBtn = document.getElementById('callLeaveRoomBtn');
   if (leaveBtn) leaveBtn.addEventListener('click', leaveCallRoom);
@@ -3355,6 +3482,16 @@ function init() {
   document.getElementById('trackingSourceExternal').addEventListener('change', function(e) {
     if (e.target.checked) setTrackingSourceMode('external');
   });
+  // 要件2（トラッキング入力ソースの保存）: 保存値があれば対応するラジオボタンを
+  // チェックしてsetTrackingSourceMode()を実行する（未保存時は既定の'camera'のまま）。
+  var savedTrackingSource = null;
+  try { savedTrackingSource = localStorage.getItem(TRACKING_SOURCE_LS_KEY); } catch (_) {}
+  if (savedTrackingSource === 'camera' || savedTrackingSource === 'external') {
+    var savedTrackingRadio = document.getElementById(
+      savedTrackingSource === 'external' ? 'trackingSourceExternal' : 'trackingSourceCamera');
+    if (savedTrackingRadio) savedTrackingRadio.checked = true;
+    setTrackingSourceMode(savedTrackingSource);
+  }
   document.getElementById('showCameraPreviewChk').addEventListener('change', function(e) {
     document.getElementById('cameraPreview').style.display = e.target.checked ? 'block' : 'none';
   });
