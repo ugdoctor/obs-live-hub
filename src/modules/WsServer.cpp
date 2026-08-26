@@ -362,7 +362,9 @@ static void sendFileResponse(SOCKET sock, const std::wstring &filePath,
 		"HTTP/1.1 200 OK\r\n"
 		"Content-Type: " + contentType + "\r\n"
 		"Content-Length: " + std::to_string(data.size()) + "\r\n"
-		"Cache-Control: no-cache\r\n"
+		"Cache-Control: no-cache, no-store, must-revalidate\r\n"
+		"Pragma: no-cache\r\n"
+		"Expires: 0\r\n"
 		"Access-Control-Allow-Origin: *\r\n"
 		"Connection: close\r\n\r\n";
 	if (sendAll(sock, header.c_str(), header.size()) && !data.empty())
@@ -377,7 +379,9 @@ static void sendBufferResponse(SOCKET sock, const std::vector<uint8_t> &data,
 		"HTTP/1.1 200 OK\r\n"
 		"Content-Type: " + contentType + "\r\n"
 		"Content-Length: " + std::to_string(data.size()) + "\r\n"
-		"Cache-Control: no-cache\r\n"
+		"Cache-Control: no-cache, no-store, must-revalidate\r\n"
+		"Pragma: no-cache\r\n"
+		"Expires: 0\r\n"
 		"Access-Control-Allow-Origin: *\r\n"
 		"Connection: close\r\n\r\n";
 	// VRMバイナリは数MB〜十数MBに達することがあり、単発のsend()では確実に部分送信になる
@@ -522,11 +526,23 @@ void WsServer::serveVrmModel(SOCKET sock)
 // Content-Lengthヘッダの値ぶんだけボディを読み切る共通ヘルパー（POST /vrm/model と
 // POST /vrm/peer_upload で共用）。readHttpRequest()が既に読んでいたヘッダ後方のスピルオーバー
 // 分を起点に、残りをrecv()で読み進める。失敗時は500応答を送信済みでfalseを返す。
+//
+// 実機バグ対策: Cloudflare Tunnel等のリバースプロキシ経由でWAN（例: iPhoneのモバイル回線）
+// から約23MBのVRMをアップロードすると、45秒ほどでクライアント側に`Load failed`が発生し
+// ホストへ届かない不具合が報告された。受信ループ自体はcontentLengthに達するまでrecv()を
+// 回し続ける構造で問題なかったが、1回のrecv()が空振り（新規データが来ない）した場合の
+// stallタイムアウトが10秒しかなく、モバイル回線+トンネル越しでは転送途中に10秒を超える
+// 無通信区間が普通に発生しうるため、途中で500を返して打ち切ってしまっていた
+// （23MB全体の転送時間ではなく、この「1回あたりの無通信許容時間」が短すぎたのが原因）。
+// 大容量ファイル・低速回線を考慮し60〜120秒の余裕を持たせる。
 static bool readHttpBodyByContentLength(SOCKET sock, const std::string &request, long contentLength,
                                          std::vector<uint8_t> &outBody)
 {
 	static const char *resp500 =
-		"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+		"HTTP/1.1 500 Internal Server Error\r\n"
+		"Access-Control-Allow-Origin: *\r\n"
+		"Content-Length: 0\r\nConnection: close\r\n\r\n";
+	static const int kBodyRecvStallTimeoutSec = 90;
 
 	outBody.clear();
 	outBody.reserve(static_cast<size_t>(contentLength));
@@ -543,15 +559,21 @@ static bool readHttpBodyByContentLength(SOCKET sock, const std::string &request,
 		fd_set fds;
 		FD_ZERO(&fds);
 		FD_SET(sock, &fds);
-		timeval tv{10, 0};
+		timeval tv{kBodyRecvStallTimeoutSec, 0};
 		if (select(0, &fds, nullptr, nullptr, &tv) <= 0) {
-			obs_log(LOG_WARNING, "[%s] HTTPボディ読み込み: recv timeout/error", WSTAG);
+			obs_log(LOG_WARNING,
+				"[%s] HTTPボディ読み込み: recv timeout/error（%zu/%ld bytes受信済み、"
+				"stallタイムアウト%d秒）",
+				WSTAG, outBody.size(), contentLength, kBodyRecvStallTimeoutSec);
 			sendAll(sock, resp500, strlen(resp500));
 			return false;
 		}
 		char tmp[65536];
 		const int n = recv(sock, tmp, sizeof(tmp), 0);
 		if (n <= 0) {
+			obs_log(LOG_WARNING,
+				"[%s] HTTPボディ読み込み: recv()が%d（接続切断/エラー）、%zu/%ld bytes受信済み",
+				WSTAG, n, outBody.size(), contentLength);
 			sendAll(sock, resp500, strlen(resp500));
 			return false;
 		}
@@ -564,8 +586,15 @@ static bool readHttpBodyByContentLength(SOCKET sock, const std::string &request,
 
 void WsServer::handleVrmModelUpload(SOCKET sock, const std::string &request)
 {
+	// 実機バグ対策: 従来はエラー応答（400/500）にAccess-Control-Allow-Originが
+	// 含まれておらず、失敗時にブラウザがレスポンス本文/ステータスをJSへ渡せず
+	// （CORSブロック）、実際のエラー理由（400/500/timeout）に関わらず一律
+	// "Load failed"のような汎用ネットワークエラーとしてしか観測できなかった。
+	// 200 OKと同様、全レスポンスにCORSヘッダーを付与し切り分けを容易にする。
 	static const char *resp400 =
-		"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+		"HTTP/1.1 400 Bad Request\r\n"
+		"Access-Control-Allow-Origin: *\r\n"
+		"Content-Length: 0\r\nConnection: close\r\n\r\n";
 	static const char *resp200 =
 		"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
 
