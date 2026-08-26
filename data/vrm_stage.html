@@ -389,6 +389,15 @@ html.mode-display #uiToggleTab {
       <div id="callStatusLine" class="debugRow" style="margin-bottom:6px;"></div>
     </div>
 
+    <div id="callHostSettingsSection" style="display:none;">
+      <div class="uiRow"><strong>ホスト設定</strong></div>
+      <div class="uiRow transformRow">
+        <label for="callMaxVrmSizeSlider">VRMファイルサイズ上限</label>
+        <input type="range" id="callMaxVrmSizeSlider" min="10" max="150" step="10" value="50">
+        <span class="transformVal" id="callMaxVrmSizeVal">50 MB</span>
+      </div>
+    </div>
+
     <div id="callWaitingRoomSection" style="display:none;">
       <div class="uiRow"><strong>待合室（承認待ち）</strong></div>
       <div id="callWaitingList"></div>
@@ -1041,6 +1050,17 @@ function loadVrmBinary(arrayBuffer, fileName, opts) {
 // クライアント側で弾き、低速回線で無駄な送信時間を使わせない・413応答を待たせないようにする。
 var VRM_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
 
+// 要件1: ホスト（Controller）がVRMファイルサイズ上限を動的に変更する。サーバー
+// （WsServer::maxVrmUploadBytes_）へ変更を要求すると同時に、自分自身の
+// VRM_UPLOAD_MAX_BYTES（クライアント側バリデーション上限）も即座に連動させる。
+// サーバーからの実際の反映結果は"vrm_max_vrm_size_update"（ws.onmessage参照）で
+// 全クライアント（自分自身を含む）へ返ってくるため、そこでも改めて同期する。
+function setMaxVrmUploadSizeMB(mb) {
+  if (!(mb > 0)) return;
+  VRM_UPLOAD_MAX_BYTES = mb * 1024 * 1024;
+  sendRoomControl({ action: 'set_max_vrm_size', sizeMB: mb });
+}
+
 function loadVrmFile(file) {
   if (!file) return;
   if (file.size > VRM_UPLOAD_MAX_BYTES) {
@@ -1682,6 +1702,22 @@ function connectWs() {
         }
         return;
       }
+      // 要件1: ホストがVRMファイルサイズ上限を変更した結果（WsServer.cpp
+      // handleWsClientMessage参照）。全クライアント（自分自身を含む）へブロードキャスト
+      // されるため、Controller/Display/ゲストいずれもクライアント側バリデーション上限を
+      // 追従させる。スライダーUIを持つのはホストのみだが、値の表示自体はどのクライアントで
+      // 見えても問題ないため更新する。
+      if (data.type === 'vrm_max_vrm_size_update') {
+        if (typeof data.maxSizeMB === 'number' && data.maxSizeMB > 0) {
+          VRM_UPLOAD_MAX_BYTES = data.maxSizeMB * 1024 * 1024;
+          var maxVrmSizeSliderEl = document.getElementById('callMaxVrmSizeSlider');
+          var maxVrmSizeValEl = document.getElementById('callMaxVrmSizeVal');
+          if (maxVrmSizeSliderEl) maxVrmSizeSliderEl.value = data.maxSizeMB;
+          if (maxVrmSizeValEl) maxVrmSizeValEl.textContent = data.maxSizeMB + ' MB';
+          diagInfo('WS', 'VRMファイルサイズ上限が' + data.maxSizeMB + 'MBへ更新されました');
+        }
+        return;
+      }
       // vrm_vmc_update はプラグイン（VmcReceiver）が発信元であり、ControllerもDisplayも
       // 対等なWebSocketクライアントとして受け取る（自分自身のechoではないため両方で処理する）
       if (data.type === 'vrm_vmc_update') { onVmcUpdateReceived(data); return; }
@@ -1963,6 +1999,7 @@ function setCallStatus(text) {
 function showCallRoomUi() {
   var setup = document.getElementById('callRoomSetup');
   var info  = document.getElementById('callRoomInfo');
+  var hostSettingsSection = document.getElementById('callHostSettingsSection');
   var waitingSection = document.getElementById('callWaitingRoomSection');
   var participantsSection = document.getElementById('callParticipantsSection');
   if (setup) setup.style.display = 'none';
@@ -1970,6 +2007,9 @@ function showCallRoomUi() {
     info.style.display = 'block';
     setDebugText('callInviteCodeVal', callState.isHost ? (callState.inviteCode || '-') : '(参加者のため非表示)');
   }
+  // 要件1: VRMファイルサイズ上限設定はホスト（isControllerModeかつisHost）のみが
+  // 変更できる操作のため、待合室セクションと同様ホスト以外には表示しない。
+  if (hostSettingsSection) hostSettingsSection.style.display = callState.isHost ? 'block' : 'none';
   if (waitingSection) waitingSection.style.display = callState.isHost ? 'block' : 'none';
   if (participantsSection) participantsSection.style.display = 'block';
 }
@@ -1977,10 +2017,12 @@ function showCallRoomUi() {
 function hideCallRoomUi() {
   var setup = document.getElementById('callRoomSetup');
   var info  = document.getElementById('callRoomInfo');
+  var hostSettingsSection = document.getElementById('callHostSettingsSection');
   var waitingSection = document.getElementById('callWaitingRoomSection');
   var participantsSection = document.getElementById('callParticipantsSection');
   if (setup) setup.style.display = 'block';
   if (info) info.style.display = 'none';
+  if (hostSettingsSection) hostSettingsSection.style.display = 'none';
   if (waitingSection) waitingSection.style.display = 'none';
   if (participantsSection) participantsSection.style.display = 'none';
   var wl = document.getElementById('callWaitingList'); if (wl) wl.innerHTML = '';
@@ -2867,6 +2909,20 @@ function initCallUi() {
 
   var leaveBtn = document.getElementById('callLeaveRoomBtn');
   if (leaveBtn) leaveBtn.addEventListener('click', leaveCallRoom);
+
+  // 要件1: VRMファイルサイズ上限のホスト設定スライダー。ドラッグ中はラベルのみ即時更新し
+  // （'input'）、離した時点（'change'）でサーバーへ反映する。これにより、ドラッグ中に
+  // 大量のset_max_vrm_sizeメッセージを送りつけることを避ける。
+  var maxVrmSizeSlider = document.getElementById('callMaxVrmSizeSlider');
+  var maxVrmSizeVal = document.getElementById('callMaxVrmSizeVal');
+  if (maxVrmSizeSlider) {
+    maxVrmSizeSlider.addEventListener('input', function() {
+      if (maxVrmSizeVal) maxVrmSizeVal.textContent = maxVrmSizeSlider.value + ' MB';
+    });
+    maxVrmSizeSlider.addEventListener('change', function() {
+      setMaxVrmUploadSizeMB(parseInt(maxVrmSizeSlider.value, 10));
+    });
+  }
 
   // ページを閉じる際、可能な範囲で他の参加者へ退出を通知する（ベストエフォート）。
   // 実機バグ対策: 以前はここで独立したbeforeunloadリスナーを登録していたが、WebSocket

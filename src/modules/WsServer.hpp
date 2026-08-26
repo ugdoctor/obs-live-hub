@@ -60,8 +60,13 @@ public:
 	// JSON テキストを全 WebSocket クライアントにブロードキャスト (スレッドセーフ)
 	void broadcast(const std::string &jsonText);
 
-	// クライアントからのテキストフレームを受け取るコールバック（WsServerスレッドから呼ばれる）
-	void setMessageCallback(std::function<void(const std::string &)> cb);
+	// クライアントからのテキストフレームを受け取るコールバック（WsServerスレッドから呼ばれる）。
+	// 第2引数isAuthorizedControllerは、このメッセージを送ってきた接続がWebSocket
+	// ハンドシェイク時にcontrollerSecretTokenの検証に成功した（mode=controllerかつ
+	// token一致）接続かどうかを表す。set_max_vrm_size等、サーバー側の設定を変更する
+	// アクションの権限チェックに使う（クライアント側のJS状態を信用せず、接続確立時に
+	// サーバー自身が検証した結果のみを根拠にする）。
+	void setMessageCallback(std::function<void(const std::string &, bool isAuthorizedController)> cb);
 
 	// 新規クライアント接続時コールバック（WsServerスレッドから呼ばれる）
 	void setConnectCallback(std::function<void()> cb);
@@ -131,7 +136,7 @@ private:
 	std::thread acceptThread_;
 	std::mutex clientsMutex_;
 	std::vector<SOCKET> clients_;
-	std::function<void(const std::string &)> messageCallback_;
+	std::function<void(const std::string &, bool isAuthorizedController)> messageCallback_;
 	std::function<void()>                    connectCallback_;
 	std::mutex callbackMutex_;
 

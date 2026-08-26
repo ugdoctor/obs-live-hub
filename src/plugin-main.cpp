@@ -272,7 +272,7 @@ static std::string buildCommentTtsJson(const QString &userId, const QString &pla
 }
 
 static void connectTwitchSignals();               // forward declaration
-static void handleWsClientMessage(const QString &json); // forward declaration
+static void handleWsClientMessage(const QString &json, bool isAuthorizedController); // forward declaration
 static std::string makeTtsJson();                 // forward declaration
 static void broadcastTtsDict();                   // forward declaration
 static void broadcastYoutubeEmoteDict();          // forward declaration
@@ -302,10 +302,11 @@ static void applyWsCallbacks(WsServer *srv)
 {
 	if (!srv)
 		return;
-	srv->setMessageCallback([](const std::string &json) {
+	srv->setMessageCallback([](const std::string &json, bool isAuthorizedController) {
 		const QString js = QString::fromStdString(json);
-		QMetaObject::invokeMethod(qApp, [js]() { handleWsClientMessage(js); },
-		                          Qt::QueuedConnection);
+		QMetaObject::invokeMethod(qApp, [js, isAuthorizedController]() {
+			handleWsClientMessage(js, isAuthorizedController);
+		}, Qt::QueuedConnection);
 	});
 	srv->setConnectCallback([]() {
 		QMetaObject::invokeMethod(qApp, []() {
@@ -1239,7 +1240,7 @@ static void handleResolveModel(const QJsonObject &obj)
 	}
 }
 
-static void handleWsClientMessage(const QString &json)
+static void handleWsClientMessage(const QString &json, bool isAuthorizedController)
 {
 	const QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
 	if (!doc.isObject())
@@ -1277,6 +1278,34 @@ static void handleWsClientMessage(const QString &json)
 		s_lastVrmTransformJson = json.toStdString();
 		if (s_wsServer)
 			s_wsServer->broadcast(s_lastVrmTransformJson);
+	} else if (type == "vrm_room_control" && obj["action"].toString() == "set_max_vrm_size") {
+		// WAN公開対応: VRMアップロードサイズ上限（WsServer::maxVrmUploadBytes_）をホストの
+		// Controller画面から動的に変更する。これはサーバー側の設定変更であり、
+		// data/vrm_stage.html側のisControllerMode（自己申告のJS状態）ではなく、
+		// WebSocketハンドシェイク時にサーバー自身がcontrollerSecretTokenを検証した結果
+		// （isAuthorizedController）のみを許可の根拠にする。他のvrm_room_control
+		// アクションと異なり、これは他クライアントへそのまま中継すべき「ルームメッセージ」
+		// ではなくサーバー設定変更のため、下のbroadcast(json)へは流さずここで完結させ、
+		// 成功時のみ結果を"vrm_max_vrm_size_update"として全クライアントへ通知する
+		// （Controller/Display/ゲストいずれもクライアント側バリデーション上限を追従できるように）。
+		if (!isAuthorizedController) {
+			obs_log(LOG_WARNING, "[olh] set_max_vrm_size: 未認証の接続からのリクエストを拒否しました");
+		} else if (s_wsServer) {
+			const int sizeMB = obj["sizeMB"].toInt(-1);
+			if (sizeMB < 1) {
+				obs_log(LOG_WARNING, "[olh] set_max_vrm_size: 不正なsizeMB値です: %d", sizeMB);
+			} else {
+				// UIのスライダー範囲（10〜150MB）を尊重しつつ、異常値からの防御として
+				// 上限500MBでクランプする（直接メッセージを送りつけてくる不正クライアント対策）。
+				const int clampedMB = std::min(sizeMB, 500);
+				const size_t bytes = static_cast<size_t>(clampedMB) * 1024 * 1024;
+				s_wsServer->setMaxVrmUploadBytes(bytes);
+				obs_log(LOG_INFO, "[olh] VRMアップロードサイズ上限を%dMBへ変更しました", clampedMB);
+				const std::string updateJson =
+					"{\"type\":\"vrm_max_vrm_size_update\",\"maxSizeMB\":" + std::to_string(clampedMB) + "}";
+				s_wsServer->broadcast(updateJson);
+			}
+		}
 	} else if (type == "vrm_room_control" || type == "vrm_peer_motion") {
 		// マルチユーザーVRM通話（フェーズ2）: ルーム管理（招待・待合室承認・キック等）と
 		// モーション同期。WebRTC（RTCPeerConnection/RTCDataChannel）は使用しない。

@@ -1060,7 +1060,7 @@ void WsServer::acceptLoop()
 	obs_log(LOG_INFO, "[%s] acceptLoop() exiting", WSTAG);
 }
 
-void WsServer::setMessageCallback(std::function<void(const std::string &)> cb)
+void WsServer::setMessageCallback(std::function<void(const std::string &, bool)> cb)
 {
 	std::lock_guard<std::mutex> lock(callbackMutex_);
 	messageCallback_ = std::move(cb);
@@ -1192,18 +1192,22 @@ void WsServer::clientLoop(SOCKET sock)
 	// controllerSecretToken_の検証結果を"vrm_auth_result"として一度だけ返す。
 	// data/vrm_stage.html側はこれを見てisControllerModeを実際の検証結果に合わせる
 	// （不一致ならDisplayモード相当・閲覧専用へ自動的に格下げする）。
-	// 注意: これはクライアント側UXのためのヒントに過ぎず、実効的な権限境界は
-	// POST /vrm/model側の独立したtoken検証（handleVrmModelUpload参照）にある。
+	// isAuthorizedControllerはこの接続の生存期間中（clientLoop()関数スコープ）保持し、
+	// 以降このソケットから届く全メッセージをmessageCallback_へ渡す際の第2引数として使う
+	// （set_max_vrm_size等、サーバー設定を変更するアクションの権限チェック用。
+	// クライアントのJS状態ではなく、ハンドシェイク時にサーバー自身が検証した結果のみを
+	// 根拠にする——真の権限境界はここ）。
+	bool isAuthorizedController = false;
 	if (parseQueryParam(request, "mode") == "controller") {
 		const std::string token = parseQueryParam(request, "token");
-		const bool authorized = !controllerSecretToken_.empty() && token == controllerSecretToken_;
-		if (!authorized) {
+		isAuthorizedController = !controllerSecretToken_.empty() && token == controllerSecretToken_;
+		if (!isAuthorizedController) {
 			obs_log(LOG_WARNING,
 				"[%s] WebSocket handshake: mode=controllerのtoken不一致 (token_len=%zu)",
 				WSTAG, token.size());
 		}
 		const std::string authJson = std::string("{\"type\":\"vrm_auth_result\",\"controllerAuthorized\":")
-			+ (authorized ? "true" : "false") + "}";
+			+ (isAuthorizedController ? "true" : "false") + "}";
 		const auto authFrame = encodeTextFrame(authJson);
 		sendAll(sock, reinterpret_cast<const char *>(authFrame.data()), authFrame.size());
 	}
@@ -1270,13 +1274,13 @@ void WsServer::clientLoop(SOCKET sock)
 				for (uint64_t i = 0; i < payloadLen; ++i)
 					text[i] = static_cast<char>(rxBuf[headerSize + i] ^ maskKey[i % 4]);
 
-				std::function<void(const std::string &)> cb;
+				std::function<void(const std::string &, bool)> cb;
 				{
 					std::lock_guard<std::mutex> lock(callbackMutex_);
 					cb = messageCallback_;
 				}
 				if (cb)
-					cb(text);
+					cb(text, isAuthorizedController);
 			}
 			rxBuf.erase(rxBuf.begin(),
 			            rxBuf.begin() + headerSize + static_cast<size_t>(payloadLen));
