@@ -42,6 +42,14 @@ public:
 	// 本トークンでサーバー側が独立に検証することで実効的な権限境界にする。
 	const std::string &controllerSecretToken() const { return controllerSecretToken_; }
 
+	// WAN公開対応: VRMアップロード（POST /vrm/model・POST /vrm/peer_upload）の許容最大
+	// バイト数。既定は50MB。値としてWsServer内で一元管理し、2箇所のハンドラで同じ値を
+	// 参照する（従来は256MBのローカル定数が2箇所に個別定義されており、変更時に更新漏れの
+	// リスクがあった）。setMaxVrmUploadBytes()で起動時に変更可能（現状呼び出し元は無いが、
+	// 将来設定UIから調整可能にする余地を残す）。
+	size_t maxVrmUploadBytes() const { return maxVrmUploadBytes_; }
+	void setMaxVrmUploadBytes(size_t bytes) { maxVrmUploadBytes_ = bytes; }
+
 	// 接続確立済みクライアント数を返す (スレッドセーフ)
 	int clientCount() const
 	{
@@ -114,6 +122,8 @@ private:
 	// WAN公開対応: 起動のたびに新しくランダム生成される（コンストラクタで初期化）。
 	// controllerSecretToken()参照。
 	std::string controllerSecretToken_;
+	// WAN公開対応: maxVrmUploadBytes()参照。既定50MB（52,428,800 bytes）。
+	std::atomic<size_t> maxVrmUploadBytes_{50 * 1024 * 1024};
 	SOCKET listenSock_ = INVALID_SOCKET;
 	std::atomic<bool> running_{false};
 	std::atomic<ListenState> listenState_{ListenState::NotStarted};

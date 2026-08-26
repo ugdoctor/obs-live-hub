@@ -1036,8 +1036,20 @@ function loadVrmBinary(arrayBuffer, fileName, opts) {
 // ユーザーが直接ファイルを指定した場合（D&D・ファイル選択・OBS「操作」モードでの直接ドロップ）の
 // 読み込み。IndexedDBキャッシュへの保存・プラグインへのアップロードの両方を行う
 // （Displayモードではアップロードは行わない。loadVrmBinary側のガード参照）。
+// WAN公開対応（要件3）: WsServer.cpp側のmaxVrmUploadBytes_既定値（50MB）と合わせる。
+// サーバーが実際に受け付ける上限を超えるファイルは、アップロード（fetch）を試みる前に
+// クライアント側で弾き、低速回線で無駄な送信時間を使わせない・413応答を待たせないようにする。
+var VRM_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
+
 function loadVrmFile(file) {
   if (!file) return;
+  if (file.size > VRM_UPLOAD_MAX_BYTES) {
+    var limitMb = (VRM_UPLOAD_MAX_BYTES / (1024 * 1024)).toFixed(0);
+    var fileMb = (file.size / (1024 * 1024)).toFixed(1);
+    setStatus('ファイルサイズが上限(' + limitMb + 'MB)を超えています: '
+      + file.name + '（' + fileMb + 'MB）');
+    return;
+  }
   file.arrayBuffer().then(function(buf) {
     loadVrmBinary(buf, file.name);
   }).catch(function(err) {

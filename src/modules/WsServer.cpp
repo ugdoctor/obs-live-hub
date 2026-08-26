@@ -343,18 +343,54 @@ bool WsServer::parseEmoteGetPath(const std::string &req, std::string &outFileNam
 	return true;
 }
 
+// WAN公開対応（要件2、パストラバーサル防止の最終防御）: GetFullPathNameW()で".."等を
+// 素朴に正規化した上で、結果がrootDir配下から外れていないかを確認する。呼び出し元
+// （isSafeFileName()等）で既にファイル名を検証済みの経路もあるが、将来別の呼び出し元が
+// 検証を怠っても、sendFileResponse()を経由する限り配信ルート外のファイルは読み出せない
+// ようにする独立した最終防御として置く。大文字小文字を区別しない比較にする（NTFSの
+// 既定動作に合わせる）。
+static bool isPathWithinRoot(const std::wstring &filePath, const std::wstring &rootDir)
+{
+	wchar_t fullPath[MAX_PATH] = {};
+	wchar_t fullRoot[MAX_PATH] = {};
+	if (GetFullPathNameW(filePath.c_str(), MAX_PATH, fullPath, nullptr) == 0)
+		return false;
+	if (GetFullPathNameW(rootDir.c_str(), MAX_PATH, fullRoot, nullptr) == 0)
+		return false;
+
+	std::wstring normPath(fullPath);
+	std::wstring normRoot(fullRoot);
+	std::transform(normPath.begin(), normPath.end(), normPath.begin(),
+	                [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
+	std::transform(normRoot.begin(), normRoot.end(), normRoot.begin(),
+	                [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
+	if (normRoot.empty() || normRoot.back() != L'\\')
+		normRoot += L'\\';
+	return normPath.compare(0, normRoot.size(), normRoot) == 0;
+}
+
 // ディスク上のファイルを読み込みHTTPレスポンスとして返す共通ヘルパー
-// （/emotes/<file> と /vrm_stage.html の配信で共用する）。
-static void sendFileResponse(SOCKET sock, const std::wstring &filePath,
+// （/emotes/<file> と /vrm_stage.html の配信で共用する）。rootDirは配信を許可する
+// ルートディレクトリ（isPathWithinRoot()参照、パストラバーサル対策）。
+static void sendFileResponse(SOCKET sock, const std::wstring &filePath, const std::wstring &rootDir,
                               const std::string &contentType, size_t maxSize,
                               const char *notFoundLogTag = nullptr)
 {
+	static const char *resp403 =
+		"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 	static const char *resp404 =
 		"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 	static const char *resp413 =
 		"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 	static const char *resp500 =
 		"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+	if (!isPathWithinRoot(filePath, rootDir)) {
+		obs_log(LOG_WARNING, "[%s] sendFileResponse: 配信ルート外へのアクセスを拒否しました%s%s",
+			WSTAG, notFoundLogTag ? ": " : "", notFoundLogTag ? notFoundLogTag : "");
+		sendAll(sock, resp403, strlen(resp403));
+		return;
+	}
 
 	HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
 	                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -426,21 +462,28 @@ static void sendBufferResponse(SOCKET sock, const std::vector<uint8_t> &data,
 void WsServer::serveEmoteImage(SOCKET sock, const std::string &fileName)
 {
 	const std::wstring filePath = emotesImagesDirW() + L"\\" + utf8ToWide(fileName);
-	sendFileResponse(sock, filePath, contentTypeForFile(fileName), 20 * 1024 * 1024,
-	                  fileName.c_str());
+	sendFileResponse(sock, filePath, emotesImagesDirW(), contentTypeForFile(fileName),
+	                  20 * 1024 * 1024, fileName.c_str());
 }
 
 // ─────────────────────────────────────────
 // VRM Stage 連携ヘルパー
 // ─────────────────────────────────────────
 
+// プラグインのデータ配置先ルート（vrm_stage.html・user_settings.json共通の親ディレクトリ）。
+// sendFileResponse()のパストラバーサル対策（isPathWithinRoot()）用のルートとしても使う。
+static std::wstring pluginDataDirW()
+{
+	wchar_t appdata[MAX_PATH] = {};
+	GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
+	return std::wstring(appdata) + L"\\obs-studio\\plugins\\obs-live-hub";
+}
+
 // vrm_stage.html の配置先。ensureHtmlFileInAppData() がコピーする先と同一パスを指す
 // （独立して算出する設計。emotesImagesDirW() 等、本ファイルの既存の各所と同様）。
 static std::wstring vrmStageHtmlPathW()
 {
-	wchar_t appdata[MAX_PATH] = {};
-	GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
-	return std::wstring(appdata) + L"\\obs-studio\\plugins\\obs-live-hub\\vrm_stage.html";
+	return pluginDataDirW() + L"\\vrm_stage.html";
 }
 
 // user_settings.json（TURNサーバー認証情報等、Git管理外の個人設定）の配置先。
@@ -448,9 +491,7 @@ static std::wstring vrmStageHtmlPathW()
 // 存在しない場合のみuser_settings.example.jsonから複製する（既存ファイルは上書きしない）。
 static std::wstring vrmUserSettingsPathW()
 {
-	wchar_t appdata[MAX_PATH] = {};
-	GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
-	return std::wstring(appdata) + L"\\obs-studio\\plugins\\obs-live-hub\\user_settings.json";
+	return pluginDataDirW() + L"\\user_settings.json";
 }
 
 // リクエスト行が "<method> <path>"（クエリ文字列があれば無視）と厳密一致するか判定する。
@@ -521,8 +562,8 @@ static std::string jsonEscape(const std::string &s)
 
 void WsServer::serveVrmStagePage(SOCKET sock)
 {
-	sendFileResponse(sock, vrmStageHtmlPathW(), "text/html; charset=UTF-8", 5 * 1024 * 1024,
-	                  "vrm_stage.html");
+	sendFileResponse(sock, vrmStageHtmlPathW(), pluginDataDirW(), "text/html; charset=UTF-8",
+	                  5 * 1024 * 1024, "vrm_stage.html");
 }
 
 void WsServer::serveUserSettings(SOCKET sock)
@@ -530,8 +571,8 @@ void WsServer::serveUserSettings(SOCKET sock)
 	// TURNサーバー認証情報を含みうるファイルのため、存在しない場合は404を返すのみで
 	// 自動生成はしない（自動生成はensureUserSettingsFileInAppData()がexampleから複製する形で
 	// プラグイン起動時に一度だけ行う。ここでは配信のみを担当する）。
-	sendFileResponse(sock, vrmUserSettingsPathW(), "application/json; charset=UTF-8", 64 * 1024,
-	                  "user_settings.json");
+	sendFileResponse(sock, vrmUserSettingsPathW(), pluginDataDirW(), "application/json; charset=UTF-8",
+	                  64 * 1024, "user_settings.json");
 }
 
 void WsServer::serveVrmModel(SOCKET sock)
@@ -626,6 +667,10 @@ void WsServer::handleVrmModelUpload(SOCKET sock, const std::string &request)
 		"HTTP/1.1 403 Forbidden\r\n"
 		"Access-Control-Allow-Origin: *\r\n"
 		"Content-Length: 0\r\nConnection: close\r\n\r\n";
+	static const char *resp413 =
+		"HTTP/1.1 413 Payload Too Large\r\n"
+		"Access-Control-Allow-Origin: *\r\n"
+		"Content-Length: 0\r\nConnection: close\r\n\r\n";
 	static const char *resp200 =
 		"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
 
@@ -645,9 +690,19 @@ void WsServer::handleVrmModelUpload(SOCKET sock, const std::string &request)
 	}
 
 	const long contentLength = parseContentLength(request);
-	const size_t kMaxVrmSize = 256 * 1024 * 1024; // 256MB上限（異常アップロードへの防御）
-	if (contentLength < 0 || static_cast<size_t>(contentLength) > kMaxVrmSize) {
+	if (contentLength < 0) {
 		sendAll(sock, resp400, strlen(resp400));
+		return;
+	}
+	// WAN公開対応（要件1）: Content-Lengthの時点でサイズ超過が判明している場合は、
+	// ソケットからのボディ受信（＝低速回線では長時間かかりうる）を一切行わず即座に
+	// 413で拒否する。maxVrmUploadBytes_は2つのアップロードハンドラで共有する
+	// 一元管理された上限値（既定50MB）。
+	if (static_cast<size_t>(contentLength) > maxVrmUploadBytes_.load()) {
+		obs_log(LOG_WARNING,
+			"[%s] POST /vrm/model: Content-Length(%ld bytes)が上限(%zu bytes)を超過したため拒否しました",
+			WSTAG, contentLength, maxVrmUploadBytes_.load());
+		sendAll(sock, resp413, strlen(resp413));
 		return;
 	}
 
@@ -724,6 +779,8 @@ void WsServer::handlePeerModelUpload(SOCKET sock, const std::string &request, co
 {
 	static const char *resp400 =
 		"HTTP/1.1 400 Bad Request\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+	static const char *resp413 =
+		"HTTP/1.1 413 Payload Too Large\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 	static const char *resp200 =
 		"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
 
@@ -733,9 +790,16 @@ void WsServer::handlePeerModelUpload(SOCKET sock, const std::string &request, co
 	}
 
 	const long contentLength = parseContentLength(request);
-	const size_t kMaxVrmSize = 256 * 1024 * 1024; // 256MB上限（異常アップロードへの防御）
-	if (contentLength < 0 || static_cast<size_t>(contentLength) > kMaxVrmSize) {
+	if (contentLength < 0) {
 		sendAll(sock, resp400, strlen(resp400));
+		return;
+	}
+	// WAN公開対応（要件1）: handleVrmModelUpload()と同じ一元管理された上限値・即時413応答。
+	if (static_cast<size_t>(contentLength) > maxVrmUploadBytes_.load()) {
+		obs_log(LOG_WARNING,
+			"[%s] POST /vrm/peer_upload: Content-Length(%ld bytes)が上限(%zu bytes)を超過したため拒否しました",
+			WSTAG, contentLength, maxVrmUploadBytes_.load());
+		sendAll(sock, resp413, strlen(resp413));
 		return;
 	}
 
