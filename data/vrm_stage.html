@@ -1612,11 +1612,31 @@ var lastPoseSendTime = 0;
 // TCP切断をOS任せで検知するまでクライアントを保持し続ける。開発中に何度もリロードを
 // 繰り返すとサーバー側にゴーストコネクションが蓄積し動作が不安定になっていたため、
 // ページ離脱時に必ずクリーンクローズする。
-window.addEventListener('beforeunload', function() {
+//
+// 実機バグ対策（ゲスト再接続時の旧PeerID残存）: 以前はこのリスナーと、通話ルーム参加中に
+// "leave"を送信する別のリスナー（initCallUi()参照）が別々に登録されており、
+// window.addEventListener('beforeunload', ...)は登録順に呼ばれるため、常にこちらが先に
+// 実行されていた。ws.close()はreadyStateを同期的にCLOSINGへ遷移させるため、後から実行される
+// "leave"送信リスナーのsendRoomControl()が「ws.readyState !== OPEN」ガードで無言スキップされ、
+// leaveメッセージが実質的に一度も送信されないまま接続だけが切れていた。これにより
+// ホスト側のcallState.peersに旧PeerIDが残存し続け、リロード後の再接続（新しいPeerIDでの
+// join_request）が「別人」として追加されてしまい、モデルの2重ロード・自動横並び配置の
+// 人数カウント崩れにつながっていた。leave送信→ws.close()の順序を保証するため、両方の処理を
+// この1つのリスナーへ統合する（callState/sendRoomControlは後方で定義されるが、この関数自体は
+// beforeunloadイベント発火時＝スクリプト全体の評価が完了した後にしか呼ばれないため問題ない）。
+// あわせて、iOS Safari等モバイル環境ではbeforeunloadの発火が信頼できないことが知られているため、
+// より確実な代替手段であるpagehideイベントにも同じ処理を登録する（多重発火してもdisconnectCallPeer
+// 側のnullガード・ws.readyStateガードにより無害・冪等）。
+function sendLeaveAndCloseWs() {
+  if (callState.roomId) {
+    sendRoomControl({ action: 'leave' });
+  }
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     ws.close();
   }
-});
+}
+window.addEventListener('beforeunload', sendLeaveAndCloseWs);
+window.addEventListener('pagehide', sendLeaveAndCloseWs);
 
 function connectWs() {
   if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
@@ -2158,7 +2178,27 @@ function applyRosterUpdate(msg) {
 // 要件3: 承認処理の本体（手動承認・既知ゲストの自動承認の両方から呼ばれる共通ヘルパー）。
 // 承認のたび新しいsessionTokenを発行し、callState.knownSessionTokens（token検証用）と
 // peer.sessionToken（kick時にどのtokenを失効させるべきかの逆引き用）の両方へ記録する。
-function grantCallPeerAccess(peerId, displayName) {
+// oldSessionTokenToReplace: 既知ゲストの自動承認（join_requestのknownSessionToken）
+// 経由の場合のみ渡される。手動承認（待合室からの承認）には「置き換えるべき古い接続」
+// という概念が無いため省略される。
+function grantCallPeerAccess(peerId, displayName, oldSessionTokenToReplace) {
+  // 実機バグ対策（要件1）: リロード・再接続によりゲストが新しいPeerIDでjoin_requestして
+  // きた際、同一セッショントークンを持つ「古いPeerID」がcallState.peersに残存している
+  // 場合（leave通知が届く前にクラッシュ/ネットワーク切断した等、beforeunload/pagehideの
+  // 修正だけではカバーしきれないケースへの保険）、それを即座に破棄してから新しいPeerIDを
+  // 追加する。これを怠ると同一人物が「別人」として二重に扱われ、VRMモデルの二重ロードや
+  // recomputeAutoCallLayout()の人数カウント崩れ（自動横並び配置の破綻）につながる。
+  if (oldSessionTokenToReplace) {
+    var stalePeerId = null;
+    Object.keys(callState.peers).forEach(function(pid) {
+      if (callState.peers[pid].sessionToken === oldSessionTokenToReplace) stalePeerId = pid;
+    });
+    if (stalePeerId && stalePeerId !== peerId) {
+      diagInfo('WS', '同一セッショントークンの古いPeerIDを検出（' + stalePeerId
+        + '）→ 新しいPeerID（' + peerId + '）追加前に破棄します');
+      disconnectCallPeer(stalePeerId, null);
+    }
+  }
   var sessionToken = generateSessionToken();
   callState.knownSessionTokens[sessionToken] = { displayName: displayName, approvedAt: Date.now() };
   callState.peers[peerId] = makeCallPeer(peerId, displayName);
@@ -2166,7 +2206,7 @@ function grantCallPeerAccess(peerId, displayName) {
   sendRoomControl({ action: 'approve', targetPeerId: peerId, sessionToken: sessionToken });
   broadcastRoster();
   uploadOwnVrmModel(true); // 承認直後に確実に自分のVRMを送る
-  renderCallParticipantsList();
+  renderCallParticipantsList(); // recomputeAutoCallLayout()経由でレイアウトも再計算される（要件3）
 }
 
 function approveWaitingPeer(peerId) {
@@ -2239,7 +2279,7 @@ function handleRoomControl(msg) {
         + 'スキップして自動承認: ' + msg.fromPeerId);
       sendRoomControl({ action: 'join_ack', targetPeerId: msg.fromPeerId, roomId: callState.roomId });
       delete callState.knownSessionTokens[msg.knownSessionToken]; // 使い回し防止（grantで新token発行）
-      grantCallPeerAccess(msg.fromPeerId, msg.displayName || msg.fromPeerId);
+      grantCallPeerAccess(msg.fromPeerId, msg.displayName || msg.fromPeerId, msg.knownSessionToken);
       return;
     }
     callState.waitingPeers[msg.fromPeerId] = {
@@ -2336,7 +2376,17 @@ function handleRoomControl(msg) {
   }
   if (action === 'leave') {
     disconnectCallPeer(msg.fromPeerId, (msg.displayName || msg.fromPeerId) + ' が退出しました');
-    if (callState.isHost) { delete callState.waitingPeers[msg.fromPeerId]; renderCallWaitingList(); }
+    if (callState.isHost) {
+      delete callState.waitingPeers[msg.fromPeerId];
+      renderCallWaitingList();
+      // 要件2: 従来ここでrosterを再配信していなかったため、3人以上のルームで誰かが
+      // 退出しても、ホスト以外の参加者は次にrosterが飛んでくるまで退出者をロースター上
+      // 残存させたままになっていた（disconnectCallPeer()はホスト自身のローカル状態しか
+      // 更新しない）。disconnectCallPeer()がrecomputeAutoCallLayout()経由でホスト自身の
+      // レイアウトは再計算済みのため、ここでは変更後のロースターを他クライアントへ
+      // 伝えるだけでよい。
+      broadcastRoster();
+    }
     return;
   }
   if (action === 'layout_update') {
@@ -2806,10 +2856,13 @@ function initCallUi() {
   var leaveBtn = document.getElementById('callLeaveRoomBtn');
   if (leaveBtn) leaveBtn.addEventListener('click', leaveCallRoom);
 
-  // ページを閉じる際、可能な範囲で他の参加者へ退出を通知する（ベストエフォート）
-  window.addEventListener('beforeunload', function() {
-    if (callState.roomId) sendRoomControl({ action: 'leave' });
-  });
+  // ページを閉じる際、可能な範囲で他の参加者へ退出を通知する（ベストエフォート）。
+  // 実機バグ対策: 以前はここで独立したbeforeunloadリスナーを登録していたが、WebSocket
+  // 接続設定部で先に登録されるws.close()専用リスナーより後から実行されるため、
+  // sendRoomControl()の時点でws.readyStateが既にCLOSINGになっており、leaveメッセージが
+  // 実質送信されないまま接続だけが切れる不具合があった。leave送信とws.close()の順序を
+  // 保証するため、sendLeaveAndCloseWs()（WebSocket接続設定部で定義、beforeunload/pagehide
+  // 両方に登録済み）へ統合した。ここでは重複登録しない。
 
   // 不具合2対策: 参加者リストは本来イベント駆動（roster/approve/kick/切断等）で再描画されるが、
   // 万一いずれかのイベント処理が例外・メッセージ欠落等で漏れても「空のまま固まる」ことがないよう、
