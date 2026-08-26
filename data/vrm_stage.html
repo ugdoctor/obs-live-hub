@@ -441,7 +441,16 @@ var isDisplayMode = new URLSearchParams(window.location.search).get('mode') === 
 // WsServer（プラグイン）が待ち受けるポート。WebSocketだけでなく、
 // vrm_stage.html本体・/vrm/model のHTTP配信も同じポートで行う。
 var WS_PORT      = 8765;
-var HTTP_BASE    = 'http://127.0.0.1:' + WS_PORT;
+// 実機バグ修正: 別PC（LAN内の別端末、例: Mac）から
+// http://192.168.1.35:8765/vrm_stage.html のようにアクセスした場合、127.0.0.1は
+// 常に「アクセスしている端末自身」を指すため、HTTP_BASE/WS_URLを127.0.0.1に固定していると
+// ゲスト側のfetch()・WebSocket接続が常に自分自身のPCへ向いてしまい、ホストのWsServerへ
+// 一切到達できずタイムアウトしていた（ゲスト側にWebSocketログが一切出ない症状と一致）。
+// 実際にページへアクセスしてきたホスト（window.location.host、例: 192.168.1.35:8765）を
+// 優先して使い、file://等でhostが取得できない場合のみ127.0.0.1:WS_PORTへフォールバックする。
+var HTTP_BASE    = window.location.host
+  ? ('http://' + window.location.host)
+  : ('http://127.0.0.1:' + WS_PORT);
 var VRM_MODEL_URL = HTTP_BASE + '/vrm/model';
 
 // ── 定数（実測して調整可能なチューニング値） ──────────────────────────────
@@ -710,9 +719,13 @@ var TRANSFORM_DEFAULTS = {
 var vrmTransform = Object.assign({}, TRANSFORM_DEFAULTS);
 var TRANSFORM_LS_KEY = 'vrmStageTransform';
 
-// three-vrm@1.0.9正規化後の正面(-Z)をカメラ側(+Z)へ向けるための固定オフセット
-// （initScene()のコメント参照）。ユーザー操作のyawはこれに加算する。
-var VRM_FRONT_YAW_RAD = Math.PI;
+// 実機テストで「モデルが背面を向く」不具合が繰り返し報告されたため強制的に再検証した結果、
+// 従来のMath.PI補正が誤りだったと判明した: カメラは(0,1.4,1.2)付近の+Z側に置かれ原点を
+// lookAt()しており（initScene()参照）、VRM0はVRMUtils.rotateVRM0()で・VRM1.0はそのままで
+// どちらも正規化後は+Z方向を向く。つまり無補正のままで既にカメラ（+Z側）を向いている状態で、
+// ここへさらにMath.PI（180度）を加算すると正面と背面が入れ替わり、常に背中を向けて表示されて
+// いた。ベースのY軸回転は0に統一し、ユーザー操作のyawのみを加算する。
+var VRM_FRONT_YAW_RAD = 0;
 
 // 通話で自分（自身のアバター＝localVrm）に割り当てる自動横並びオフセット。
 // 2人（自分＋相手1人）接続時のみrecomputeAutoCallLayout()が左右に振り分け、
@@ -1074,6 +1087,13 @@ function shouldSyncLocalModelToPlugin() {
 }
 
 function uploadVrmToPlugin(arrayBuffer, fileName) {
+  // 強制ガード（呼び出し元のshouldSyncLocalModelToPlugin()チェックに万一漏れがあっても、
+  // ここで最終防御する）: 自分がゲストとしてルームに参加中の場合は、絶対にホスト用の
+  // メインモデル（/vrm/model）を上書きしない。
+  if (callState.roomId && !isLocalOperatorHost()) {
+    console.log('[VRM] ゲストのためメインモデル(/vrm/model)の同期をスキップします');
+    return;
+  }
   fetch(VRM_MODEL_URL, {
     method: 'POST',
     headers: {
@@ -1466,7 +1486,11 @@ function initVmcWatchdog() {
 
 // ── WebSocket連携（Controller: 送信 / Display: 受信） ────────────────────
 
-var WS_URL = 'ws://127.0.0.1:' + WS_PORT;
+// HTTP_BASE定義部のコメント参照: 同じ理由でWebSocket接続先もwindow.location.hostを
+// 優先し、127.0.0.1固定によるLAN内別PCからの接続失敗を防ぐ。
+var WS_URL = window.location.host
+  ? ('ws://' + window.location.host)
+  : ('ws://127.0.0.1:' + WS_PORT);
 var ws = null;
 var lastPoseSendTime = 0;
 
@@ -2294,9 +2318,8 @@ function applyCallPeerLayout(peer) {
   var l = peer.layout;
   var slotX = CALL_SLOT_OFFSET_X[l.slot] || 0;
   peer.vrm.scene.position.set(slotX + l.offsetX, l.offsetY, l.offsetZ);
-  // 通話相手のアバターにはyaw調整UIが無いため、正面補正（VRM_FRONT_YAW_RAD）を固定で適用する。
-  // これを入れないとVRMUtils.rotateVRM0で正規化された「正面-Z」のままになり、
-  // カメラ（+Z側）から見て背中を向けて見える（applyTransform()と同じ補正、initScene()のコメント参照）。
+  // 通話相手のアバターにはyaw調整UIが無いため、正面補正（VRM_FRONT_YAW_RAD、現在は0）を
+  // 固定で適用する（applyTransform()と同じ補正。VRM_FRONT_YAW_RAD定義部のコメント参照）。
   peer.vrm.scene.rotation.y = VRM_FRONT_YAW_RAD;
   peer.vrm.scene.scale.setScalar(l.scale || 1);
 }
@@ -2309,11 +2332,21 @@ function updateCallPeerLayout(peerId, partial) {
   if (callState.isHost) sendRoomControl({ action: 'layout_update', targetPeerId: peerId, layout: peer.layout });
 }
 
-// callState.peersのうち「自分自身の分身」（Displayのshadow join接続）を除いた、
+// callState.peersのうち「誰かの分身」（Displayのshadow join接続）を除いた、
 // 本当に別人であるピアのIDだけを返す（不具合3の自動レイアウト判定・参加者リスト表示で使う）。
+// 実機テストで判明した実バグ: 従来は自分自身のshadowParentPeerIdだけしか除外しておらず、
+// ホストがOBS Display（shadow join）を起動していると、そのDisplay分身ピアも「本当の別人」として
+// カウントされてしまい、recomputeAutoCallLayout()が要求する「自分＋相手1人=ちょうど2人」の
+// 条件が常に満たせなくなっていた（実際は2人構成のはずが3人扱いになり、自動横並び配置が
+// 一度も発動しないまま両者ともデフォルトのcenter(0,0,0)に重なって表示されていた）。
+// isShadowフラグは全クライアントへroster経由で伝播済み（makeCallPeer参照）のため、
+// 自分の分身かどうかに関わらずisShadowなピアは一律で人数から除外する。
 function realCallPeerIds() {
   return Object.keys(callState.peers).filter(function(peerId) {
-    return peerId !== callState.shadowParentPeerId;
+    if (peerId === callState.shadowParentPeerId) return false;
+    var peer = callState.peers[peerId];
+    if (peer && peer.isShadow) return false;
+    return true;
   });
 }
 
