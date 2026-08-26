@@ -560,6 +560,19 @@ static std::string jsonEscape(const std::string &s)
 	return r;
 }
 
+// 簡易JSON文字列フィールド検出（"key":"value"という定型の並びがtext中に含まれるかだけを
+// 見る）。WsServer.cppはQt非依存のため本格的なJSONパーサを持たず、既存のparseQueryParam()
+// 等と同様の手軽な文字列検索の方針を踏襲する。クライアント（JSON.stringify()）が生成する
+// 出力はキーと文字列値の間に空白を挟まないため、この単純な部分一致で十分に検出できる。
+// WebSocketメッセージ全般をここで本格的にパースする用途ではなく、緊急遮断
+// （regenerate_token）のようにWsServer自身が直接介入する必要がある特定アクションの
+// 検出のみに使う（他の大半のvrm_*系メッセージは内容を解釈せずそのまま中継する方針）。
+static bool jsonHasStringField(const std::string &text, const std::string &key, const std::string &value)
+{
+	const std::string needle = "\"" + key + "\":\"" + value + "\"";
+	return text.find(needle) != std::string::npos;
+}
+
 void WsServer::serveVrmStagePage(SOCKET sock)
 {
 	sendFileResponse(sock, vrmStageHtmlPathW(), pluginDataDirW(), "text/html; charset=UTF-8",
@@ -971,6 +984,42 @@ void WsServer::stop()
 	obs_log(LOG_INFO, "[%s] Server stopped.", WSTAG);
 }
 
+// WAN公開対応（緊急遮断）: stop()の「クライアントソケットをshutdownしてrecv()を即座に
+// 抜けさせる」処理と同じ手法を、サーバー自体は稼働させたまま単独で使えるようにした版。
+// 各clientLoop()スレッドは shutdown() 後、recv()<=0を検知して自分自身で
+// clients_からの除去・closesocket()・activeClients_のデクリメントを行う（stop()同様、
+// ここでは待ち合わせしない）。
+void WsServer::disconnectAllClients()
+{
+	std::lock_guard<std::mutex> lock(clientsMutex_);
+	for (SOCKET s : clients_)
+		shutdown(s, SD_BOTH);
+}
+
+// WAN公開対応（緊急遮断）: clientLoop()から、isAuthorizedController検証済みの
+// regenerate_token要求に対してのみ呼ばれる。
+void WsServer::handleRegenerateTokenRequest(SOCKET sock)
+{
+	const std::string newToken = generateSecureRandomToken(32);
+	controllerSecretToken_ = newToken;
+	obs_log(LOG_WARNING,
+		"[%s] 緊急遮断: controllerSecretTokenを再発行し、全クライアントを強制切断します",
+		WSTAG);
+
+	// 新tokenは要求元の接続（sock）へのみ直接返す。broadcast()は使わない
+	// ——全クライアントへ届いてしまうと新tokenが他者に漏洩し、緊急遮断（招待・接続の
+	// リセット）の意味が無くなるため。
+	const std::string tokenJson = "{\"type\":\"vrm_token_regenerated\",\"token\":\"" + newToken + "\"}";
+	const auto frame = encodeTextFrame(tokenJson);
+	sendAll(sock, reinterpret_cast<const char *>(frame.data()), frame.size());
+
+	// 要求元自身を含む全クライアントを強制切断する。旧tokenを保持していた全ての接続
+	// （ブラウザの別タブ・キャッシュされたURL等）を確実に無効化するのが目的のため、
+	// 要求元だけを除外することはしない（要求元はdata/vrm_stage.html側が上で受け取った
+	// 新tokenを使い、connectWsWatchdog()経由で自動的に再接続する）。
+	disconnectAllClients();
+}
+
 void WsServer::broadcast(const std::string &jsonText)
 {
 	if (!running_.load()) {
@@ -1274,13 +1323,29 @@ void WsServer::clientLoop(SOCKET sock)
 				for (uint64_t i = 0; i < payloadLen; ++i)
 					text[i] = static_cast<char>(rxBuf[headerSize + i] ^ maskKey[i % 4]);
 
-				std::function<void(const std::string &, bool)> cb;
-				{
-					std::lock_guard<std::mutex> lock(callbackMutex_);
-					cb = messageCallback_;
+				// WAN公開対応（緊急遮断）: regenerate_tokenだけはmessageCallback_
+				// （plugin-main.cpp）経由の中継に流さず、ここで直接処理する。理由:
+				// 新しいtokenを安全に返送できるのは「この接続（sock）へ直接」のみであり
+				// （broadcast()は全クライアントへ届くため新tokenが漏洩する）、socketとの
+				// 紐付けを持たないmessageCallback_のシグネチャではそれができないため。
+				if (jsonHasStringField(text, "type", "vrm_room_control") &&
+				    jsonHasStringField(text, "action", "regenerate_token")) {
+					if (isAuthorizedController) {
+						handleRegenerateTokenRequest(sock);
+					} else {
+						obs_log(LOG_WARNING,
+							"[%s] regenerate_token: 未認証の接続からのリクエストを拒否しました",
+							WSTAG);
+					}
+				} else {
+					std::function<void(const std::string &, bool)> cb;
+					{
+						std::lock_guard<std::mutex> lock(callbackMutex_);
+						cb = messageCallback_;
+					}
+					if (cb)
+						cb(text, isAuthorizedController);
 				}
-				if (cb)
-					cb(text, isAuthorizedController);
 			}
 			rxBuf.erase(rxBuf.begin(),
 			            rxBuf.begin() + headerSize + static_cast<size_t>(payloadLen));

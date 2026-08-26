@@ -75,6 +75,17 @@ private:
 	void acceptLoop();
 	void clientLoop(SOCKET sock);
 
+	// WAN公開対応（緊急遮断）: 認証済みControllerからのregenerate_token要求を処理する。
+	// controllerSecretToken_を新しいランダム値へ差し替え、新tokenを要求元の接続（sock）
+	// へのみ返信した上で（broadcast()は使わない。全クライアントへ届くと新tokenが
+	// 漏洩し緊急遮断の意味が無くなるため）、接続中の全クライアント（要求元自身を含む）を
+	// 強制切断する。clientLoop()のメッセージ処理内から、isAuthorizedController検証済みの
+	// 場合のみ呼ばれる。
+	void handleRegenerateTokenRequest(SOCKET sock);
+	// 接続中の全WebSocketクライアントを強制切断する（サーバー自体は停止しない）。
+	// stop()の全クライアントshutdown処理と同じ手法をサーバー稼働中に単独で使えるようにした版。
+	void disconnectAllClients();
+
 	// リクエスト行＋ヘッダ（\r\n\r\nまで）を読み込む。WebSocketハンドシェイクと
 	// 簡易HTTP画像配信（GET /emotes/...）で共用する。
 	static bool readHttpRequest(SOCKET sock, std::string &outRequest);

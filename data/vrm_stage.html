@@ -252,7 +252,7 @@ html.mode-display #uiToggleTab {
     <!-- ビルド反映確認用バッジ: ブラウザのスーパーリロード無しでも最新版のHTMLが
          読み込まれているか目視確認できるようにする。今後この行を変更するたびに
          値も更新すること（形式: vYYYY.MM.DD-HHmm、変更を加えた日時）。 -->
-    <span style="font-size:11px; opacity:0.7; background:#333; padding:2px 6px; border-radius:4px; vertical-align:middle;">v2026.08.26-2145</span>
+    <span style="font-size:11px; opacity:0.7; background:#333; padding:2px 6px; border-radius:4px; vertical-align:middle;">v2026.08.26-2350</span>
   </h1>
 
   <div id="dropZone">
@@ -400,6 +400,24 @@ html.mode-display #uiToggleTab {
         <label for="callMaxVrmSizeSlider">VRMファイルサイズ上限</label>
         <input type="range" id="callMaxVrmSizeSlider" min="10" max="150" step="10" value="50">
         <span class="transformVal" id="callMaxVrmSizeVal">50 MB</span>
+      </div>
+
+      <div class="uiRow"><strong>セキュリティレベル</strong></div>
+      <div class="uiRow">
+        <label><input type="radio" name="callSecurityLevel" id="callSecStrict" value="strict">
+          厳格（パスコード必須＋毎回手動承認）</label>
+      </div>
+      <div class="uiRow">
+        <label><input type="radio" name="callSecurityLevel" id="callSecStandard" value="standard" checked>
+          標準（パスコード必須＋既知ゲストのみ自動承認）</label>
+      </div>
+      <div class="uiRow">
+        <label><input type="radio" name="callSecurityLevel" id="callSecOpen" value="open">
+          オープン（パスコード不要＋完全自動承認）</label>
+      </div>
+
+      <div class="uiRow" style="margin-top:6px;">
+        <button class="small-btn" id="callEmergencyLockdownBtn" style="background:#a33; color:#fff;">🚨 緊急遮断（招待・接続をリセット）</button>
       </div>
     </div>
 
@@ -1725,6 +1743,27 @@ function connectWs() {
         }
         return;
       }
+      // 要件1（緊急遮断）: WsServer.cppがregenerate_token要求元の接続へのみ返す新しい
+      // controllerSecretToken。この直後にサーバー側から全クライアントが強制切断されるため
+      // （disconnectAllClients()）、次回のconnectWsWatchdog()による自動再接続で確実に
+      // 新tokenが使われるよう、WS_URL・controllerToken・アドレスバーのtokenクエリを
+      // ここで更新しておく（手動リロード時にも新tokenが引き継がれるようhistory.replaceState
+      // でURLも書き換える）。
+      if (data.type === 'vrm_token_regenerated') {
+        if (typeof data.token === 'string' && data.token) {
+          controllerToken = data.token;
+          WS_URL = WS_URL.replace(/([?&]token=)[^&]*/, '$1' + encodeURIComponent(controllerToken));
+          try {
+            var newUrl = new URL(window.location.href);
+            newUrl.searchParams.set('token', controllerToken);
+            history.replaceState(null, '', newUrl.toString());
+          } catch (err) {
+            console.warn('[vrm_stage] URLのtoken更新に失敗しました', err);
+          }
+          diagWarn('WS', 'controllerSecretTokenが再発行されました。まもなく新tokenで再接続します。');
+        }
+        return;
+      }
       // vrm_vmc_update はプラグイン（VmcReceiver）が発信元であり、ControllerもDisplayも
       // 対等なWebSocketクライアントとして受け取る（自分自身のechoではないため両方で処理する）
       if (data.type === 'vrm_vmc_update') { onVmcUpdateReceived(data); return; }
@@ -1844,6 +1883,15 @@ var CALL_MAX_PARTICIPANTS   = 8;
 var CALL_POSE_SEND_INTERVAL_MS = 33; // 約30Hz
 var CALL_VRM_UPLOAD_MIN_INTERVAL_MS = 2000; // 短時間にroster更新が連続してもアップロードし過ぎないようにする
 var CALL_SLOT_OFFSET_X = { left: -0.6, center: 0, right: 0.6 };
+
+// WAN公開対応（セキュリティレベル設定）: ホストのjoin_request判定ロジックを切り替える
+// （handleRoomControl()のjoin_request分岐参照）。ホストのUI操作でのみ変更され、
+// ルーム作成/再作成をまたいでも host のタブ内では保持される（人間の意図した設定として
+// 扱い、ルーム再作成のたび標準へ戻すことはしない）。
+// 'strict'  : パスコード必須＋毎回手動承認（既知ゲストのセッション自動承認も無効）
+// 'standard': パスコード必須＋既知ゲストのみ自動承認（デフォルト、既存動作）
+// 'open'    : パスコード不要＋誰でも即時自動承認
+var callSecurityLevel = 'standard';
 
 var callState = {
   roomId: null,
@@ -2308,6 +2356,28 @@ function kickCallPeer(peerId) {
   broadcastRoster();
 }
 
+// 要件1（緊急遮断）: WsServer側でcontrollerSecretTokenを再発行し、接続中の全クライアント
+// （自分自身を含む）を強制切断する。強制切断された他ゲストからは通常の'leave'メッセージが
+// 届かない（TCP接続そのものを切るため）ため、ホスト側のローカル状態（参加者・待合室・
+// 招待コード）はここで先回りしてクリアする。新しいtokenはサーバーから自分の接続へのみ
+// 返される（"vrm_token_regenerated"、ws.onmessage参照。他クライアントには一切送られない
+// ——broadcast()すると新tokenが漏洩し緊急遮断の意味が無くなるため）。
+function triggerEmergencyLockdown() {
+  if (!callState.isHost) return;
+  var proceed = confirm('現在の接続と招待コードをリセットして切断しますか？');
+  if (!proceed) return;
+  Object.keys(callState.peers).forEach(function(peerId) { disconnectCallPeer(peerId, null); });
+  callState.waitingPeers = {};
+  callState.knownSessionTokens = {};
+  callState.inviteCode = generateInviteCode();
+  renderCallWaitingList();
+  renderCallParticipantsList();
+  setDebugText('callInviteCodeVal', callState.inviteCode);
+  diagWarn('WS', '緊急遮断を実行しました。controllerSecretTokenの再発行を要求します。');
+  setCallStatus('緊急遮断を実行しました。まもなく再接続します…');
+  sendRoomControl({ action: 'regenerate_token' });
+}
+
 function handleRoomControl(msg) {
   var action = msg.action;
   diagInfo('WS', '受信 action=' + action + ' from=' + msg.fromPeerId
@@ -2317,10 +2387,13 @@ function handleRoomControl(msg) {
   // join_request / join_ack はroomId確定前に処理する必要があるため、roomIdゲートより先に扱う
   if (action === 'join_request') {
     if (!callState.isHost) return;
+    // セキュリティレベル設定: 'open'（パスコード不要＋完全自動承認）の場合のみ
+    // 招待コード検証自体をスキップする。'strict'/'standard'は従来通りパスコード必須。
+    var securityIsOpen = callSecurityLevel === 'open';
     // 要件2（パスコードクッション）: 招待コード不一致は待合室に一切追加せず、即座に
     // reject（reason: invalid_passcode）を返す。従来はここで無言returnしていたため、
     // ゲスト側は「ホストの承認待ち…」のまま何も起きず、実質的にハングして見えていた。
-    if (msg.inviteCode !== callState.inviteCode) {
+    if (!securityIsOpen && msg.inviteCode !== callState.inviteCode) {
       diagWarn('WS', 'join_request却下: 招待コード不一致 (受信="' + msg.inviteCode
         + '" 現在="' + callState.inviteCode + '")');
       sendRoomControl({ action: 'reject', targetPeerId: msg.fromPeerId, reason: 'invalid_passcode' });
@@ -2336,13 +2409,22 @@ function handleRoomControl(msg) {
       sendRoomControl({ action: 'reject', targetPeerId: msg.fromPeerId, reason: 'room_full' });
       return;
     }
-    // 要件3（セッション記憶による既知ゲストの自動承認）: 招待コードは既に一致確認済み
-    // （＝パスコード一致）。加えてゲストが提示したknownRoomIdが現在のルームインスタンス
-    // と一致し、かつknownSessionTokenが現在も有効（このルームで過去に発行され、まだ
-    // 失効していない）であれば、待合室を経由せずホストの手動承認を待たず自動承認する。
-    // knownRoomIdの一致まで見るのは、同じ招待コードが（コード再発行前の）別ルーム
-    // インスタンス向けに発行された古いtokenで誤って自動承認されるのを防ぐため。
-    if (msg.knownSessionToken && msg.knownRoomId === callState.roomId &&
+    // セキュリティレベル'open': パスコード検証済み(スキップ)・BAN無し・満員でないことを
+    // 確認した上で、待合室を経由せず誰でも即時自動承認する。
+    if (securityIsOpen) {
+      diagInfo('WS', 'join_request: セキュリティレベル"オープン"のため即時自動承認: ' + msg.fromPeerId);
+      sendRoomControl({ action: 'join_ack', targetPeerId: msg.fromPeerId, roomId: callState.roomId });
+      grantCallPeerAccess(msg.fromPeerId, msg.displayName || msg.fromPeerId);
+      return;
+    }
+    // 要件3（セッション記憶による既知ゲストの自動承認）: セキュリティレベルが'standard'の
+    // 場合のみ有効（'strict'は毎回手動承認を要求するため、既知ゲストであっても自動承認しない）。
+    // 招待コードは既に一致確認済み（＝パスコード一致）。加えてゲストが提示したknownRoomIdが
+    // 現在のルームインスタンスと一致し、かつknownSessionTokenが現在も有効（このルームで
+    // 過去に発行され、まだ失効していない）であれば、待合室を経由せずホストの手動承認を
+    // 待たず自動承認する。knownRoomIdの一致まで見るのは、同じ招待コードが（コード再発行前の）
+    // 別ルームインスタンス向けに発行された古いtokenで誤って自動承認されるのを防ぐため。
+    if (callSecurityLevel === 'standard' && msg.knownSessionToken && msg.knownRoomId === callState.roomId &&
         callState.knownSessionTokens[msg.knownSessionToken]) {
       diagInfo('WS', 'join_request: 既知ゲストの有効なセッショントークンを確認 → 待合室を'
         + 'スキップして自動承認: ' + msg.fromPeerId);
@@ -2942,6 +3024,40 @@ function initCallUi() {
       setMaxVrmUploadSizeMB(parseInt(maxVrmSizeSlider.value, 10));
     });
   }
+
+  // 要件2: セキュリティレベルのラジオボタン。'open'選択時は警告ダイアログを表示し、
+  // キャンセルされたら元のレベルのラジオへUIを戻す（callSecurityLevel自体は変更しない）。
+  ['callSecStrict', 'callSecStandard', 'callSecOpen'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', function(e) {
+      if (!e.target.checked) return;
+      var newLevel = e.target.value;
+      if (newLevel === 'open') {
+        var proceed = confirm('⚠️ 警告: 不特定多数のユーザーが自由にアバターを表示・操作できる'
+          + '状態になります。配信中などの画面映り込みにご注意ください。有効にしますか？');
+        if (!proceed) {
+          var revertId = callSecurityLevel === 'strict' ? 'callSecStrict'
+            : callSecurityLevel === 'open' ? 'callSecOpen' : 'callSecStandard';
+          var revertEl = document.getElementById(revertId);
+          if (revertEl) revertEl.checked = true;
+          return;
+        }
+      }
+      callSecurityLevel = newLevel;
+      diagInfo('WS', 'セキュリティレベルを変更しました: ' + newLevel);
+      setCallStatus('セキュリティレベル: ' + (
+        newLevel === 'strict' ? '厳格（毎回手動承認）'
+        : newLevel === 'open' ? 'オープン（パスコード不要・完全自動承認）'
+        : '標準（既知ゲストのみ自動承認）'));
+    });
+  });
+
+  // 要件1: 緊急遮断。確認ダイアログ→サーバーへregenerate_token要求送信＋自分のローカルの
+  // ルーム状態（参加者・待合室・招待コード）を能動的にリセットする（強制切断される
+  // 他ゲストからは通常のleaveメッセージが届かないため、ここで先回りして片付ける）。
+  var emergencyBtn = document.getElementById('callEmergencyLockdownBtn');
+  if (emergencyBtn) emergencyBtn.addEventListener('click', triggerEmergencyLockdown);
 
   // ページを閉じる際、可能な範囲で他の参加者へ退出を通知する（ベストエフォート）。
   // 実機バグ対策: 以前はここで独立したbeforeunloadリスナーを登録していたが、WebSocket
