@@ -248,7 +248,12 @@ html.mode-display #uiToggleTab {
 <button id="uiToggleTab" title="操作パネルの表示/非表示">◂</button>
 
 <div id="uiPanel">
-  <h1>VRM Stage（Controller / Display 連携）</h1>
+  <h1>VRM Stage（Controller / Display 連携）
+    <!-- ビルド反映確認用バッジ: ブラウザのスーパーリロード無しでも最新版のHTMLが
+         読み込まれているか目視確認できるようにする。今後この行を変更するたびに
+         値も更新すること（形式: vYYYY.MM.DD-HHmm、変更を加えた日時）。 -->
+    <span style="font-size:11px; opacity:0.7; background:#333; padding:2px 6px; border-radius:4px; vertical-align:middle;">v2026.08.26-2145</span>
+  </h1>
 
   <div id="dropZone">
     VRMファイルをドラッグ＆ドロップ<br>またはクリックして選択
@@ -1182,6 +1187,7 @@ function uploadVrmToPlugin(arrayBuffer, fileName) {
       // token不一致をサーバー側からも実際に確認できた（vrm_auth_result未着・欠落時の保険）。
       // これ以上の書き込み試行は無意味なため、JS側もDisplayモード相当へ自動的に格下げする。
       isControllerMode = false;
+      updateHostSettingsSectionVisibility();
       setStatus('コントローラー認証に失敗しました（token不一致）。OBSメニューから開き直してください。');
     }
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -1694,6 +1700,7 @@ function connectWs() {
       if (data.type === 'vrm_auth_result') {
         if (!data.controllerAuthorized && isControllerMode) {
           isControllerMode = false;
+          updateHostSettingsSectionVisibility();
           diagWarn('WS', 'コントローラーtoken認証に失敗しました。閲覧専用モードとして動作します。');
           setStatus('コントローラー認証に失敗しました（token不一致）。閲覧専用モードで'
             + '動作します。OBSメニューから開き直してください。');
@@ -1996,10 +2003,21 @@ function setCallStatus(text) {
   setStatus(text);
 }
 
+// 実機フィードバック対応: 以前はcallState.isHost（＝ルームを作成/参加済み）に連動して
+// 表示していたため、ルーム作成前はスライダー自体が触れなかった。VRMファイルサイズ上限は
+// 本来ルーム参加状態と無関係にホスト（＝正規のController URLでtoken認証済みのタブ）が
+// いつでも調整できるべき設定のため、isControllerModeのみを条件にする（ゲスト・
+// Displayモードでは非表示のまま）。ルーム参加/退出やtoken認証結果が変わるたびに
+// 呼び出す（callCreateRoom/callJoinRoom/leaveCallRoom、およびisControllerModeを
+// 書き換える箇所すべてから呼ぶ）。
+function updateHostSettingsSectionVisibility() {
+  var hostSettingsSection = document.getElementById('callHostSettingsSection');
+  if (hostSettingsSection) hostSettingsSection.style.display = isControllerMode ? 'block' : 'none';
+}
+
 function showCallRoomUi() {
   var setup = document.getElementById('callRoomSetup');
   var info  = document.getElementById('callRoomInfo');
-  var hostSettingsSection = document.getElementById('callHostSettingsSection');
   var waitingSection = document.getElementById('callWaitingRoomSection');
   var participantsSection = document.getElementById('callParticipantsSection');
   if (setup) setup.style.display = 'none';
@@ -2007,9 +2025,7 @@ function showCallRoomUi() {
     info.style.display = 'block';
     setDebugText('callInviteCodeVal', callState.isHost ? (callState.inviteCode || '-') : '(参加者のため非表示)');
   }
-  // 要件1: VRMファイルサイズ上限設定はホスト（isControllerModeかつisHost）のみが
-  // 変更できる操作のため、待合室セクションと同様ホスト以外には表示しない。
-  if (hostSettingsSection) hostSettingsSection.style.display = callState.isHost ? 'block' : 'none';
+  updateHostSettingsSectionVisibility();
   if (waitingSection) waitingSection.style.display = callState.isHost ? 'block' : 'none';
   if (participantsSection) participantsSection.style.display = 'block';
 }
@@ -2017,12 +2033,11 @@ function showCallRoomUi() {
 function hideCallRoomUi() {
   var setup = document.getElementById('callRoomSetup');
   var info  = document.getElementById('callRoomInfo');
-  var hostSettingsSection = document.getElementById('callHostSettingsSection');
   var waitingSection = document.getElementById('callWaitingRoomSection');
   var participantsSection = document.getElementById('callParticipantsSection');
   if (setup) setup.style.display = 'block';
   if (info) info.style.display = 'none';
-  if (hostSettingsSection) hostSettingsSection.style.display = 'none';
+  updateHostSettingsSectionVisibility();
   if (waitingSection) waitingSection.style.display = 'none';
   if (participantsSection) participantsSection.style.display = 'none';
   var wl = document.getElementById('callWaitingList'); if (wl) wl.innerHTML = '';
@@ -2889,6 +2904,10 @@ function renderCallParticipantsList() {
 
 function initCallUi() {
   initRtcDiagPanel();
+  // 実機フィードバック対応: ルーム未作成の起動直後から、isControllerModeであれば
+  // ファイルサイズ上限スライダーを表示しておく（showCallRoomUi()を経由しない初期状態のため
+  // ここで一度呼んでおく必要がある）。
+  updateHostSettingsSectionVisibility();
 
   var createBtn = document.getElementById('callCreateRoomBtn');
   if (createBtn) createBtn.addEventListener('click', callCreateRoom);
