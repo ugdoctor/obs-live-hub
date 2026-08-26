@@ -438,6 +438,12 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 //             OBSブラウザソースに ?mode=display 付きURLを登録して使う）。
 var isDisplayMode = new URLSearchParams(window.location.search).get('mode') === 'display';
 
+// メインモデル(/vrm/model)上書き権限の判定用。OBSメニューのonOpenVrmStageMenuClick()
+// （src/plugin-main.cpp）が開くURLにのみ ?mode=controller が付与される。IPアドレスや
+// ルーム参加状態（roomId・isHost）に依存せず、「このタブがどのURLで開かれたか」だけで
+// 判定することで、ルーム未参加時や役割判定のタイミングに左右されない堅牢な権限管理にする。
+var isControllerMode = new URLSearchParams(window.location.search).get('mode') === 'controller';
+
 // WsServer（プラグイン）が待ち受けるポート。WebSocketだけでなく、
 // vrm_stage.html本体・/vrm/model のHTTP配信も同じポートで行う。
 var WS_PORT      = 8765;
@@ -719,13 +725,13 @@ var TRANSFORM_DEFAULTS = {
 var vrmTransform = Object.assign({}, TRANSFORM_DEFAULTS);
 var TRANSFORM_LS_KEY = 'vrmStageTransform';
 
-// 実機テストで「モデルが背面を向く」不具合が繰り返し報告されたため強制的に再検証した結果、
-// 従来のMath.PI補正が誤りだったと判明した: カメラは(0,1.4,1.2)付近の+Z側に置かれ原点を
-// lookAt()しており（initScene()参照）、VRM0はVRMUtils.rotateVRM0()で・VRM1.0はそのままで
-// どちらも正規化後は+Z方向を向く。つまり無補正のままで既にカメラ（+Z側）を向いている状態で、
-// ここへさらにMath.PI（180度）を加算すると正面と背面が入れ替わり、常に背中を向けて表示されて
-// いた。ベースのY軸回転は0に統一し、ユーザー操作のyawのみを加算する。
-var VRM_FRONT_YAW_RAD = 0;
+// 正面(-Z)をカメラ側(+Z)へ向けるための固定オフセット（initScene()のカメラ配置参照）。
+// ユーザー操作のyawはこれに加算する。
+// 経緯: 前回セッションで一度0へ変更したが（座標系の机上再導出によるもの）、その後の
+// 実機確認でモデルが背面を向くと判明したため、Math.PIへ戻した。三次元座標の理屈上の
+// 導出と実機での見え方が食い違った箇所のため、この値を再度変更する場合は必ず実機
+// （実際にOBS/ブラウザで表示した画像・動画）での確認を伴うこと。
+var VRM_FRONT_YAW_RAD = Math.PI;
 
 // 通話で自分（自身のアバター＝localVrm）に割り当てる自動横並びオフセット。
 // 2人（自分＋相手1人）接続時のみrecomputeAutoCallLayout()が左右に振り分け、
@@ -1087,9 +1093,16 @@ function shouldSyncLocalModelToPlugin() {
 }
 
 function uploadVrmToPlugin(arrayBuffer, fileName) {
-  // 強制ガード（呼び出し元のshouldSyncLocalModelToPlugin()チェックに万一漏れがあっても、
-  // ここで最終防御する）: 自分がゲストとしてルームに参加中の場合は、絶対にホスト用の
-  // メインモデル（/vrm/model）を上書きしない。
+  // 特権ガード（最優先・最終防御）: ?mode=controller 付きURL（OBSメニュー経由でのみ付与、
+  // src/plugin-main.cpp参照）で開かれたタブ以外は、ルーム参加状態やisHost判定に関わらず
+  // 絶対にメインモデル（/vrm/model）を上書きしない。IPアドレスによる制限は行わない
+  // （同一PC・別PCいずれからでも、mode=controller付きURLでない限り常にブロックする）。
+  if (!isControllerMode) {
+    console.log('[VRM] コントローラー権限がないため、メインモデルのプラグイン同期をブロックしました');
+    return;
+  }
+  // 上記だけで十分だが、念のため従来のロール判定による二重防御も残す:
+  // 自分がゲストとしてルームに参加中の場合は、絶対にホスト用のメインモデルを上書きしない。
   if (callState.roomId && !isLocalOperatorHost()) {
     console.log('[VRM] ゲストのためメインモデル(/vrm/model)の同期をスキップします');
     return;
@@ -2318,7 +2331,7 @@ function applyCallPeerLayout(peer) {
   var l = peer.layout;
   var slotX = CALL_SLOT_OFFSET_X[l.slot] || 0;
   peer.vrm.scene.position.set(slotX + l.offsetX, l.offsetY, l.offsetZ);
-  // 通話相手のアバターにはyaw調整UIが無いため、正面補正（VRM_FRONT_YAW_RAD、現在は0）を
+  // 通話相手のアバターにはyaw調整UIが無いため、正面補正（VRM_FRONT_YAW_RAD、現在はMath.PI）を
   // 固定で適用する（applyTransform()と同じ補正。VRM_FRONT_YAW_RAD定義部のコメント参照）。
   peer.vrm.scene.rotation.y = VRM_FRONT_YAW_RAD;
   peer.vrm.scene.scale.setScalar(l.scale || 1);

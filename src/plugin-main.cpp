@@ -1393,9 +1393,12 @@ static void onOpenVrmStageMenuClick(void * /* data */)
 	// /vrm/model 等へのfetch()がCORSエラー・パス解決エラーを起こす温床になっていた。
 	// Displayモード（OBSブラウザソース受信側）と同じくWsServer経由のHTTP URL
 	// （http://127.0.0.1:<port>/vrm_stage.html）で開くことで、同一オリジンとなり解消する。
+	// ?mode=controller を付与し、data/vrm_stage.html側でこのタブが
+	// 「メインモデル(/vrm/model)を上書きする権限を持つ本物のController」であることを
+	// 判別できるようにする（IPアドレスやルーム参加状態に依存しない、より堅牢な権限管理）。
 	const int port = PluginConfig::instance().wsPort;
 	const std::string controllerUrl =
-		"http://127.0.0.1:" + std::to_string(port) + "/vrm_stage.html";
+		"http://127.0.0.1:" + std::to_string(port) + "/vrm_stage.html?mode=controller";
 	ShellExecuteA(nullptr, "open", controllerUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 
 	const std::string displayUrl =
