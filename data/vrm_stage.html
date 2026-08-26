@@ -257,6 +257,11 @@ html.mode-display #uiToggleTab {
 
   <div id="statusLine">起動中…</div>
 
+  <div class="uiRow" id="trackingSourceRow">
+    <label style="display:block;margin-bottom:2px;">トラッキング入力ソース:</label>
+    <label><input type="radio" name="trackingSource" id="trackingSourceCamera" value="camera" checked> ブラウザカメラ</label>
+    <label style="margin-left:12px;"><input type="radio" name="trackingSource" id="trackingSourceExternal" value="external"> 外部アプリ連携 (VMC / OBS)</label>
+  </div>
   <div class="uiRow">
     <button class="small-btn" id="startTrackingBtn">カメラ/マイクを開始</button>
   </div>
@@ -1283,7 +1288,34 @@ function onFaceMeshResults(results) {
 
 var localMediaStream = null; // マイク音声解析（ローカルのリップシンク用）のために保持
 
+// トラッキング入力ソースの明示的な選択（Controllerのみ使用。Displayはこのパネル自体が
+// 非表示のため常にVMC/vrm_pose_update双方を受け入れる従来動作のまま）。
+// 'camera'   : ブラウザカメラ + MediaPipe（既定）
+// 'external' : 外部アプリ連携（VMC / VSeeFace等）。ブラウザカメラは自動停止する。
+// 実機バグ対策: 従来はVMCブロードキャストの適用可否をshouldApplyLocalVmc()（ルーム参加
+// 状態のみ）で判定していたが、これは「ゲストが同じWsServerへ接続しているだけでまだ
+// ルームに参加していない」間は無条件でVMCを適用してしまう穴があった（ホストがWMCを
+// 有効にすると、ルーム未参加のゲスト端末のlocalVrmまでホストの動きに乗っ取られる）。
+// このタブが「外部アプリ連携」を明示的に選択している場合のみVMCを受け入れるようにする。
+var trackingSourceMode = 'camera';
+
+function setTrackingSourceMode(mode) {
+  if (mode !== 'camera' && mode !== 'external') return;
+  if (trackingSourceMode === mode) return;
+  trackingSourceMode = mode;
+  var startBtn = document.getElementById('startTrackingBtn');
+  if (mode === 'external') {
+    stopTracking(); // ブラウザカメラ由来のトラッキングを確実に停止する
+    if (startBtn) startBtn.disabled = true;
+    setStatus('外部アプリ連携モード: VMC(VSeeFace等)またはOBSからのデータ待機中…');
+  } else {
+    if (startBtn) startBtn.disabled = false;
+    setStatus('ブラウザカメラモード: 「カメラ/マイクを開始」を押してください。');
+  }
+}
+
 function startTracking() {
+  if (trackingSourceMode !== 'camera') return; // 外部アプリ連携モード中はブラウザカメラを起動しない
   webcamVideo = document.getElementById('webcamVideo');
   var previewVideo = document.getElementById('cameraPreview');
 
@@ -1453,6 +1485,14 @@ function shouldApplyLocalVmc() {
 
 function onVmcUpdateReceived(data) {
   if (!localVrm) return;
+  // 実機バグ対策（本命）: WsServerは同じPCに接続している全WebSocketクライアントへ
+  // vrm_vmc_updateをそのままブロードキャストする。ホストがWMC(VSeeFace等)を有効にすると、
+  // ルームにまだ参加していない（＝shouldApplyLocalVmc()の「!callState.roomId」分岐で
+  // 素通りしてしまう）別PCのゲストControllerにまでVMCデータが届き、localVrmが
+  // ホストの動きに乗っ取られてしまっていた。Displayは常に受け入れる（isDisplayModeなら
+  // 下のtrackingSourceMode判定はスキップする）が、Controllerの場合は「外部アプリ連携」を
+  // 明示的に選択している場合のみVMCを受け入れる。
+  if (!isDisplayMode && trackingSourceMode !== 'external') return;
   // ここでreturnする場合、lastVmcReceivedAt等は一切更新しない＝「VMCを受信していない」のと
   // 同じ扱いにすることで、このタブ自身のWebカメラトラッキング（Kalidokit）が
   // isVmcActive()判定に妨げられず正常に動き続けるようにする。
@@ -1582,6 +1622,13 @@ function connectWs() {
 
 function onPoseUpdateReceived(data) {
   if (!localVrm) return;
+  // 要件対応: vrm_pose_updateはホスト（メインモデルの操作者）が発信するデータのため、
+  // 自分がルームに「ゲストとして」参加中の場合は絶対に自分のlocalVrmへ適用しない
+  // （現状の送受信ルーティングではDisplay以外がこの関数へ到達することはないが、
+  // isLocalOperatorHost()はisDisplayModeなら常にtrueを返すためDisplayの動作には
+  // 影響しない多重防御として追加する。ホストの動きは別途vrm_peer_motion経由で
+  // 通話相手のpeer.vrmへ届く）。
+  if (callState.roomId && !isLocalOperatorHost()) return;
   applyFaceRig(data);
   lastReceivedMouthTarget = (typeof data.mouthOpen === 'number') ? data.mouthOpen : 0;
 }
@@ -1591,6 +1638,19 @@ function maybeSendPoseUpdate() {
   // 古いタブ等）からもメインモデル用のvrm_pose_updateを送らせない。uploadVrmToPlugin()と
   // 同様、isControllerModeのみを権限判定に使う（IPやルーム参加状態には依存しない）。
   if (isDisplayMode || !isControllerMode || !localVrm) return;
+  // 要件対応: 「外部アプリ連携」モードを選択している間は、ブラウザカメラ/MediaPipe由来の
+  // 姿勢を送信しない（setTrackingSourceMode()でstopTracking()も呼び既にmpCamera/faceMeshは
+  // 停止済みだが、念のためここでも確実にガードする）。
+  if (trackingSourceMode !== 'camera') return;
+  // 実機バグ対策: 同一PC上で複数Controllerタブ（ホスト役＋ゲスト役）を開いてローカル
+  // テストする場合、両タブとも?mode=controllerであるため上記ガードだけでは区別できず、
+  // ゲスト役タブがWebカメラトラッキングを開始するとそのvrm_pose_updateもDisplayへ
+  // ブロードキャストされてしまい、ホスト本来のvrm_pose_updateと交互に適用されて
+  // Display上のメインモデル（localVrm）が痙攣する（onPoseUpdateReceived()はfromPeerIdの
+  // 検証を一切行わないため）。shouldSyncLocalModelToPlugin()と同じ判定
+  // （ルーム未参加、またはこの端末がそのルームのホスト）を使い、「ゲストとして」
+  // 参加中はメインモデル用のvrm_pose_updateを送らないようにする。
+  if (callState.roomId && !isLocalOperatorHost()) return;
   if (isVmcActive()) return; // VMC受信中はWebカメラ由来の（一時停止済み・古い）姿勢を送らない
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   var now = performance.now();
@@ -2181,6 +2241,13 @@ function maybeSendCallPoseUpdate() {
 function handlePeerMotionReceived(data) {
   if (!callState.roomId || data.roomId !== callState.roomId) return;
   if (data.fromPeerId === callState.myPeerId) return; // 自分自身のechoは無視
+  // Displayがshadow join中、ロースターには「自分の分身元（ローカル操作者本体）」の
+  // 本物のpeerIdも通常の参加者として乗ってくる（shadowParentPeerId参照）。この相手は
+  // localVrm（VMC/vrm_pose_update経由で既に描画中）と同一人物のため、その
+  // vrm_peer_motionは絶対に処理しない（loadRemoteParticipantVrmBinary()側でも
+  // peer.vrmのロード自体をスキップしているため実害はなかったが、ここでも早期return
+  // することで「他人のモーションがlocalVrmへ混入する」経路自体を確実に断つ）。
+  if (isDisplayMode && callState.shadowParentPeerId && data.fromPeerId === callState.shadowParentPeerId) return;
   var peer = callState.peers[data.fromPeerId];
   if (!peer) return; // ロースターに存在しない相手からのモーションは無視する（承認フロー経由のみ許可）
   applyRemotePeerPose(peer, data);
@@ -2189,6 +2256,10 @@ function handlePeerMotionReceived(data) {
 function applyRemotePeerPose(peer, data) {
   peer.lastPoseRig = data;
   if (!peer.vrm) return;
+  // 最終防御: 他ピアのモーションはpeer.vrm（GLTFLoaderで個別ロードした別インスタンス）
+  // にのみ適用する。万一peer.vrmがlocalVrm（メインモデル）自身を指してしまっていた
+  // 場合でも、ここで確実に弾いてホストのモーション痙攣を防ぐ。
+  if (peer.vrm === localVrm) return;
   var humanoid = peer.vrm.humanoid;
   if (humanoid && data.head) {
     var headNode = humanoid.getNormalizedBoneNode('head');
@@ -2654,6 +2725,12 @@ function init() {
   connectWsWatchdog();
 
   document.getElementById('startTrackingBtn').addEventListener('click', startTracking);
+  document.getElementById('trackingSourceCamera').addEventListener('change', function(e) {
+    if (e.target.checked) setTrackingSourceMode('camera');
+  });
+  document.getElementById('trackingSourceExternal').addEventListener('change', function(e) {
+    if (e.target.checked) setTrackingSourceMode('external');
+  });
   document.getElementById('showCameraPreviewChk').addEventListener('change', function(e) {
     document.getElementById('cameraPreview').style.display = e.target.checked ? 'block' : 'none';
   });
