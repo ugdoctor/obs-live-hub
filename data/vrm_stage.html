@@ -187,17 +187,62 @@ html.mode-display #uiToggleTab {
 .callBadgeWaiting { color: #ffcc44; }
 .callBadgeConnected { color: #4caf50; }
 .callSlotSelect, .callOffsetInput, .callFacingSelect {
-  background: rgba(255,255,255,0.1);
   border: 1px solid rgba(255,255,255,0.25);
-  color: #fff;
   border-radius: 4px;
   font-size: 10px;
-  padding: 2px;
+  padding: 2px 4px;
 }
-.callOffsetInput { width: 3.2em; }
+.callOffsetInput { width: 3.2em; background: rgba(255,255,255,0.1); color: #fff; }
+/* CSS崩れ対策（白抜け解消）: <select>のネイティブなドロップダウンpopupはOSレベルの
+   別レイヤーで描画され、選択中の<select>要素自身の半透明背景（旧: rgba(255,255,255,0.1)）
+   は継承されない。popup自体は既定で不透明な白背景になる一方、文字色color:#fffだけは
+   継承されてしまうため、「白背景に白文字」で選択肢のテキストが見えなくなっていた
+   （報告された「白抜け」の実体）。selectとoption双方に不透明な背景色・明るい文字色を
+   明示し、appearance:noneでOSごとの既定デザインの影響も抑える。 */
+.callSlotSelect, .callFacingSelect {
+  background-color: #2a2a2a;
+  color: #f0f0f0;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+}
+.callSlotSelect option, .callFacingSelect option {
+  background-color: #2a2a2a;
+  color: #f0f0f0;
+}
+/* CSS崩れ対策（横はみ出し）: <select>の閉じた状態の表示幅は既定で選択肢の中で最も長い
+   テキスト（例:「カメラ向き (Look at Camera)」）に合わせて自動拡大されるため、
+   位置・向き・倍率の4要素を1行に並べるとパネル幅（300px、パディング差引後276px）を
+   容易に超えて右へはみ出していた。selectの幅を明示的に固定し、行自体もflex-wrapを
+   許可して収まりきらない分は次の行へ折り返すようにする。 */
+.callSlotSelect { width: 4.2em; }
+.callFacingSelect { width: 5.6em; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.callLayoutControlsRow { flex-wrap: wrap; row-gap: 4px; }
 .callScaleSlider { width: 5.5em; vertical-align: middle; }
 .kick-btn { background: rgba(255,60,60,0.25); border-color: rgba(255,60,60,0.5); }
 .kick-btn:hover { background: rgba(255,60,60,0.4); }
+/* CSS崩れ対策（テキスト折り返し）: .uiRowはdisplay:flexで、唯一の子要素である<label>が
+   既定のflex-shrink/min-width:auto挙動により縮まず、長い日本語ラベル（セキュリティ
+   レベルの説明文等）が右へはみ出し隣接要素と重なって見えていた。ラベル自身をflexに
+   min-width:0を明示することで折り返しを許可し、はみ出し・重なりを解消する
+   （.transformRow labelのような既存の固定幅ラベルとは別クラスにして影響範囲を限定する）。 */
+.callSecurityOptionLabel {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.4;
+}
+.callSecurityOptionLabel input[type="radio"] {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+.callSecurityOptionLabel span {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+}
 
 /* 🌐 WebRTC通話診断コンソール */
 #rtcDiagPanel {
@@ -253,7 +298,7 @@ html.mode-display #uiToggleTab {
     <!-- ビルド反映確認用バッジ: ブラウザのスーパーリロード無しでも最新版のHTMLが
          読み込まれているか目視確認できるようにする。今後この行を変更するたびに
          値も更新すること（形式: vYYYY.MM.DD-HHmm、変更を加えた日時）。 -->
-    <span style="font-size:11px; opacity:0.7; background:#333; padding:2px 6px; border-radius:4px; vertical-align:middle;">v2026.08.27-0030</span>
+    <span style="font-size:11px; opacity:0.7; background:#333; padding:2px 6px; border-radius:4px; vertical-align:middle;">v2026.08.27-0100</span>
   </h1>
 
   <div id="dropZone">
@@ -405,16 +450,16 @@ html.mode-display #uiToggleTab {
 
       <div class="uiRow"><strong>セキュリティレベル</strong></div>
       <div class="uiRow">
-        <label><input type="radio" name="callSecurityLevel" id="callSecStrict" value="strict">
-          厳格（パスコード必須＋毎回手動承認）</label>
+        <label class="callSecurityOptionLabel"><input type="radio" name="callSecurityLevel" id="callSecStrict" value="strict">
+          <span>厳格（パスコード必須＋毎回手動承認）</span></label>
       </div>
       <div class="uiRow">
-        <label><input type="radio" name="callSecurityLevel" id="callSecStandard" value="standard" checked>
-          標準（パスコード必須＋既知ゲストのみ自動承認）</label>
+        <label class="callSecurityOptionLabel"><input type="radio" name="callSecurityLevel" id="callSecStandard" value="standard" checked>
+          <span>標準（パスコード必須＋既知ゲストのみ自動承認）</span></label>
       </div>
       <div class="uiRow">
-        <label><input type="radio" name="callSecurityLevel" id="callSecOpen" value="open">
-          オープン（パスコード不要＋完全自動承認）</label>
+        <label class="callSecurityOptionLabel"><input type="radio" name="callSecurityLevel" id="callSecOpen" value="open">
+          <span>オープン（パスコード不要＋完全自動承認）</span></label>
       </div>
 
       <div class="uiRow" style="margin-top:6px;">
@@ -3038,7 +3083,11 @@ var CALL_FACING_LABELS = [
   ['camera', 'カメラ向き (Look at Camera)']
 ];
 function buildLayoutControlsRow(layout, onChange) {
-  var layoutRow = document.createElement('div'); layoutRow.className = 'uiRow';
+  // callLayoutControlsRow: 位置・向き・倍率の4要素（select2つ＋range＋ラベル）が
+  // 1行に収まりきらずパネル幅からはみ出すのを防ぐため、専用クラスでこの行だけ
+  // flex-wrapを許可する（他の.uiRow、特に既存の位置・画角調整パネルの単一スライダー行
+  // には影響させないよう、共有の.uiRowクラスへ直接追加せずスコープを限定する）。
+  var layoutRow = document.createElement('div'); layoutRow.className = 'uiRow callLayoutControlsRow';
 
   var slotSelect = document.createElement('select'); slotSelect.className = 'callSlotSelect';
   slotSelect.title = '位置';
