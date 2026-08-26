@@ -403,6 +403,10 @@ html.mode-display #uiToggleTab {
       </div>
     </details>
   </details>
+
+  <div class="uiRow" style="margin-top:6px;">
+    <button class="small-btn" id="hardResetBtn" title="Cache Storage・localStorage・sessionStorageを消去してリロードします">🧹 キャッシュ削除＆リロード</button>
+  </div>
 </div>
 
 <!--
@@ -1183,6 +1187,25 @@ function initUiToggle() {
   });
 }
 
+// 開発・動作検証時にリロードを繰り返すとブラウザのCache Storage/localStorage/
+// sessionStorageが蓄積し、古いvrm_stage.htmlやスクリプトが残ったまま挙動が不安定に
+// なることがあるため、明示的に全消去してからリロードするボタンを設置する。
+function initHardResetButton() {
+  var btn = document.getElementById('hardResetBtn');
+  if (!btn) return;
+  btn.addEventListener('click', function() {
+    var clearCaches = (window.caches && caches.keys)
+      ? caches.keys().then(function(keys) { return Promise.all(keys.map(function(key) { return caches.delete(key); })); })
+      : Promise.resolve();
+    clearCaches.catch(function(err) { console.warn('[vrm_stage] Cache Storageのクリアに失敗しました', err); })
+      .then(function() {
+        try { localStorage.clear(); } catch (err) { console.warn('[vrm_stage] localStorage.clear()に失敗しました', err); }
+        try { sessionStorage.clear(); } catch (err) { console.warn('[vrm_stage] sessionStorage.clear()に失敗しました', err); }
+        window.location.reload(true);
+      });
+  });
+}
+
 // ── Webカメラ + MediaPipe FaceMesh + Kalidokit（頭部・目線・まばたき） ──
 
 var faceMesh = null;
@@ -1507,6 +1530,16 @@ var WS_URL = window.location.host
 var ws = null;
 var lastPoseSendTime = 0;
 
+// リロード・タブクローズ時にWebSocketを明示的にclose()しないと、サーバー側は
+// TCP切断をOS任せで検知するまでクライアントを保持し続ける。開発中に何度もリロードを
+// 繰り返すとサーバー側にゴーストコネクションが蓄積し動作が不安定になっていたため、
+// ページ離脱時に必ずクリーンクローズする。
+window.addEventListener('beforeunload', function() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    ws.close();
+  }
+});
+
 function connectWs() {
   if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
 
@@ -1554,7 +1587,10 @@ function onPoseUpdateReceived(data) {
 }
 
 function maybeSendPoseUpdate() {
-  if (isDisplayMode || !localVrm) return;
+  // 特権ガード: Displayモードに加え、?mode=controller以外のタブ（バックグラウンドの
+  // 古いタブ等）からもメインモデル用のvrm_pose_updateを送らせない。uploadVrmToPlugin()と
+  // 同様、isControllerModeのみを権限判定に使う（IPやルーム参加状態には依存しない）。
+  if (isDisplayMode || !isControllerMode || !localVrm) return;
   if (isVmcActive()) return; // VMC受信中はWebカメラ由来の（一時停止済み・古い）姿勢を送らない
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   var now = performance.now();
@@ -2609,6 +2645,7 @@ function init() {
   initScene();
   initVrmDropUi();
   initUiToggle();
+  initHardResetButton();
   initTransformPanel();
   initDebugPanel();
   initVmcWatchdog();
