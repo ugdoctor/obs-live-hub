@@ -2203,18 +2203,29 @@ function handlePeerModelReady(data) {
   fetchPeerVrmModel(peer);
 }
 
+// 不具合対策: rosterの新規ピア検出とvrm_peer_model_readyの両方から同じpeerIdへ
+// ほぼ同時にfetchPeerVrmModel()が呼ばれ得るため、フェッチ〜デコード完了までの間
+// 同一peerIdの多重フェッチを禁止する（二重add自体はdisposeCallPeerVrmで防げるが、
+// 無駄な二重ダウンロード・パースやその間の一瞬の多重表示を根本から避ける）。
+var fetchingPeers = new Set();
+
 // peerIdのVRMバイナリをHTTP一括取得してロードする。vrm_peer_model_ready受信時に加え、
 // applyRosterUpdate()で新規ピアを検出した際にも呼ぶ（自分が参加する前に相手が既に
 // アップロード済みだった「後から参加」のケースを、readyイベントを待たず拾うため）。
 function fetchPeerVrmModel(peer) {
+  if (fetchingPeers.has(peer.peerId)) return;
+  fetchingPeers.add(peer.peerId);
   diagInfo('VRM', peer.peerId + ' のVRMを取得開始');
   fetch(HTTP_BASE + '/vrm/peer_model?peerId=' + encodeURIComponent(peer.peerId)).then(function(res) {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     return res.arrayBuffer();
   }).then(function(buf) {
     diagInfo('VRM', peer.peerId + ' のVRM取得完了 (' + buf.byteLength + ' bytes) → デコード中…');
-    loadRemoteParticipantVrmBinary(peer, buf, peer.peerId + '.vrm');
+    loadRemoteParticipantVrmBinary(peer, buf, peer.peerId + '.vrm', function() {
+      fetchingPeers.delete(peer.peerId);
+    });
   }).catch(function(err) {
+    fetchingPeers.delete(peer.peerId);
     // 404は相手がまだアップロードしていないだけの正常系（相手のuploadOwnVrmModel()完了時に
     // vrm_peer_model_readyが飛んでくるので取りこぼさない）。それ以外のみ警告として出す。
     if (err && err.message === 'HTTP 404') return;
@@ -2224,7 +2235,9 @@ function fetchPeerVrmModel(peer) {
 
 // 要件3: 受信したVRMバイナリはBlob/ArrayBufferのみで展開し、IndexedDB/localStorageへは
 // 一切書き込まない（saveVrmToCache()を呼ばない点が自分自身のアバター読み込みとの違い）。
-function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
+// onDoneはfetchPeerVrmModel()のfetchingPeersガード解除用コールバック（ロード完了・
+// スキップ・失敗のいずれの経路でも必ず一度呼ぶ）。
+function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName, onDone) {
   // 不具合1対策: このピアが「自分自身（ローカル操作者）の分身」（shadow join用の
   // 自己接続）の場合、そのVRM/姿勢はlocalVrm（VMC/ローカル姿勢で駆動する自分自身の
   // 描画）と同一人物の二重表示になる。VMCは常にlocalVrmだけに適用し、リモートアバターは
@@ -2232,6 +2245,7 @@ function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
   if (isDisplayMode && callState.shadowParentPeerId && peer.peerId === callState.shadowParentPeerId) {
     diagInfo('VRM', peer.peerId + ' は自分自身の分身のためロードをスキップ'
       + '（localVrmが既にホスト自身のモデルを表示している）');
+    if (onDone) onDone();
     return;
   }
   // 不具合3対策: 上記はDisplay自身が「自分の分身」を認識するケースのみをカバーしていた。
@@ -2240,6 +2254,7 @@ function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
   // 前のガードで弾かれるため、ここに到達するのは異常系のみのはず）。
   if (isNonFetchablePeer(peer.peerId, peer)) {
     diagInfo('VRM', peer.peerId + ' はShadow/自己ピアのためロードをスキップ');
+    if (onDone) onDone();
     return;
   }
   var blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: 'model/gltf-binary' }));
@@ -2251,6 +2266,7 @@ function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
     var vrm = gltf.userData.vrm;
     if (!vrm) {
       diagWarn('VRM', peer.peerId + ' のパース失敗: gltf.userData.vrmが空です（受信データが壊れている可能性）');
+      if (onDone) onDone();
       return;
     }
     diagInfo('VRM', peer.peerId + ' のロード成功 → シーンに追加し、右側スロットへ配置します');
@@ -2261,11 +2277,13 @@ function loadRemoteParticipantVrmBinary(peer, arrayBuffer, fileName) {
     scene.add(vrm.scene);
     applyCallPeerLayout(peer);
     setCallStatus((peer.displayName || peer.peerId) + ' のVRMを受信しました');
+    if (onDone) onDone();
   }, undefined, function(err) {
     URL.revokeObjectURL(blobUrl);
     if (peer.pendingBlobUrl === blobUrl) peer.pendingBlobUrl = null;
     console.warn('[vrm_stage:call] remote VRM load failed', err);
     diagWarn('VRM', peer.peerId + ' のロード失敗', err);
+    if (onDone) onDone();
   });
 }
 
