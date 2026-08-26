@@ -1387,20 +1387,17 @@ static void onOpenMatchCounterMenuClick(void * /* data */)
 static void onOpenVrmStageMenuClick(void * /* data */)
 {
 #ifdef _WIN32
-	char appdata[MAX_PATH] = {};
-	if (GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH) == 0)
-		return;
-	const std::string path =
-		std::string(appdata) + "\\obs-studio\\plugins\\obs-live-hub\\vrm_stage.html";
-
 	// 通常ブラウザでは常にControllerモード（トラッキング送信側）として開く。
-	// Displayモード（OBSブラウザソース受信側）は WsServer が配信する
-	// http://127.0.0.1:<port>/vrm_stage.html?mode=display に統一する
-	// （file:// ではなく WsServer 経由にすることで、/vrm/model 等への fetch() が
-	// 同一オリジンになりCORSの懸念なく動作する）。
-	ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-
+	// 実機調査で判明した実バグ: 従来はここで file:// のローカルパス（%APPDATA%\...\vrm_stage.html）を
+	// ShellExecuteAへ直接渡していたため、既定のブラウザがfile://として開いてしまい、
+	// /vrm/model 等へのfetch()がCORSエラー・パス解決エラーを起こす温床になっていた。
+	// Displayモード（OBSブラウザソース受信側）と同じくWsServer経由のHTTP URL
+	// （http://127.0.0.1:<port>/vrm_stage.html）で開くことで、同一オリジンとなり解消する。
 	const int port = PluginConfig::instance().wsPort;
+	const std::string controllerUrl =
+		"http://127.0.0.1:" + std::to_string(port) + "/vrm_stage.html";
+	ShellExecuteA(nullptr, "open", controllerUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+
 	const std::string displayUrl =
 		"http://127.0.0.1:" + std::to_string(port) + "/vrm_stage.html?mode=display";
 
