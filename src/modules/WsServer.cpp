@@ -18,10 +18,17 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #ifdef _WIN32
 
+// rand_s()（CryptoAPIのRtlGenRandomベース、CSPRNG相当）を使うために必要。
+// <stdlib.h>系ヘッダを他のインクルードより先にrand_s宣言込みで読み込ませるため、
+// ファイル冒頭・他のインクルードより前に置く。
+#define _CRT_RAND_S
+#include <cstdlib>
+
 #include "WsServer.hpp"
 
 #include <algorithm>
 #include <cstring>
+#include <random>
 #include <vector>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -33,6 +40,26 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 
 static const char *WSTAG = "WsServer";
+
+// WAN公開対応: Controllerシークレットトークン（WsServer::controllerSecretToken_）用の
+// 安全な乱数英数字文字列を生成する。rand_s()はWindows CSPRNG（RtlGenRandom）を使うため
+// std::rand()より推測されにくい。極めて稀にrand_s()自体が失敗する環境（対応するCSPが
+// 無い等の異常系）への保険としてのみstd::random_deviceへフォールバックする。
+static std::string generateSecureRandomToken(size_t len)
+{
+	static const char kAlphabet[] =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+	std::string out;
+	out.reserve(len);
+	std::random_device fallbackRd;
+	for (size_t i = 0; i < len; ++i) {
+		unsigned int r = 0;
+		if (rand_s(&r) != 0)
+			r = fallbackRd();
+		out += kAlphabet[r % (sizeof(kAlphabet) - 1)];
+	}
+	return out;
+}
 
 // ─────────────────────────────────────────
 // 簡易HTTP画像配信（YouTubeカスタムエモート辞書用）ヘルパー
@@ -595,8 +622,27 @@ void WsServer::handleVrmModelUpload(SOCKET sock, const std::string &request)
 		"HTTP/1.1 400 Bad Request\r\n"
 		"Access-Control-Allow-Origin: *\r\n"
 		"Content-Length: 0\r\nConnection: close\r\n\r\n";
+	static const char *resp403 =
+		"HTTP/1.1 403 Forbidden\r\n"
+		"Access-Control-Allow-Origin: *\r\n"
+		"Content-Length: 0\r\nConnection: close\r\n\r\n";
 	static const char *resp200 =
 		"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
+
+	// WAN公開対応（真の権限境界）: メインモデル(/vrm/model)を上書きできるのは
+	// controllerSecretToken_（起動のたびランダム生成、OBSメニュー経由のURLにのみ埋め込まれる）
+	// を提示できたリクエストのみに限定する。data/vrm_stage.html側のisControllerModeチェックは
+	// あくまでJS側の自己防衛であり、WAN公開時は第三者が直接この/vrm/modelへPOSTしてくる
+	// 可能性も考慮し、ここが実効的な権限チェックになる。ボディを読む前（＝大容量の受信に
+	// 時間を使う前）に弾く。
+	const std::string token = parseQueryParam(request, "token");
+	if (controllerSecretToken_.empty() || token != controllerSecretToken_) {
+		obs_log(LOG_WARNING,
+			"[%s] POST /vrm/model: controller token不一致のため拒否しました (token_len=%zu)",
+			WSTAG, token.size());
+		sendAll(sock, resp403, strlen(resp403));
+		return;
+	}
 
 	const long contentLength = parseContentLength(request);
 	const size_t kMaxVrmSize = 256 * 1024 * 1024; // 256MB上限（異常アップロードへの防御）
@@ -757,7 +803,10 @@ std::vector<uint8_t> WsServer::encodeTextFrame(const std::string &text)
 // WsServer 本体
 // ─────────────────────────────────────────
 
-WsServer::WsServer(uint16_t port) : port_(port) {}
+WsServer::WsServer(uint16_t port)
+	: port_(port), controllerSecretToken_(generateSecureRandomToken(32))
+{
+}
 
 WsServer::~WsServer()
 {
@@ -1074,6 +1123,26 @@ void WsServer::clientLoop(SOCKET sock)
 		clients_.push_back(sock);
 	}
 	obs_log(LOG_INFO, "[%s] Client connected (total: %zu)", WSTAG, clients_.size());
+
+	// WAN公開対応: このWebSocket接続がmode=controllerを名乗っている場合のみ、
+	// controllerSecretToken_の検証結果を"vrm_auth_result"として一度だけ返す。
+	// data/vrm_stage.html側はこれを見てisControllerModeを実際の検証結果に合わせる
+	// （不一致ならDisplayモード相当・閲覧専用へ自動的に格下げする）。
+	// 注意: これはクライアント側UXのためのヒントに過ぎず、実効的な権限境界は
+	// POST /vrm/model側の独立したtoken検証（handleVrmModelUpload参照）にある。
+	if (parseQueryParam(request, "mode") == "controller") {
+		const std::string token = parseQueryParam(request, "token");
+		const bool authorized = !controllerSecretToken_.empty() && token == controllerSecretToken_;
+		if (!authorized) {
+			obs_log(LOG_WARNING,
+				"[%s] WebSocket handshake: mode=controllerのtoken不一致 (token_len=%zu)",
+				WSTAG, token.size());
+		}
+		const std::string authJson = std::string("{\"type\":\"vrm_auth_result\",\"controllerAuthorized\":")
+			+ (authorized ? "true" : "false") + "}";
+		const auto authFrame = encodeTextFrame(authJson);
+		sendAll(sock, reinterpret_cast<const char *>(authFrame.data()), authFrame.size());
+	}
 
 	{
 		std::lock_guard<std::mutex> lock(callbackMutex_);

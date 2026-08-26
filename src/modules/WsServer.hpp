@@ -34,6 +34,14 @@ public:
 	ListenState listenState() const { return listenState_.load(); }
 	uint16_t port() const { return port_; }
 
+	// WAN公開対応: プラグイン起動（＝WsServerインスタンス生成）のたびにランダム生成される
+	// Controllerシークレットトークン。OBSメニュー（plugin-main.cpp）がVRM Stageの
+	// Controller起動URLへ埋め込み、data/vrm_stage.html側がWebSocket接続・POST /vrm/model
+	// のクエリ文字列へ含めて送り返してくる。mode=controllerを名乗るだけの自己申告
+	// （旧来のisControllerMode）ではURLさえ知っていれば誰でもなりすませてしまうため、
+	// 本トークンでサーバー側が独立に検証することで実効的な権限境界にする。
+	const std::string &controllerSecretToken() const { return controllerSecretToken_; }
+
 	// 接続確立済みクライアント数を返す (スレッドセーフ)
 	int clientCount() const
 	{
@@ -103,6 +111,9 @@ private:
 	static std::string parseQueryParam(const std::string &request, const std::string &paramName);
 
 	uint16_t port_;
+	// WAN公開対応: 起動のたびに新しくランダム生成される（コンストラクタで初期化）。
+	// controllerSecretToken()参照。
+	std::string controllerSecretToken_;
 	SOCKET listenSock_ = INVALID_SOCKET;
 	std::atomic<bool> running_{false};
 	std::atomic<ListenState> listenState_{ListenState::NotStarted};

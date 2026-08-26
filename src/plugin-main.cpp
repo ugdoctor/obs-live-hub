@@ -1396,9 +1396,14 @@ static void onOpenVrmStageMenuClick(void * /* data */)
 	// ?mode=controller を付与し、data/vrm_stage.html側でこのタブが
 	// 「メインモデル(/vrm/model)を上書きする権限を持つ本物のController」であることを
 	// 判別できるようにする（IPアドレスやルーム参加状態に依存しない、より堅牢な権限管理）。
+	// WAN公開対応: mode=controllerという自己申告だけではURLを知る誰でもなりすませて
+	// しまうため（WAN公開時は特に問題）、WsServer起動のたびにランダム生成される
+	// controllerSecretTokenもクエリへ埋め込む。data/vrm_stage.html・WsServer.cpp
+	// （POST /vrm/model・WebSocketハンドシェイク）の両方がこれを検証する。
 	const int port = PluginConfig::instance().wsPort;
+	const std::string token = s_wsServer ? s_wsServer->controllerSecretToken() : std::string();
 	const std::string controllerUrl =
-		"http://127.0.0.1:" + std::to_string(port) + "/vrm_stage.html?mode=controller";
+		"http://127.0.0.1:" + std::to_string(port) + "/vrm_stage.html?mode=controller&token=" + token;
 	ShellExecuteA(nullptr, "open", controllerUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 
 	const std::string displayUrl =

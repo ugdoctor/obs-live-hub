@@ -453,6 +453,20 @@ var isDisplayMode = new URLSearchParams(window.location.search).get('mode') === 
 // 判定することで、ルーム未参加時や役割判定のタイミングに左右されない堅牢な権限管理にする。
 var isControllerMode = new URLSearchParams(window.location.search).get('mode') === 'controller';
 
+// WAN公開対応（実機バグ対策の続き）: 上記isControllerModeはURLの?modeパラメータのみに
+// 依存する自己申告であり、mode=controllerのURLさえ知っていれば（例: LAN内はもちろん、
+// WAN公開時は第三者にも）誰でもコントローラー権限を名乗れてしまっていた。OBSメニュー
+// （src/plugin-main.cpp）がURLに埋め込む使い捨てシークレットトークンをここで取り出し、
+// サーバー側（WsServer.cpp）に検証してもらう。検証結果はWebSocket接続後に
+// "vrm_auth_result"メッセージで返る（ws.onmessage参照）。トークン不一致・未指定の
+// 場合はisControllerModeをfalseへ落とし、Displayモード相当（閲覧専用）の動作へ
+// 自動的に切り替える。
+// 重要: これはあくまでUX上の自己防衛（ローカルのJS状態を書き換えて誤操作を防ぐ）に
+// すぎず、真の権限境界はサーバー側（WsServer.cppのPOST /vrm/model token検証）にある。
+// クライアント側のJS状態を信用しないというのが本来の前提のため、実際の書き込み系
+// エンドポイントは必ずサーバー側でも独立にtokenを検証する。
+var controllerToken = new URLSearchParams(window.location.search).get('token') || '';
+
 // WsServer（プラグイン）が待ち受けるポート。WebSocketだけでなく、
 // vrm_stage.html本体・/vrm/model のHTTP配信も同じポートで行う。
 var WS_PORT      = 8765;
@@ -1121,7 +1135,10 @@ function uploadVrmToPlugin(arrayBuffer, fileName) {
     console.log('[VRM] ゲストのためメインモデル(/vrm/model)の同期をスキップします');
     return;
   }
-  fetch(VRM_MODEL_URL, {
+  // サーバー側(WsServer.cpp handleVrmModelUpload)がここでも独立にtokenを検証する
+  // （真の権限境界はサーバー側。上記のisControllerModeチェックはあくまでJS側の
+  // 自己防衛であり、クライアントのJS状態を書き換えられれば迂回され得るため）。
+  fetch(VRM_MODEL_URL + '?token=' + encodeURIComponent(controllerToken), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/octet-stream',
@@ -1129,6 +1146,12 @@ function uploadVrmToPlugin(arrayBuffer, fileName) {
     },
     body: arrayBuffer
   }).then(function(res) {
+    if (res.status === 403) {
+      // token不一致をサーバー側からも実際に確認できた（vrm_auth_result未着・欠落時の保険）。
+      // これ以上の書き込み試行は無意味なため、JS側もDisplayモード相当へ自動的に格下げする。
+      isControllerMode = false;
+      setStatus('コントローラー認証に失敗しました（token不一致）。OBSメニューから開き直してください。');
+    }
     if (!res.ok) throw new Error('HTTP ' + res.status);
   }).catch(function(err) {
     console.warn('[vrm_stage] VRMのOBS側同期に失敗:', err);
@@ -1576,6 +1599,12 @@ var WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 var WS_URL = window.location.host
   ? (WS_PROTOCOL + '//' + window.location.host)
   : ('ws://127.0.0.1:' + WS_PORT);
+// 要件1: Controllerトークン認証。isControllerModeの場合のみmode/tokenをWebSocket
+// ハンドシェイクのクエリ文字列へ含める（サーバー側WsServer.cpp clientLoop()がここを
+// 見てtokenを検証し、"vrm_auth_result"で結果を返す）。Displayはクエリ無しで従来通り接続する。
+if (isControllerMode) {
+  WS_URL += '?mode=controller&token=' + encodeURIComponent(controllerToken);
+}
 var ws = null;
 var lastPoseSendTime = 0;
 
@@ -1604,6 +1633,23 @@ function connectWs() {
   ws.onmessage = function(e) {
     try {
       var data = JSON.parse(e.data);
+      // 要件1: WsServer.cppがWebSocketハンドシェイク直後に一度だけ送るコントローラー
+      // token検証結果。mode=controllerで接続した場合のみ届く（Displayは受け取らない）。
+      // 不一致・未指定だった場合、isControllerModeを落として実質Displayモード
+      // （閲覧専用）へ自動的に切り替える。既存のisControllerModeゲート
+      // （uploadVrmToPlugin()・maybeSendPoseUpdate()等）がそのまま効くため、
+      // ここでは状態を書き換えるだけでよい。
+      if (data.type === 'vrm_auth_result') {
+        if (!data.controllerAuthorized && isControllerMode) {
+          isControllerMode = false;
+          diagWarn('WS', 'コントローラーtoken認証に失敗しました。閲覧専用モードとして動作します。');
+          setStatus('コントローラー認証に失敗しました（token不一致）。閲覧専用モードで'
+            + '動作します。OBSメニューから開き直してください。');
+        } else if (data.controllerAuthorized) {
+          diagInfo('WS', 'コントローラーtoken認証に成功しました。');
+        }
+        return;
+      }
       // vrm_vmc_update はプラグイン（VmcReceiver）が発信元であり、ControllerもDisplayも
       // 対等なWebSocketクライアントとして受け取る（自分自身のechoではないため両方で処理する）
       if (data.type === 'vrm_vmc_update') { onVmcUpdateReceived(data); return; }
@@ -1732,6 +1778,16 @@ var callState = {
   myDisplayName: null,
   waitingPeers: {},     // ホストのみ: peerId -> { displayName, requestedAt }
   bannedPeerIds: {},    // ホストのみ: peerId -> true（キック済み、以後の再参加を拒否）
+  // ホストのみ: セッション記憶による既知ゲスト自動承認用（approveWaitingPeer()参照）。
+  // sessionToken -> { displayName, approvedAt }。peerIdではなくtoken自体をキーにする
+  // 理由: peerIdは再接続のたびgeneratePeerId()で新しく生成され直すため、再接続後は
+  // 古いpeerIdでは本人を特定できない。承認のたび新しいtokenを発行し直す（使い回さない）。
+  // このルームインスタンス（roomId）が生きている間だけ有効で、callCreateRoom()/
+  // leaveCallRoom()でリセットされる。
+  knownSessionTokens: {},
+  // ゲストのみ: 現在の参加試行で使った招待コード（callJoinRoom()参照）。approve/reject
+  // 受信時にセッショントークンをlocalStorageへ保存/破棄するためのキーとして使う。
+  myJoinInviteCode: null,
   peers: {},            // peerId -> CallPeer
   // Displayモードのshadow join専用。attemptShadowJoin()参照。
   // 「自分（ローカル操作者）の分身」であるピアのIDを覚えておき、そのピア経由で届く
@@ -1757,6 +1813,14 @@ function generateInviteCode() {
 }
 function generatePeerId() {
   return 'p_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
+// セッション記憶（既知ゲスト自動承認）用のワンタイムトークン。ホストが承認するたびに
+// 新しい値を発行し直す（使い回さない）ことで、漏洩・推測されたトークン1個が
+// 無期限に有効であり続けるリスクを避ける。
+function generateSessionToken() {
+  return 'st_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
+    + Math.random().toString(36).slice(2, 8);
 }
 
 function makeCallPeer(peerId, displayName, isShadow, shadowOfPeerId) {
@@ -1900,6 +1964,7 @@ function callCreateRoom() {
   callState.inviteCode = generateInviteCode();
   callState.waitingPeers = {};
   callState.bannedPeerIds = {};
+  callState.knownSessionTokens = {};
   callState.peers = {};
   showCallRoomUi();
   renderCallParticipantsList();
@@ -1915,6 +1980,32 @@ function callRegenerateInviteCode() {
   setCallStatus('招待コードを再発行しました。古いコードは無効になりました。');
 }
 
+// 要件3（セッション記憶による既知ゲストの自動承認）: localStorageのキー名。
+// 仕様上は「roomIdをキーにする」形が素直だが、roomIdはjoin_ack受信まで（＝承認フロー
+// そのものを経ないと）ゲスト側にはわからないため、再接続時に事前ルックアップできない。
+// ゲストが事前に知っている・人間が再入力する招待コード（inviteCode）をキーにし、
+// 値として{roomId, token}のペアを保存する（roomIdも保存しておくことで、後述の
+// ホスト側チェックで「同じルームインスタンス向けに発行されたtokenか」を検証できる）。
+var CALL_SESSION_LS_PREFIX = 'vrm_session_token_';
+
+function saveRememberedSession(inviteCode, roomId, token) {
+  try {
+    localStorage.setItem(CALL_SESSION_LS_PREFIX + inviteCode, JSON.stringify({ roomId: roomId, token: token }));
+  } catch (_) {}
+}
+function loadRememberedSession(inviteCode) {
+  try {
+    var raw = localStorage.getItem(CALL_SESSION_LS_PREFIX + inviteCode);
+    if (!raw) return null;
+    var parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.roomId === 'string' && typeof parsed.token === 'string') return parsed;
+  } catch (_) {}
+  return null;
+}
+function clearRememberedSession(inviteCode) {
+  try { localStorage.removeItem(CALL_SESSION_LS_PREFIX + inviteCode); } catch (_) {}
+}
+
 function callJoinRoom(inviteCodeInput) {
   if (callState.roomId) { setCallStatus('既にルームに参加中です。先に退出してください。'); return; }
   var codeUsed = (inviteCodeInput || '').trim().toUpperCase();
@@ -1923,7 +2014,17 @@ function callJoinRoom(inviteCodeInput) {
   callState.myPeerId = generatePeerId();
   callState.myDisplayName = 'ゲスト';
   callState.roomId = null; // join_ack受信時に設定される
-  sendRoomControl({ action: 'join_request', inviteCode: codeUsed, displayName: callState.myDisplayName });
+  callState.myJoinInviteCode = codeUsed;
+  var joinPayload = { action: 'join_request', inviteCode: codeUsed, displayName: callState.myDisplayName };
+  // 要件3: 同じ招待コードで以前承認された記憶があれば、待合室を経由せず自動承認して
+  // もらえるようトークンを添える（ホスト側はroomId一致＋token有効の両方を検証する。
+  // handleRoomControl()のjoin_request分岐参照）。
+  var remembered = loadRememberedSession(codeUsed);
+  if (remembered) {
+    joinPayload.knownSessionToken = remembered.token;
+    joinPayload.knownRoomId = remembered.roomId;
+  }
+  sendRoomControl(joinPayload);
   setCallStatus('参加をリクエストしました。ホストの承認をお待ちください…');
   setTimeout(function() {
     if (!callState.roomId) {
@@ -1942,6 +2043,7 @@ function leaveCallRoom() {
   callState.inviteCode = null;
   callState.waitingPeers = {};
   callState.bannedPeerIds = {};
+  callState.knownSessionTokens = {};
   callState.shadowParentPeerId = null;
   callState.localIsHost = false;
   autoHostSlotOffsetX = 0;
@@ -2053,17 +2155,27 @@ function applyRosterUpdate(msg) {
   }
 }
 
+// 要件3: 承認処理の本体（手動承認・既知ゲストの自動承認の両方から呼ばれる共通ヘルパー）。
+// 承認のたび新しいsessionTokenを発行し、callState.knownSessionTokens（token検証用）と
+// peer.sessionToken（kick時にどのtokenを失効させるべきかの逆引き用）の両方へ記録する。
+function grantCallPeerAccess(peerId, displayName) {
+  var sessionToken = generateSessionToken();
+  callState.knownSessionTokens[sessionToken] = { displayName: displayName, approvedAt: Date.now() };
+  callState.peers[peerId] = makeCallPeer(peerId, displayName);
+  callState.peers[peerId].sessionToken = sessionToken;
+  sendRoomControl({ action: 'approve', targetPeerId: peerId, sessionToken: sessionToken });
+  broadcastRoster();
+  uploadOwnVrmModel(true); // 承認直後に確実に自分のVRMを送る
+  renderCallParticipantsList();
+}
+
 function approveWaitingPeer(peerId) {
   var waiting = callState.waitingPeers[peerId];
   if (!waiting) return;
   delete callState.waitingPeers[peerId];
   renderCallWaitingList();
-  callState.peers[peerId] = makeCallPeer(peerId, waiting.displayName);
   diagInfo('WS', '承認: ' + peerId + ' (' + waiting.displayName + ') → approve送信 + roster配信');
-  sendRoomControl({ action: 'approve', targetPeerId: peerId });
-  broadcastRoster();
-  uploadOwnVrmModel(true); // 承認直後に確実に自分のVRMを送る
-  renderCallParticipantsList();
+  grantCallPeerAccess(peerId, waiting.displayName);
 }
 
 function rejectWaitingPeer(peerId, reason) {
@@ -2076,6 +2188,11 @@ function rejectWaitingPeer(peerId, reason) {
 function kickCallPeer(peerId) {
   if (!callState.isHost) return;
   callState.bannedPeerIds[peerId] = true; // セッションBAN: このルームが存続する間、再参加を拒否する
+  // 要件3: キックされた相手の記憶されたセッションtokenも即座に失効させる（そのままだと
+  // banされたはずのゲストが「既知ゲスト」として待合室すら経由せず自動的に再入室できて
+  // しまい、セッションBANが実質的に無効化されてしまうため）。
+  var kickedPeer = callState.peers[peerId];
+  if (kickedPeer && kickedPeer.sessionToken) delete callState.knownSessionTokens[kickedPeer.sessionToken];
   diagInfo('WS', 'キック: ' + peerId);
   sendRoomControl({ action: 'kick', targetPeerId: peerId });
   disconnectCallPeer(peerId, null);
@@ -2091,9 +2208,13 @@ function handleRoomControl(msg) {
   // join_request / join_ack はroomId確定前に処理する必要があるため、roomIdゲートより先に扱う
   if (action === 'join_request') {
     if (!callState.isHost) return;
+    // 要件2（パスコードクッション）: 招待コード不一致は待合室に一切追加せず、即座に
+    // reject（reason: invalid_passcode）を返す。従来はここで無言returnしていたため、
+    // ゲスト側は「ホストの承認待ち…」のまま何も起きず、実質的にハングして見えていた。
     if (msg.inviteCode !== callState.inviteCode) {
       diagWarn('WS', 'join_request却下: 招待コード不一致 (受信="' + msg.inviteCode
         + '" 現在="' + callState.inviteCode + '")');
+      sendRoomControl({ action: 'reject', targetPeerId: msg.fromPeerId, reason: 'invalid_passcode' });
       return;
     }
     if (callState.bannedPeerIds[msg.fromPeerId]) {
@@ -2104,6 +2225,21 @@ function handleRoomControl(msg) {
     if (Object.keys(callState.peers).length >= CALL_MAX_PARTICIPANTS - 1) {
       diagWarn('WS', 'join_request却下: room_full');
       sendRoomControl({ action: 'reject', targetPeerId: msg.fromPeerId, reason: 'room_full' });
+      return;
+    }
+    // 要件3（セッション記憶による既知ゲストの自動承認）: 招待コードは既に一致確認済み
+    // （＝パスコード一致）。加えてゲストが提示したknownRoomIdが現在のルームインスタンス
+    // と一致し、かつknownSessionTokenが現在も有効（このルームで過去に発行され、まだ
+    // 失効していない）であれば、待合室を経由せずホストの手動承認を待たず自動承認する。
+    // knownRoomIdの一致まで見るのは、同じ招待コードが（コード再発行前の）別ルーム
+    // インスタンス向けに発行された古いtokenで誤って自動承認されるのを防ぐため。
+    if (msg.knownSessionToken && msg.knownRoomId === callState.roomId &&
+        callState.knownSessionTokens[msg.knownSessionToken]) {
+      diagInfo('WS', 'join_request: 既知ゲストの有効なセッショントークンを確認 → 待合室を'
+        + 'スキップして自動承認: ' + msg.fromPeerId);
+      sendRoomControl({ action: 'join_ack', targetPeerId: msg.fromPeerId, roomId: callState.roomId });
+      delete callState.knownSessionTokens[msg.knownSessionToken]; // 使い回し防止（grantで新token発行）
+      grantCallPeerAccess(msg.fromPeerId, msg.displayName || msg.fromPeerId);
       return;
     }
     callState.waitingPeers[msg.fromPeerId] = {
@@ -2151,6 +2287,14 @@ function handleRoomControl(msg) {
   if (action === 'approve') {
     if (msg.targetPeerId !== callState.myPeerId) return;
     diagInfo('WS', 'approve受信 → ルーム参加完了、roster待ち');
+    // 要件3: ホストが発行したセッショントークンをlocalStorageへ保存する。次回同じ招待
+    // コードで再参加を試みた際、ホストが有効と判断すれば待合室・手動承認を経ずに
+    // 再入室できる（callJoinRoom()のloadRemembered Session()参照）。手動承認・
+    // 自動承認どちらの経路でもgrantCallPeerAccess()が毎回新しいtokenを発行するため、
+    // 再参加のたびここで上書き保存される（同じtokenを使い回さない）。
+    if (msg.sessionToken && callState.myJoinInviteCode) {
+      saveRememberedSession(callState.myJoinInviteCode, callState.roomId, msg.sessionToken);
+    }
     setCallStatus('ルームに参加しました。');
     showCallRoomUi();
     // 不具合2対策: 参加者リストDOMは本来rosterメッセージ受信（applyRosterUpdate）で
@@ -2165,6 +2309,11 @@ function handleRoomControl(msg) {
     if (msg.targetPeerId !== callState.myPeerId) return;
     diagWarn('WS', 'reject受信: reason=' + msg.reason);
     setCallStatus('参加を拒否されました' + (msg.reason ? '（' + msg.reason + '）' : ''));
+    // 要件3: 招待コード不一致・BANによる拒否の場合、覚えていたセッショントークンは
+    // もはや無意味（コードが変わった／banされた）なので掃除しておく。
+    if ((msg.reason === 'invalid_passcode' || msg.reason === 'banned') && callState.myJoinInviteCode) {
+      clearRememberedSession(callState.myJoinInviteCode);
+    }
     callState.roomId = null;
     return;
   }
