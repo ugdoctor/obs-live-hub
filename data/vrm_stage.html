@@ -186,7 +186,7 @@ html.mode-display #uiToggleTab {
 .callParticipantName { font-weight: bold; flex: 1 1 auto; }
 .callBadgeWaiting { color: #ffcc44; }
 .callBadgeConnected { color: #4caf50; }
-.callSlotSelect, .callOffsetInput {
+.callSlotSelect, .callOffsetInput, .callFacingSelect {
   background: rgba(255,255,255,0.1);
   border: 1px solid rgba(255,255,255,0.25);
   color: #fff;
@@ -195,6 +195,7 @@ html.mode-display #uiToggleTab {
   padding: 2px;
 }
 .callOffsetInput { width: 3.2em; }
+.callScaleSlider { width: 5.5em; vertical-align: middle; }
 .kick-btn { background: rgba(255,60,60,0.25); border-color: rgba(255,60,60,0.5); }
 .kick-btn:hover { background: rgba(255,60,60,0.4); }
 
@@ -252,7 +253,7 @@ html.mode-display #uiToggleTab {
     <!-- ビルド反映確認用バッジ: ブラウザのスーパーリロード無しでも最新版のHTMLが
          読み込まれているか目視確認できるようにする。今後この行を変更するたびに
          値も更新すること（形式: vYYYY.MM.DD-HHmm、変更を加えた日時）。 -->
-    <span style="font-size:11px; opacity:0.7; background:#333; padding:2px 6px; border-radius:4px; vertical-align:middle;">v2026.08.26-2350</span>
+    <span style="font-size:11px; opacity:0.7; background:#333; padding:2px 6px; border-radius:4px; vertical-align:middle;">v2026.08.27-0030</span>
   </h1>
 
   <div id="dropZone">
@@ -793,11 +794,14 @@ var TRANSFORM_LS_KEY = 'vrmStageTransform';
 // （実際にOBS/ブラウザで表示した画像・動画）での確認を伴うこと。
 var VRM_FRONT_YAW_RAD = Math.PI;
 
-// 通話で自分（自身のアバター＝localVrm）に割り当てる自動横並びオフセット。
-// 2人（自分＋相手1人）接続時のみrecomputeAutoCallLayout()が左右に振り分け、
-// それ以外は0（中央）に戻る。vrmTransform.posXとは独立に加算する
-// （ユーザーの手動位置調整をリセットせずに済ませるため）。
-var autoHostSlotOffsetX = 0;
+// マルチアバター配置（要件1〜3、旧autoHostSlotOffsetXを置き換え）: 自分自身のアバター
+// （localVrm）のスロット・向き・拡大率。CALL_SLOT_OFFSET_X/computeCallFacingYaw定義部
+// （「マルチユーザー通話」セクション）で実体を伴って初期化されるが、applyTransform()
+// からは（関数呼び出し時点では既に初期化済みの前提で）先に参照する。
+// autoSlot: trueの間はrecomputeAutoCallLayout()が人数に応じて自動的にslotを書き換える。
+// ホストが「メンバー別レイアウト調整UI」でslotを手動選択するとfalseになり、以後は
+// 自動再配置の対象から外れる（要件2のUIから更新される）。
+var myAvatarLayout = { slot: 'center', facing: 'world', scale: 1, autoSlot: true };
 // torsoMulはデバッグパネル内のスライダー（#tTorsoMul）だが、既存の位置・画角と同じ
 // 仕組み（localStorage保存・vrm_transform_updateでのDisplay同期）に乗せるため
 // TRANSFORM_SLIDERSに含める（配列に追加するだけで自動的に配線される）。
@@ -815,9 +819,18 @@ var TRANSFORM_SLIDERS = [
 // Controller/Displayの両方から、モデル読み込み直後・スライダー変更時・受信時に呼ばれる
 function applyTransform(t) {
   if (localVrm) {
-    localVrm.scene.position.set(t.posX + autoHostSlotOffsetX, t.posY, t.posZ);
-    localVrm.scene.rotation.y = VRM_FRONT_YAW_RAD + t.yaw * Math.PI / 180;
-    localVrm.scene.scale.setScalar(t.scale);
+    // マルチアバター配置（要件1〜3）: 自分自身の見た目もcallState.peers内の他ピアと
+    // 同じスロット/向き/倍率のモデルで管理する（myAvatarLayout定義部参照）。
+    // CALL_SLOT_OFFSET_X/computeCallFacingYawは「マルチユーザー通話」セクションで
+    // 定義される（この関数は呼び出し時点では既に初期化済みであることを前提にする）。
+    var mySlotX = CALL_SLOT_OFFSET_X[myAvatarLayout.slot] || 0;
+    var myPosX = t.posX + mySlotX;
+    localVrm.scene.position.set(myPosX, t.posY, t.posZ);
+    var myBaseYaw = (myAvatarLayout.facing === 'camera')
+      ? computeCallFacingYaw(myPosX, t.posZ)
+      : VRM_FRONT_YAW_RAD;
+    localVrm.scene.rotation.y = myBaseYaw + t.yaw * Math.PI / 180;
+    localVrm.scene.scale.setScalar(t.scale * (myAvatarLayout.scale || 1));
   }
   if (camera) {
     // initScene()の初期カメラ位置と同じY/lookAtを使用し、Controller/Displayで
@@ -869,6 +882,10 @@ function sendTransformUpdate(force) {
   payload.callRoomId = (typeof callState !== 'undefined' && callState.roomId) || '';
   payload.callParentPeerId = (typeof callState !== 'undefined' && callState.myPeerId) || '';
   payload.callParentIsHost = !!(typeof callState !== 'undefined' && callState.isHost);
+  // マルチアバター配置: 自分自身のスロット/向き/倍率（myAvatarLayout）もDisplay側へ
+  // 便乗させる。Display側のlocalVrmはHTTP経由で独立に読み込まれる別インスタンスのため、
+  // 見た目（位置・向き・拡大率）を一致させるにはこの値の同期が必要。
+  if (typeof myAvatarLayout !== 'undefined') payload.myAvatarLayout = myAvatarLayout;
   ws.send(JSON.stringify(payload));
 }
 
@@ -876,6 +893,9 @@ function onTransformUpdateReceived(data) {
   TRANSFORM_SLIDERS.forEach(function(cfg) {
     if (typeof data[cfg.key] === 'number') vrmTransform[cfg.key] = data[cfg.key];
   });
+  if (data.myAvatarLayout && typeof myAvatarLayout !== 'undefined') {
+    Object.assign(myAvatarLayout, data.myAvatarLayout);
+  }
   applyTransform(vrmTransform);
   saveTransformToLocalStorage(); // Display側でも次回起動用に保存しておく
 
@@ -1882,7 +1902,26 @@ function connectWsWatchdog() {
 var CALL_MAX_PARTICIPANTS   = 8;
 var CALL_POSE_SEND_INTERVAL_MS = 33; // 約30Hz
 var CALL_VRM_UPLOAD_MIN_INTERVAL_MS = 2000; // 短時間にroster更新が連続してもアップロードし過ぎないようにする
-var CALL_SLOT_OFFSET_X = { left: -0.6, center: 0, right: 0.6 };
+// 要件1・2: 位置スロットを中央＋左右4段ずつの9種類に拡張（旧: left/center/rightの3種類）。
+// 0.6刻みは既存の2人自動横並び配置（left1/right1 = 旧left/right）と同じ間隔を踏襲した。
+var CALL_SLOT_OFFSET_X = {
+  center: 0,
+  left1: -0.6,  left2: -1.2,  left3: -1.8,  left4: -2.4,
+  right1: 0.6,  right2: 1.2,  right3: 1.8,  right4: 2.4
+};
+
+// 要件2（向き: 「カメラ向き (Look at Camera)」）: カメラは常に(0, y, camDistance)付近に
+// 固定されている（initScene()/applyTransform()参照）ため、任意の(posX,posZ)からその位置を
+// 向くyawを算出する。VRM_FRONT_YAW_RAD（中央・無補正時に正面を向く基準角）と結果が
+// 一致するよう導出した: three.jsのY軸回転では無回転時の前方向(0,0,-1)を角度θ回転させると
+// (-sinθ,-cosθ)になる。これがカメラ方向の単位ベクトル(dx,dz)と一致するθを逆算すると
+// θ=atan2(-dx,-dz)、dx=camera.x-posX・dz=camera.z-posZより
+// θ=atan2(posX-camera.x, posZ-camera.z)となる（posX=posZ=0・camera.x=0の場合、
+// atan2(0, -camDistance)=Math.PI=VRM_FRONT_YAW_RADと一致することで検算済み）。
+function computeCallFacingYaw(posX, posZ) {
+  if (!camera) return VRM_FRONT_YAW_RAD;
+  return Math.atan2(posX - camera.position.x, posZ - camera.position.z);
+}
 
 // WAN公開対応（セキュリティレベル設定）: ホストのjoin_request判定ロジックを切り替える
 // （handleRoomControl()のjoin_request分岐参照）。ホストのUI操作でのみ変更され、
@@ -1911,6 +1950,12 @@ var callState = {
   // ゲストのみ: 現在の参加試行で使った招待コード（callJoinRoom()参照）。approve/reject
   // 受信時にセッショントークンをlocalStorageへ保存/破棄するためのキーとして使う。
   myJoinInviteCode: null,
+  // ゲストのみ: ロースターのmembers[0]（applyRosterUpdate()参照。ホストのみが
+  // broadcastRoster()を呼ぶため、members[0]は常に実際のホスト本人のpeerIdになる）から
+  // 判明する「実際のルームホストのpeerId」。recomputeAutoCallLayout()が人数別デフォルト
+  // 配置（要件1）を計算する際、「ロースター中のどのピアがホスト用スロットに入るべきか」を
+  // 判定するために使う。
+  hostPeerId: null,
   peers: {},            // peerId -> CallPeer
   // Displayモードのshadow join専用。attemptShadowJoin()参照。
   // 「自分（ローカル操作者）の分身」であるピアのIDを覚えておき、そのピア経由で届く
@@ -1952,7 +1997,12 @@ function makeCallPeer(peerId, displayName, isShadow, shadowOfPeerId) {
     displayName: displayName || peerId,
     pendingBlobUrl: null,
     vrm: null,
-    layout: { slot: 'center', offsetX: 0, offsetY: 0, offsetZ: 0, scale: 1 },
+    // 要件1〜3: facing（'world'=正面固定 / 'camera'=カメラ向き）とautoSlot
+    // （trueの間はrecomputeAutoCallLayout()がslotを自動更新、手動選択されるとfalseに
+    // なり以後は自動再配置の対象から外れる）を追加。offsetX/Y/Zは既存の細かい微調整用
+    // フィールドとして維持するが、新設の「メンバー別レイアウト調整UI」からは
+    // slot/facing/scaleのみを操作する。
+    layout: { slot: 'center', offsetX: 0, offsetY: 0, offsetZ: 0, scale: 1, facing: 'world', autoSlot: true },
     lastPoseRig: null,
     // 不具合3対策: このピアが「誰かのDisplay分身（shadow join）」かどうか、
     // および分身であれば本体（shadowOfPeerId）を全クライアントが判別できるようにする
@@ -2183,7 +2233,8 @@ function leaveCallRoom() {
   callState.knownSessionTokens = {};
   callState.shadowParentPeerId = null;
   callState.localIsHost = false;
-  autoHostSlotOffsetX = 0;
+  callState.hostPeerId = null;
+  myAvatarLayout = { slot: 'center', facing: 'world', scale: 1, autoSlot: true };
   applyTransform(vrmTransform);
   hideCallRoomUi();
   setCallStatus('ルームから退出しました。');
@@ -2255,6 +2306,10 @@ function broadcastRoster() {
 }
 
 function applyRosterUpdate(msg) {
+  // 要件1: members[0]は常に実際のルームホスト本人（broadcastRoster()を呼べるのは
+  // ホストのみで、その先頭要素は常に呼び出し元＝ホスト自身のエントリのため）。
+  // recomputeAutoCallLayout()の人数別デフォルト配置判定に使う。
+  if (msg.members && msg.members[0]) callState.hostPeerId = msg.members[0].peerId;
   var seen = {};
   var newPeerIds = [];
   (msg.members || []).forEach(function(m) {
@@ -2796,16 +2851,21 @@ function applyCallPeerLayout(peer) {
   if (!peer.vrm) return;
   var l = peer.layout;
   var slotX = CALL_SLOT_OFFSET_X[l.slot] || 0;
-  peer.vrm.scene.position.set(slotX + l.offsetX, l.offsetY, l.offsetZ);
-  // 通話相手のアバターにはyaw調整UIが無いため、正面補正（VRM_FRONT_YAW_RAD、現在はMath.PI）を
-  // 固定で適用する（applyTransform()と同じ補正。VRM_FRONT_YAW_RAD定義部のコメント参照）。
-  peer.vrm.scene.rotation.y = VRM_FRONT_YAW_RAD;
+  var posX = slotX + (l.offsetX || 0);
+  var posZ = l.offsetZ || 0;
+  peer.vrm.scene.position.set(posX, l.offsetY || 0, posZ);
+  // 要件2（向き）: 'camera'なら実際にこのピアの位置からカメラを見るyawを計算し、
+  // それ以外（既定'world'）は従来通り正面固定（VRM_FRONT_YAW_RAD）を適用する。
+  peer.vrm.scene.rotation.y = (l.facing === 'camera') ? computeCallFacingYaw(posX, posZ) : VRM_FRONT_YAW_RAD;
   peer.vrm.scene.scale.setScalar(l.scale || 1);
 }
 
 function updateCallPeerLayout(peerId, partial) {
   var peer = callState.peers[peerId];
   if (!peer) return;
+  // 要件2: UIからslotを明示的に選び直した場合、以後recomputeAutoCallLayout()による
+  // 自動再配置の対象から外す（手動調整を尊重する）。
+  if (partial.slot !== undefined) partial.autoSlot = false;
   Object.assign(peer.layout, partial);
   applyCallPeerLayout(peer);
   if (callState.isHost) sendRoomControl({ action: 'layout_update', targetPeerId: peerId, layout: peer.layout });
@@ -2834,30 +2894,74 @@ function realCallPeerIds() {
 // 中央（0）に戻す。ユーザーが相手側のスロットを手動変更済み（'center'以外、またはoffsetXが
 // 0以外）の場合はそれを尊重し、自動割り当てで上書きしない。
 // renderCallParticipantsList()から、参加者構成が変わるたびに呼ばれる。
-function recomputeAutoCallLayout() {
-  var peerIds = realCallPeerIds();
-  if (peerIds.length !== 1) {
-    if (autoHostSlotOffsetX !== 0) { autoHostSlotOffsetX = 0; applyTransform(vrmTransform); }
-    return;
+// 要件1: 参加人数（自分＋realCallPeerIds()）に応じたホストの既定スロットを返す。
+// 1人=中央／2人=left1／3人=中央／4人=left1／5人以上=中央（ゲスト側を左右交互に広げる）。
+function defaultHostSlotForCount(n) {
+  if (n === 1 || n === 3) return 'center';
+  return 'left1'; // 2人・4人・5人以上
+}
+
+// 要件1: ホスト以外の参加者（自分がホストならゲスト全員、自分がゲストならホスト以外の
+// 全員＝自分自身を含む）に、canonical order（後述）で順番に割り当てる既定スロット一覧。
+function defaultGuestSlotsForCount(n) {
+  if (n === 1) return [];
+  if (n === 2) return ['right1'];
+  if (n === 3) return ['left1', 'right1'];
+  if (n === 4) return ['right1', 'left2', 'right2'];
+  // 5人以上: ホストは中央のため、ゲストはleft1,right1,left2,right2,...の順で外側へ
+  // 広がる（中央から左右交互）。スロットは左右4段までしか無いため、それを超える人数は
+  // 最後のスロット（right4）へ重ねる（8人上限＝ホスト含め最大9スロット中8ゲストなので
+  // 通常到達しないが、念のための保険）。
+  var slots = [];
+  var guestCount = n - 1;
+  for (var i = 0; slots.length < guestCount; i++) {
+    var side = (i % 2 === 0) ? 'left' : 'right';
+    var idx = Math.min(Math.floor(i / 2) + 1, 4);
+    slots.push(side + idx);
   }
-  var onlyPeer = callState.peers[peerIds[0]];
+  return slots;
+}
+
+// 要件1〜3: 参加人数に応じたデフォルト配置（人数別デフォルト配置ロジック）と、
+// ホスト・各ゲストが個別に手動調整したslot（autoSlot: false）を尊重した自動再配置。
+// 「誰が“ホスト用スロット”に入るべきか」はcallState.hostPeerId（applyRosterUpdate()参照、
+// ロースターのmembers[0]＝常に実際のホスト本人）で判定する。「ホスト以外の参加者」への
+// スロット割り当ては、どのクライアント（ホスト自身／各ゲスト）から計算しても同じ結果に
+// なるよう、peerIdを辞書順ソートしたcanonical orderに基づいて行う（自分自身のpeerIdも
+// この順序へ混ぜて自分の番号を求める）。
+function recomputeAutoCallLayout() {
+  var peerIds = realCallPeerIds(); // 自分以外の「本当の別人」全員
   var iAmHost = isLocalOperatorHost();
-  var wantHostSlotX = iAmHost ? CALL_SLOT_OFFSET_X.left : CALL_SLOT_OFFSET_X.right;
-  if (autoHostSlotOffsetX !== wantHostSlotX) {
-    autoHostSlotOffsetX = wantHostSlotX;
+  var hostPeerId = iAmHost ? callState.myPeerId : callState.hostPeerId;
+
+  var nonHostIds = peerIds.filter(function(id) { return id !== hostPeerId; });
+  if (!iAmHost) nonHostIds.push(callState.myPeerId);
+  nonHostIds.sort();
+
+  var totalCount = nonHostIds.length + 1; // ホスト込みの総人数
+  var hostSlot = defaultHostSlotForCount(totalCount);
+  var guestSlots = defaultGuestSlotsForCount(totalCount);
+
+  // 自分自身のスロットを適用する（手動調整済み＝autoSlot:falseなら触らない）
+  var mySlot = iAmHost ? hostSlot : (guestSlots[nonHostIds.indexOf(callState.myPeerId)] || 'center');
+  if (myAvatarLayout.autoSlot && myAvatarLayout.slot !== mySlot) {
+    myAvatarLayout.slot = mySlot;
     applyTransform(vrmTransform);
   }
-  var untouched = onlyPeer.layout.slot === 'center' && onlyPeer.layout.offsetX === 0;
-  if (untouched) {
-    var wantPeerSlot = iAmHost ? 'right' : 'left';
-    if (onlyPeer.layout.slot !== wantPeerSlot) {
-      onlyPeer.layout.slot = wantPeerSlot;
-      applyCallPeerLayout(onlyPeer);
+
+  // 各ピアのスロットを適用する（手動調整済みのピアはスキップ）
+  peerIds.forEach(function(peerId) {
+    var peer = callState.peers[peerId];
+    if (!peer.layout.autoSlot) return;
+    var wantSlot = (peerId === hostPeerId) ? hostSlot : (guestSlots[nonHostIds.indexOf(peerId)] || 'center');
+    if (peer.layout.slot !== wantSlot) {
+      peer.layout.slot = wantSlot;
+      applyCallPeerLayout(peer);
       if (callState.isHost) {
-        sendRoomControl({ action: 'layout_update', targetPeerId: onlyPeer.peerId, layout: onlyPeer.layout });
+        sendRoomControl({ action: 'layout_update', targetPeerId: peerId, layout: peer.layout });
       }
     }
-  }
+  });
 }
 
 // ── 退出・キック時のクリーンアップ（メモリ完全破棄） ──────────────────────
@@ -2921,11 +3025,87 @@ function renderCallWaitingList() {
   });
 }
 
+// 要件2: 位置(9スロット)・向き(2種)・拡大率(スライダー)の3項目を持つレイアウト調整UIの
+// 行を1つ生成する共通ヘルパー。ホスト自身の行・各ゲストの行の両方から呼ばれる
+// （onChangeに渡す関数だけが呼び出し元ごとに異なる）。
+var CALL_SLOT_LABELS = [
+  ['center', '中央'],
+  ['left1', '左1'], ['left2', '左2'], ['left3', '左3'], ['left4', '左4'],
+  ['right1', '右1'], ['right2', '右2'], ['right3', '右3'], ['right4', '右4']
+];
+var CALL_FACING_LABELS = [
+  ['world', '正面 (World Forward)'],
+  ['camera', 'カメラ向き (Look at Camera)']
+];
+function buildLayoutControlsRow(layout, onChange) {
+  var layoutRow = document.createElement('div'); layoutRow.className = 'uiRow';
+
+  var slotSelect = document.createElement('select'); slotSelect.className = 'callSlotSelect';
+  slotSelect.title = '位置';
+  CALL_SLOT_LABELS.forEach(function(pair) {
+    var opt = document.createElement('option'); opt.value = pair[0]; opt.textContent = pair[1];
+    if (layout.slot === pair[0]) opt.selected = true;
+    slotSelect.appendChild(opt);
+  });
+  slotSelect.addEventListener('change', function() { onChange({ slot: slotSelect.value }); });
+  layoutRow.appendChild(slotSelect);
+
+  var facingSelect = document.createElement('select'); facingSelect.className = 'callFacingSelect';
+  facingSelect.title = '向き';
+  CALL_FACING_LABELS.forEach(function(pair) {
+    var opt = document.createElement('option'); opt.value = pair[0]; opt.textContent = pair[1];
+    if ((layout.facing || 'world') === pair[0]) opt.selected = true;
+    facingSelect.appendChild(opt);
+  });
+  facingSelect.addEventListener('change', function() { onChange({ facing: facingSelect.value }); });
+  layoutRow.appendChild(facingSelect);
+
+  var scaleSlider = document.createElement('input');
+  scaleSlider.type = 'range'; scaleSlider.className = 'callScaleSlider';
+  scaleSlider.min = '0.5'; scaleSlider.max = '2'; scaleSlider.step = '0.05';
+  scaleSlider.value = layout.scale || 1;
+  scaleSlider.title = 'サイズ倍率';
+  var scaleLabel = document.createElement('span'); scaleLabel.className = 'transformVal';
+  scaleLabel.textContent = Number(layout.scale || 1).toFixed(2) + 'x';
+  scaleSlider.addEventListener('input', function() {
+    scaleLabel.textContent = Number(scaleSlider.value).toFixed(2) + 'x';
+  });
+  scaleSlider.addEventListener('change', function() { onChange({ scale: parseFloat(scaleSlider.value) }); });
+  layoutRow.appendChild(scaleSlider);
+  layoutRow.appendChild(scaleLabel);
+
+  return layoutRow;
+}
+
 function renderCallParticipantsList() {
-  recomputeAutoCallLayout(); // 参加者構成が変わるたびに自動横並び配置（不具合3対策）を再計算する
+  recomputeAutoCallLayout(); // 参加者構成が変わるたびに自動横並び配置（要件1）を再計算する
   var container = document.getElementById('callParticipantsList');
   if (!container) return;
   container.innerHTML = '';
+
+  // 要件2: ホスト自身（localVrm）の行。調整UIはホストのみに表示する（ゲストは自分の
+  // 見た目を従来通り「位置・画角調整」パネルの範囲で調整する設計のまま変更していない）。
+  if (callState.isHost) {
+    var hostRow = document.createElement('div'); hostRow.className = 'callParticipantRow';
+    var hostNameRow = document.createElement('div'); hostNameRow.className = 'uiRow';
+    var hostNameSpan = document.createElement('span');
+    hostNameSpan.className = 'callParticipantName callBadgeConnected';
+    hostNameSpan.textContent = (callState.myDisplayName || 'ホスト') + '（自分）';
+    hostNameRow.appendChild(hostNameSpan);
+    hostRow.appendChild(hostNameRow);
+    hostRow.appendChild(buildLayoutControlsRow(myAvatarLayout, function(partial) {
+      // 要件2: slotを明示的に選び直したら以後recomputeAutoCallLayout()による自動再配置の
+      // 対象から外す（updateCallPeerLayout()の同種のガードと同じ考え方）。
+      if (partial.slot !== undefined) myAvatarLayout.autoSlot = false;
+      Object.assign(myAvatarLayout, partial);
+      applyTransform(vrmTransform);
+      // 要件3: Display側（別インスタンスのlocalVrm）へも即座に反映させる
+      // （myAvatarLayoutはvrm_transform_updateに便乗して送られる。sendTransformUpdate参照）。
+      sendTransformUpdate(true);
+    }));
+    container.appendChild(hostRow);
+  }
+
   realCallPeerIds().forEach(function(peerId) {
     var peer = callState.peers[peerId];
     var row = document.createElement('div');
@@ -2951,31 +3131,12 @@ function renderCallParticipantsList() {
     }
     row.appendChild(nameRow);
 
+    // 要件2: メンバー別レイアウト調整UI（Controllerモード＝ホストのみ操作可能。
+    // updateCallPeerLayout()がlayout_updateをブロードキャストする権限もホスト限定のため）。
     if (callState.isHost) {
-      var layoutRow = document.createElement('div'); layoutRow.className = 'uiRow';
-      var slotSelect = document.createElement('select'); slotSelect.className = 'callSlotSelect';
-      [['left', '左'], ['center', '中央'], ['right', '右']].forEach(function(pair) {
-        var opt = document.createElement('option'); opt.value = pair[0]; opt.textContent = pair[1];
-        if (peer.layout.slot === pair[0]) opt.selected = true;
-        slotSelect.appendChild(opt);
-      });
-      slotSelect.addEventListener('change', function() { updateCallPeerLayout(peerId, { slot: slotSelect.value }); });
-      layoutRow.appendChild(slotSelect);
-
-      ['offsetX', 'offsetY', 'offsetZ', 'scale'].forEach(function(key) {
-        var inp = document.createElement('input');
-        inp.type = 'number'; inp.className = 'callOffsetInput'; inp.step = '0.05';
-        inp.value = peer.layout[key];
-        inp.title = key;
-        inp.addEventListener('change', function() {
-          var v = parseFloat(inp.value);
-          if (isNaN(v)) return;
-          var partial = {}; partial[key] = v;
-          updateCallPeerLayout(peerId, partial);
-        });
-        layoutRow.appendChild(inp);
-      });
-      row.appendChild(layoutRow);
+      row.appendChild(buildLayoutControlsRow(peer.layout, function(partial) {
+        updateCallPeerLayout(peerId, partial);
+      }));
     }
 
     container.appendChild(row);
