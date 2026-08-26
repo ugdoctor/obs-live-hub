@@ -37,4 +37,6 @@ data/user_settings.json
 
 # Claude Code & AI management files
 CLAUDE*.md
+GETTING_STARTED.md
+RELEASE_CHECKLIST.md
 ai_logs/
