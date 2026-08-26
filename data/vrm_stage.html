@@ -463,8 +463,13 @@ var WS_PORT      = 8765;
 // 一切到達できずタイムアウトしていた（ゲスト側にWebSocketログが一切出ない症状と一致）。
 // 実際にページへアクセスしてきたホスト（window.location.host、例: 192.168.1.35:8765）を
 // 優先して使い、file://等でhostが取得できない場合のみ127.0.0.1:WS_PORTへフォールバックする。
+// グローバル(WAN)公開対応: リバースプロキシ等でHTTPS配信された場合、httpで固定していると
+// Mixed Content（HTTPSページからのhttp fetch）としてブラウザにブロックされる。
+// window.location.protocolに合わせてhttp/httpsを動的に切り替える（127.0.0.1フォールバック時は
+// ローカル環境のみを想定しているため常にhttpのままでよい）。
+var HTTP_PROTOCOL = window.location.protocol === 'https:' ? 'https:' : 'http:';
 var HTTP_BASE    = window.location.host
-  ? ('http://' + window.location.host)
+  ? (HTTP_PROTOCOL + '//' + window.location.host)
   : ('http://127.0.0.1:' + WS_PORT);
 var VRM_MODEL_URL = HTTP_BASE + '/vrm/model';
 
@@ -1564,8 +1569,12 @@ function initVmcWatchdog() {
 
 // HTTP_BASE定義部のコメント参照: 同じ理由でWebSocket接続先もwindow.location.hostを
 // 優先し、127.0.0.1固定によるLAN内別PCからの接続失敗を防ぐ。
+// グローバル(WAN)公開対応: ページがhttps:で配信されている場合、ブラウザはHTTPSページから
+// 非TLSのws://への接続をMixed Contentとしてブロックするため、window.location.protocolに
+// 合わせてws/wssを動的に切り替える（127.0.0.1フォールバック時は常にwsのままでよい）。
+var WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 var WS_URL = window.location.host
-  ? ('ws://' + window.location.host)
+  ? (WS_PROTOCOL + '//' + window.location.host)
   : ('ws://127.0.0.1:' + WS_PORT);
 var ws = null;
 var lastPoseSendTime = 0;
