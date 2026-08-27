@@ -296,9 +296,12 @@ html.mode-display #uiToggleTab {
 <div id="uiPanel">
   <h1>VRM Stage（Controller / Display 連携）
     <!-- ビルド反映確認用バッジ: ブラウザのスーパーリロード無しでも最新版のHTMLが
-         読み込まれているか目視確認できるようにする。今後この行を変更するたびに
-         値も更新すること（形式: vYYYY.MM.DD-HHmm、変更を加えた日時）。 -->
-    <span style="font-size:11px; opacity:0.7; background:#333; padding:2px 6px; border-radius:4px; vertical-align:middle;">v2026.08.27-0200</span>
+         読み込まれているか目視確認できるようにする。プラグイン本体のバージョン
+         （buildspec.jsonの"version"）と合わせる運用に変更した（2026-08-28、
+         v3.9.0先行テストリリースより）。それ以前はvYYYY.MM.DD-HHmm形式のビルド
+         日時タグを使っていた。以後、プラグインのバージョンを上げるたびにこの値も
+         合わせて更新すること。 -->
+    <span style="font-size:11px; opacity:0.7; background:#333; padding:2px 6px; border-radius:4px; vertical-align:middle;">v3.9.0</span>
   </h1>
 
   <div id="dropZone">
