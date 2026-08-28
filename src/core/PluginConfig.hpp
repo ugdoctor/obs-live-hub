@@ -51,11 +51,11 @@ public:
 	std::string twitchClientId;
 
 	// WebSocket
-	int wsPort = 8765;
+	int wsPort = 28765;
 
 	// VMC（VSeeFace等の外部トラッキングソフトからのOSC over UDP受信、vrm_stage.html用）
 	bool vmcEnabled = true;
-	int  vmcPort    = 39539;
+	int  vmcPort    = 39540;
 
 	// オーバーレイ外観設定
 	int overlayWidth  = 400;

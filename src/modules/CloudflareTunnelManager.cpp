@@ -67,7 +67,7 @@ bool CloudflareTunnelManager::isInstalled()
 	return QFileInfo::exists(exePath());
 }
 
-CloudflareTunnelManager::CloudflareTunnelManager(QObject *parent) : QObject(parent)
+CloudflareTunnelManager::CloudflareTunnelManager(QObject *parent) : QObject(parent), process_(nullptr)
 {
 	status_ = isInstalled() ? Status::Stopped : Status::NotInstalled;
 }
@@ -81,12 +81,12 @@ CloudflareTunnelManager::~CloudflareTunnelManager()
 	cancelDownload();
 }
 
-void CloudflareTunnelManager::setStatus(Status s)
+void CloudflareTunnelManager::setStatus(Status s, const QString &message)
 {
-	if (status_ == s)
+	if (status_ == s && message.isEmpty())
 		return;
 	status_ = s;
-	emit statusChanged(s);
+	emit statusChanged(s, message);
 }
 
 bool CloudflareTunnelManager::isRunning() const
@@ -297,6 +297,11 @@ void CloudflareTunnelManager::cancelDownload()
 
 void CloudflareTunnelManager::startTunnel(uint16_t localPort)
 {
+	obs_log(LOG_INFO,
+		"[%s] startTunnel() called (localPort=%u, isRunning=%d, isInstalled=%d, status=%d)", CFTAG,
+		static_cast<unsigned>(localPort), static_cast<int>(isRunning()), static_cast<int>(isInstalled()),
+		static_cast<int>(status_));
+
 	if (isRunning()) {
 		obs_log(LOG_WARNING, "[%s] startTunnel: 既に起動中です", CFTAG);
 		return;
@@ -304,6 +309,12 @@ void CloudflareTunnelManager::startTunnel(uint16_t localPort)
 	if (!isInstalled()) {
 		obs_log(LOG_WARNING, "[%s] startTunnel: cloudflared.exeが未配置です", CFTAG);
 		return;
+	}
+
+	if (process_) {
+		// 実行中ではないが古いQProcessインスタンスが残っている場合に備え、
+		// 新規プロセス生成前に確実にクリーンアップする。
+		stopTunnel();
 	}
 
 	publicUrl_.clear();
@@ -332,16 +343,27 @@ void CloudflareTunnelManager::startTunnel(uint16_t localPort)
 
 void CloudflareTunnelManager::stopTunnel()
 {
-	if (!process_)
+	if (!process_) {
+		setStatus(isInstalled() ? Status::Stopped : Status::NotInstalled);
 		return;
+	}
+
+	// シグナルの二重発火・再帰呼び出しを防ぐため全切断する。
+	// （waitForFinished()はイベントループを回すため、切断しないままだとその最中に
+	// finished/errorOccurredシグナルが配送されonProcessFinished()等が同期的に
+	// 呼ばれてしまう。onProcessFinished()はprocess_をdeleteLater()した上でnullptr化
+	// するため、waitForFinished()から戻った直後にこの関数がprocess_へ再度アクセス
+	// すると、既に破棄予約済み・nullptr化されたポインタを操作しAccess Violationに
+	// つながる）
+	process_->disconnect(this);
 
 	if (process_->state() != QProcess::NotRunning) {
 		obs_log(LOG_INFO, "[%s] cloudflaredプロセスを終了します", CFTAG);
 		process_->terminate();
-		if (!process_->waitForFinished(3000)) {
+		if (!process_->waitForFinished(2000)) {
 			obs_log(LOG_WARNING, "[%s] terminate()がタイムアウトしたためkill()します", CFTAG);
 			process_->kill();
-			process_->waitForFinished(2000);
+			process_->waitForFinished(1000);
 		}
 	}
 
@@ -384,7 +406,7 @@ void CloudflareTunnelManager::handleOutputChunk(const QString &chunk)
 				publicUrl_ = m.captured(0);
 				obs_log(LOG_INFO, "[%s] トンネルURLを検出しました: %s", CFTAG,
 					publicUrl_.toUtf8().constData());
-				setStatus(Status::Published);
+				setStatus(Status::Published, publicUrl_);
 				emit urlResolved(publicUrl_);
 			}
 		}
@@ -394,6 +416,10 @@ void CloudflareTunnelManager::handleOutputChunk(const QString &chunk)
 void CloudflareTunnelManager::onProcessErrorOccurred(QProcess::ProcessError error)
 {
 	obs_log(LOG_WARNING, "[%s] cloudflaredプロセスエラー: %d", CFTAG, static_cast<int>(error));
+	// enumにErrorという専用状態は設けず（NotInstalled/Stopped/Starting/Publishedで
+	// 実運用上十分に状態を表現できるため）、messageでエラー内容をUI側へ伝える。
+	// 現在の状態自体は変えない（setStatus()はmessage付きなら状態不変でもemitする）。
+	setStatus(status_, QStringLiteral("cloudflaredプロセスエラー (code=%1)").arg(static_cast<int>(error)));
 }
 
 void CloudflareTunnelManager::onProcessFinished(int exitCode, QProcess::ExitStatus exitStatus)
@@ -405,5 +431,8 @@ void CloudflareTunnelManager::onProcessFinished(int exitCode, QProcess::ExitStat
 		process_->deleteLater();
 		process_ = nullptr;
 	}
-	setStatus(isInstalled() ? Status::Stopped : Status::NotInstalled);
+	const QString message = (exitStatus == QProcess::CrashExit || exitCode != 0)
+					 ? QStringLiteral("cloudflaredが異常終了しました (exitCode=%1)").arg(exitCode)
+					 : QString();
+	setStatus(isInstalled() ? Status::Stopped : Status::NotInstalled, message);
 }

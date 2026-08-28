@@ -26,6 +26,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #endif
 #include <windows.h>
 #include <winhttp.h>
+#include <tlhelp32.h>
 #endif
 
 #include <string>
@@ -237,6 +238,36 @@ static void launchSpeakerCheck(const std::string &engineName, const std::string 
 	Q_UNUSED(maxSeconds)
 #endif
 }
+
+// 実行中プロセス一覧から指定した実行ファイル名（大文字小文字を区別しない）が
+// 存在するかを調べる。棒読みちゃんが自プラグイン以外の経路（ユーザーが手動起動・
+// OBS起動前から常駐等）で既に起動済みかを検出するために使う
+// （s_processesはこのプラグインが自分でstart()したQProcessしか把握できないため、
+// 外部プロセスの検出にはOS側のプロセス一覧を見る必要がある）。
+#ifdef _WIN32
+static bool isProcessRunningByExeName(const wchar_t *exeName)
+{
+	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (hSnapshot == INVALID_HANDLE_VALUE)
+		return false;
+
+	PROCESSENTRY32W pe = {};
+	pe.dwSize = sizeof(pe);
+
+	bool found = false;
+	if (Process32FirstW(hSnapshot, &pe)) {
+		do {
+			if (_wcsicmp(pe.szExeFile, exeName) == 0) {
+				found = true;
+				break;
+			}
+		} while (Process32NextW(hSnapshot, &pe));
+	}
+
+	CloseHandle(hSnapshot);
+	return found;
+}
+#endif
 
 // 棒読みちゃん HTTP サーバーへの疎通確認（GET / を送り、レスポンスが来ればOK）
 #ifdef _WIN32
@@ -457,10 +488,16 @@ void EngineManager::startAll()
 		}
 		anyStarted = true;
 
+		// s_processesは自プラグインがstart()したQProcessしか把握できないため、
+		// ユーザーが手動起動・OBS起動前から常駐している等の外部プロセスも
+		// CreateToolhelp32Snapshotによる実プロセス一覧確認で検出する
+		// （これが無いと、棒読みちゃん側の多重起動ダイアログ
+		// 「すでに起動してるっぽいdesu☆」が表示されてしまう）。
 		const bool alreadyLaunched =
-			s_processes.count("bouyomi") > 0 &&
-			s_processes.at("bouyomi") != nullptr &&
-			s_processes.at("bouyomi")->state() != QProcess::NotRunning;
+			(s_processes.count("bouyomi") > 0 &&
+			 s_processes.at("bouyomi") != nullptr &&
+			 s_processes.at("bouyomi")->state() != QProcess::NotRunning) ||
+			isProcessRunningByExeName(L"BouyomiChan.exe");
 
 		bool doAutoStart = false;
 		if (cfg.bouyomiAutoStart) {
@@ -469,7 +506,7 @@ void EngineManager::startAll()
 				        "[EngineManager] bouyomi auto-start: path not set, skipping");
 			} else if (alreadyLaunched) {
 				obs_log(LOG_INFO,
-				        "[EngineManager] bouyomi auto-start: already running, skipping launch");
+				        "[EngineManager] bouyomi auto-start: already running (detected via process list), skipping launch");
 			} else {
 				obs_log(LOG_INFO, "[EngineManager] bouyomi auto-start: launching %s",
 				        cfg.bouyomiExePath.c_str());

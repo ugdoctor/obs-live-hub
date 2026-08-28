@@ -73,13 +73,16 @@ public:
 	void stopTunnel();
 
 	Status status() const { return status_; }
+	// status()の別名（呼び出し側の可読性向上のため用意。意味は同一）。
+	Status getStatus() const { return status_; }
 	QString publicUrl() const { return publicUrl_; }
 	bool isRunning() const;
 
 signals:
 	void downloadProgress(qint64 received, qint64 total);
 	void downloadFinished(bool success, const QString &errorMessage);
-	void statusChanged(CloudflareTunnelManager::Status status);
+	// messageは状態遷移の付随情報（公開URL・エラー内容等）。無い場合は空文字列。
+	void statusChanged(CloudflareTunnelManager::Status status, const QString &message);
 	void urlResolved(const QString &url);
 	// 生の標準出力/標準エラー行（診断表示用）。
 	void logLine(const QString &line);
@@ -91,7 +94,7 @@ private slots:
 	void onProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
 
 private:
-	void setStatus(Status s);
+	void setStatus(Status s, const QString &message = QString());
 	void handleOutputChunk(const QString &chunk);
 
 	QProcess *process_ = nullptr;

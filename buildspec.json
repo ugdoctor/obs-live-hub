@@ -38,7 +38,7 @@
     },
     "name": "obs-live-hub",
     "displayName": "OBS Live Hub",
-    "version": "3.9.0",
+    "version": "0.4.0",
     "author": "ugdoctor",
     "website": "https://example.com",
     "email": "me@example.com"

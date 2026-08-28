@@ -43,8 +43,9 @@ private slots:
 	void onCopyUrlClicked();
 	void onCopyInviteLinkClicked();
 	void onOpenControllerClicked();
+	void onResolveConflictClicked();
 
-	void onTunnelStatusChanged(CloudflareTunnelManager::Status status);
+	void onTunnelStatusChanged(CloudflareTunnelManager::Status status, const QString &message);
 	void onTunnelUrlResolved(const QString &url);
 	void onDownloadProgress(qint64 received, qint64 total);
 	void onDownloadFinished(bool success, const QString &errorMessage);
@@ -56,6 +57,8 @@ private:
 	WsServer *wsServer_;
 
 	QLabel *statusLabel_;
+	// 直近のstatusChanged()付随メッセージ（エラー内容・公開URL等）。エラー時のみ画面表示する。
+	QString lastStatusMessage_;
 	QProgressBar *downloadProgress_;
 	QPushButton *setupBtn_;
 	QPushButton *startStopBtn_;
@@ -63,5 +66,6 @@ private:
 	QPushButton *copyUrlBtn_;
 	QPushButton *copyInviteLinkBtn_;
 	QPushButton *openControllerBtn_;
+	QPushButton *resolveConflictBtn_;
 	QLabel *hintLabel_;
 };

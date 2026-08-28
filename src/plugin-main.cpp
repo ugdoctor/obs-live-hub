@@ -2523,7 +2523,7 @@ bool obs_module_load(void)
 	// シグナルを受けてsetTunnelInfo()へ反映する（GET /vrm/tunnel_info・
 	// data/vrm_stage.html側の表示に使われる）。
 	QObject::connect(s_cloudflareTunnel, &CloudflareTunnelManager::statusChanged,
-			  [](CloudflareTunnelManager::Status status) {
+			  [](CloudflareTunnelManager::Status status, const QString &) {
 				  if (!s_wsServer || !s_cloudflareTunnel)
 					  return;
 				  const bool active = (status == CloudflareTunnelManager::Status::Published);
@@ -2585,6 +2585,12 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+	// WAN公開対応: cloudflared.exeはOBS本体とは別プロセスのため、他のクリーンアップより
+	// 先に確実にstopTunnel()を呼び、OBS終了後にcloudflared.exeがバックグラウンドへ
+	// 残留するのを防ぐ（後段の処理が失敗・長時間化しても、この呼び出しだけは必ず行われる）。
+	if (s_cloudflareTunnel)
+		s_cloudflareTunnel->stopTunnel();
+
 	obs_frontend_remove_event_callback(onFrontendEvent, nullptr);
 
 	EngineManager::stopAll();
@@ -2617,9 +2623,7 @@ void obs_module_unload(void)
 	}
 
 	if (s_cloudflareTunnel) {
-		// デストラクタ内でもstopTunnel()するが、OBS終了シーケンス中に確実に
-		// cloudflaredプロセスを終了させるためここでも明示的に呼ぶ。
-		s_cloudflareTunnel->stopTunnel();
+		// stopTunnel()は関数先頭で既に呼び出し済み（デストラクタでも念のため呼ばれる）。
 		delete s_cloudflareTunnel;
 		s_cloudflareTunnel = nullptr;
 	}

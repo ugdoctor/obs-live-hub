@@ -156,12 +156,32 @@ bool VmcReceiver::start()
 	addr.sin_addr.s_addr = htonl(INADDR_ANY);
 	addr.sin_port = htons(port_);
 
-	if (bind(sock_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-		const int wsaErr = WSAGetLastError();
+	// WsServer::start()と同じ理由（クラッシュ直後の再起動等で直前プロセスがまだ
+	// ポートを解放し切っていない一時的な競合）で、SO_REUSEADDRは使わず
+	// bind()を短い間隔で数回だけリトライする。
+	constexpr int  kBindMaxRetries   = 5;
+	constexpr DWORD kBindRetryDelayMs = 300;
+	int  bindErr = 0;
+	bool bound   = false;
+	for (int attempt = 0; attempt < kBindMaxRetries; ++attempt) {
+		if (bind(sock_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != SOCKET_ERROR) {
+			bound = true;
+			break;
+		}
+		bindErr = WSAGetLastError();
+		if (bindErr != WSAEADDRINUSE)
+			break;
+		obs_log(LOG_WARNING,
+			"[%s] bind() WSAEADDRINUSE (試行 %d/%d) — 直前のプロセスがUDP port %u を解放するのを"
+			"待って再試行します",
+			VMCTAG, attempt + 1, kBindMaxRetries, port_);
+		Sleep(kBindRetryDelayMs);
+	}
+	if (!bound) {
 		obs_log(LOG_ERROR,
 			"[%s] bind() FAILED: UDP port %u が使用できません (WSA=%d)。"
 			"VMC受信は無効のまま起動を続行します。",
-			VMCTAG, port_, wsaErr);
+			VMCTAG, port_, bindErr);
 		closesocket(sock_);
 		sock_ = INVALID_SOCKET;
 		return false;

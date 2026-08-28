@@ -123,7 +123,7 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent)
 	// ---- WebSocket ----
 	wsPortSpinBox_ = new QSpinBox(this);
 	wsPortSpinBox_->setRange(1024, 65535);
-	wsPortSpinBox_->setValue(8765);
+	wsPortSpinBox_->setValue(28765);
 	wsPortSpinBox_->setToolTip("OBS ブラウザソース用 WebSocket サーバーのポート番号");
 
 	openOverlayBtn_ = new QPushButton("オーバーレイ HTML を開く", this);

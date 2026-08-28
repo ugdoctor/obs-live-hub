@@ -951,13 +951,36 @@ bool WsServer::start()
 	addr.sin_addr.s_addr = htonl(INADDR_ANY);
 	addr.sin_port = htons(port_);
 
-	if (bind(listenSock_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-		const int wsaErr = WSAGetLastError();
+	// クラッシュ直後の再起動等、直前のOBSプロセスがまだ終了処理中でポートを
+	// 解放し切っていないタイミングでbind()するとWSAEADDRINUSE(10048)になり得る。
+	// SO_REUSEADDRでbind()自体を成功させる方式はWindowsではLISTEN中の別ソケットへの
+	// 同時bind()まで許してしまう「ポート乗っ取り」のリスクがあるため採用せず
+	// （直前セッションでSO_EXCLUSIVEADDRUSEを採用した経緯とも矛盾するため）、
+	// 実際にOSがポートを解放するまで短い間隔で数回だけリトライする。
+	constexpr int  kBindMaxRetries   = 5;
+	constexpr DWORD kBindRetryDelayMs = 300;
+	int  bindErr = 0;
+	bool bound   = false;
+	for (int attempt = 0; attempt < kBindMaxRetries; ++attempt) {
+		if (bind(listenSock_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != SOCKET_ERROR) {
+			bound = true;
+			break;
+		}
+		bindErr = WSAGetLastError();
+		if (bindErr != WSAEADDRINUSE)
+			break;
+		obs_log(LOG_WARNING,
+			"[%s] bind() WSAEADDRINUSE (試行 %d/%d) — 直前のプロセスがport %u を解放するのを待って"
+			"再試行します",
+			WSTAG, attempt + 1, kBindMaxRetries, port_);
+		Sleep(kBindRetryDelayMs);
+	}
+	if (!bound) {
 		obs_log(LOG_ERROR,
 			"[%s] bind() FAILED: port %u が別プロセスに占有されています (WSA=%d)。"
 			"コマンドプロンプトで「netstat -ano | findstr :%u」を実行してポートを"
 			"保持しているプロセスを確認してください。PCを再起動すると解消する場合があります。",
-			WSTAG, port_, wsaErr, port_);
+			WSTAG, port_, bindErr, port_);
 		closesocket(listenSock_);
 		listenSock_ = INVALID_SOCKET;
 		listenState_.store(ListenState::BindFailed);

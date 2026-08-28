@@ -10,5 +10,5 @@
   "youtube_refresh_token": "",
   "youtube_access_token": "",
   "youtube_token_expiry": 0,
-  "ws_port": 8765
+  "ws_port": 28765
 }

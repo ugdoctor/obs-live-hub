@@ -68,7 +68,7 @@ void PluginConfig::load()
 	// WebSocket
 	wsPort = static_cast<int>(obs_data_get_int(data, "ws_port"));
 	if (wsPort <= 0 || wsPort > 65535)
-		wsPort = 8765;
+		wsPort = 28765;
 
 	// VMC
 	if (obs_data_has_user_value(data, "vmc_enabled"))
@@ -76,7 +76,7 @@ void PluginConfig::load()
 	if (obs_data_has_user_value(data, "vmc_port")) {
 		vmcPort = static_cast<int>(obs_data_get_int(data, "vmc_port"));
 		if (vmcPort <= 0 || vmcPort > 65535)
-			vmcPort = 39539;
+			vmcPort = 39540;
 	}
 
 	// オーバーレイ外観設定（キーが存在する場合のみ上書き）
